@@ -37,6 +37,7 @@ services:
       VIEWPORT_HEIGHT: ${VIEWPORT_HEIGHT:-768}
       VIEWPORT_JITTER_PX: ${VIEWPORT_JITTER_PX:-20}
       BROWSER_CHANNEL: ${BROWSER_CHANNEL:-chrome}
+      CHROME_PROXY_SERVER: ${CHROME_PROXY_SERVER:-}
       BEFORE_TYPE_DELAY_MIN_MS: ${BEFORE_TYPE_DELAY_MIN_MS:-500}
       BEFORE_TYPE_DELAY_MAX_MS: ${BEFORE_TYPE_DELAY_MAX_MS:-1200}
       BEFORE_SEND_DELAY_MIN_MS: ${BEFORE_SEND_DELAY_MIN_MS:-300}
@@ -47,6 +48,8 @@ services:
     ports:
       - "${HOST_API_BIND:-127.0.0.1}:${HOST_API_PORT:-18000}:8000"
       - "${HOST_NOVNC_BIND:-127.0.0.1}:${HOST_NOVNC_PORT:-6080}:6080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ${HOST_BROWSER_DATA_DIR:-/var/lib/webdock/browser_data}:/app/browser_data
       - ${HOST_LOGS_DIR:-/var/log/webdock}:/app/logs

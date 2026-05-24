@@ -13,4 +13,9 @@ if [[ -f "${ENV_FILE}" ]]; then
 fi
 
 docker compose -p webdock --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" ps
-curl -fsS http://127.0.0.1:${HOST_API_PORT:-18000}/healthz
+HEALTH_HOST="${HOST_API_BIND:-127.0.0.1}"
+if [[ "${HEALTH_HOST}" == "0.0.0.0" || "${HEALTH_HOST}" == "::" ]]; then
+  HEALTH_HOST="127.0.0.1"
+fi
+
+curl -fsS "http://${HEALTH_HOST}:${HOST_API_PORT:-18000}/healthz"

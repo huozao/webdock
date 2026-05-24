@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import pytest
+import asyncio
 
 from src.browser.detector import assistant_message_count, wait_for_response_complete
 
@@ -33,20 +33,18 @@ class FakePage:
         return FakeLocator(self, selector)
 
 
-@pytest.mark.asyncio
-async def test_wait_for_response_does_not_return_existing_assistant_message():
+def test_wait_for_response_does_not_return_existing_assistant_message():
     page = FakePage(["old answer"])
 
-    answer = await wait_for_response_complete(page, timeout_seconds=1, stable_seconds=0, previous_count=1)
+    answer = asyncio.run(wait_for_response_complete(page, timeout_seconds=1, stable_seconds=0, previous_count=1))
 
     assert answer == ""
 
 
-@pytest.mark.asyncio
-async def test_wait_for_response_returns_new_assistant_message():
+def test_wait_for_response_returns_new_assistant_message():
     page = FakePage(["old answer", "new answer"])
 
-    assert await assistant_message_count(page) == 2
-    answer = await wait_for_response_complete(page, timeout_seconds=1, stable_seconds=0, previous_count=1)
+    assert asyncio.run(assistant_message_count(page)) == 2
+    answer = asyncio.run(wait_for_response_complete(page, timeout_seconds=1, stable_seconds=0, previous_count=1))
 
     assert answer == "new answer"

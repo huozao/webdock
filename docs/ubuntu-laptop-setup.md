@@ -52,6 +52,23 @@ curl -X POST http://127.0.0.1:18000/browser/attach \
   -H "Authorization: Bearer ${API_TOKEN}"
 ```
 
+## ECS Reverse Tunnel
+
+When ECS needs to call this laptop, keep the webdock API private and let the laptop connect back to ECS:
+
+```bash
+cd /opt/webdock
+sudo bash scripts/install-ecs-tunnel.sh
+sudo nano deploy/laptop/ecs-tunnel.env
+sudo systemctl enable --now webdock-ecs-tunnel
+```
+
+The default tunnel exposes the laptop API on ECS only at:
+
+```text
+http://127.0.0.1:11800/v1
+```
+
 ## Keep It Awake
 
 For Ubuntu Desktop:

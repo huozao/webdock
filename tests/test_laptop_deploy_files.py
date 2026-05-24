@@ -36,6 +36,18 @@ def test_scripts_target_laptop_compose_project():
         assert "-p webdock" in text
 
 
+def test_ecs_tunnel_files_keep_webdock_private():
+    env_example = (ROOT / "deploy/laptop/ecs-tunnel.env.example").read_text(encoding="utf-8")
+    service = (ROOT / "deploy/laptop/webdock-ecs-tunnel.service").read_text(encoding="utf-8")
+    install_script = (ROOT / "scripts/install-ecs-tunnel.sh").read_text(encoding="utf-8")
+
+    assert "ECS_REMOTE_BIND=127.0.0.1" in env_example
+    assert "ECS_REMOTE_PORT=11800" in env_example
+    assert "WEBDOCK_LOCAL_PORT=18000" in env_example
+    assert "-R ${ECS_REMOTE_BIND}:${ECS_REMOTE_PORT}:${WEBDOCK_LOCAL_BIND}:${WEBDOCK_LOCAL_PORT}" in service
+    assert "webdock-ecs-tunnel.service" in install_script
+
+
 def test_entrypoint_warns_about_vnc_password_truncation():
     entrypoint = (ROOT / "docker/entrypoint.sh").read_text(encoding="utf-8")
 

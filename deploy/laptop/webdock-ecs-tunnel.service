@@ -1,0 +1,15 @@
+[Unit]
+Description=WebDock reverse tunnel to ECS
+After=network-online.target docker.service webdock.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=webdock
+EnvironmentFile=/opt/webdock/deploy/laptop/ecs-tunnel.env
+ExecStart=/usr/bin/ssh -NT -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=yes -i ${ECS_SSH_KEY} -R ${ECS_REMOTE_BIND}:${ECS_REMOTE_PORT}:${WEBDOCK_LOCAL_BIND}:${WEBDOCK_LOCAL_PORT} ${ECS_SSH_USER}@${ECS_SSH_HOST}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

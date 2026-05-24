@@ -9,7 +9,11 @@ ENV DISPLAY_DEPTH=24
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN sed -i \
+    -e 's|http://archive.ubuntu.com/ubuntu|https://mirrors.aliyun.com/ubuntu|g' \
+    -e 's|http://security.ubuntu.com/ubuntu|https://mirrors.aliyun.com/ubuntu|g' \
+    /etc/apt/sources.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
     xvfb \
     x11vnc \
     novnc \

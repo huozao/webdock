@@ -42,19 +42,31 @@ async def latest_assistant_text(page: Any) -> str:
     return ""
 
 
+async def assistant_message_count(page: Any) -> int:
+    for selector in selectors.ASSISTANT_MESSAGE:
+        try:
+            return await page.locator(selector).count()
+        except Exception:
+            continue
+    return 0
+
+
 async def wait_for_response_complete(
     page: Any,
     *,
     timeout_seconds: int,
     stable_seconds: int,
+    previous_count: int = 0,
 ) -> str:
     start = time.monotonic()
     last_text = ""
     stable_for = 0
 
     while time.monotonic() - start < timeout_seconds:
+        current_count = await assistant_message_count(page)
         current = await latest_assistant_text(page)
         stop_visible = await any_selector_found(page, selectors.STOP_BUTTON)
+        has_new_assistant = current_count > previous_count
 
         if current and current == last_text:
             stable_for += 1
@@ -62,7 +74,7 @@ async def wait_for_response_complete(
             stable_for = 0
             last_text = current
 
-        if current and stable_for >= stable_seconds and not stop_visible:
+        if has_new_assistant and current and stable_for >= stable_seconds and not stop_visible:
             return current
 
         if int(time.monotonic() - start) > 0 and int(time.monotonic() - start) % 10 == 0:

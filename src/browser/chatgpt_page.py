@@ -5,7 +5,7 @@ from typing import Any
 
 from src.browser import selectors
 from src.browser.debug_dump import save_debug_dump
-from src.browser.detector import any_selector_found, find_first, latest_assistant_text, wait_for_response_complete
+from src.browser.detector import assistant_message_count, any_selector_found, find_first, wait_for_response_complete
 from src.browser.human import hover_and_click, paste_text, random_delay
 from src.config import get_settings
 from src.utils.errors import ErrorCode, RelayError
@@ -31,6 +31,7 @@ class ChatGPTPage:
                     ErrorCode.CHAT_INPUT_NOT_FOUND,
                     "Cannot find ChatGPT input box. Open noVNC to inspect the page.",
                 )
+            previous_assistant_count = await assistant_message_count(self.page)
 
             await random_delay(settings.before_type_delay_min_ms, settings.before_type_delay_max_ms)
             await paste_text(
@@ -54,6 +55,7 @@ class ChatGPTPage:
                 self.page,
                 timeout_seconds=settings.chat_timeout_seconds,
                 stable_seconds=settings.response_stable_seconds,
+                previous_count=previous_assistant_count,
             )
             if not answer:
                 raise RelayError(
@@ -61,11 +63,10 @@ class ChatGPTPage:
                     "ChatGPT response did not finish before timeout.",
                 )
 
-            final_text = (await latest_assistant_text(self.page)) or answer
-            if not final_text.strip():
+            if not answer.strip():
                 raise RelayError(ErrorCode.RESPONSE_EMPTY, "ChatGPT response is empty.")
 
-            return final_text.strip(), round(time.monotonic() - started, 3)
+            return answer.strip(), round(time.monotonic() - started, 3)
         except RelayError as exc:
             exc.debug_dir = await save_debug_dump(self.page, exc)
             raise

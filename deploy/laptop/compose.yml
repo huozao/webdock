@@ -1,0 +1,61 @@
+name: webdock
+
+services:
+  webdock:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ${WEBDOCK_IMAGE:-webdock:local}
+    container_name: webdock
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      APP_ENV: ${APP_ENV:-laptop}
+      API_HOST: 0.0.0.0
+      API_PORT: "8000"
+      API_TOKEN: ${API_TOKEN}
+      VNC_PASSWORD: ${VNC_PASSWORD}
+      NOVNC_PORT: "6080"
+      DISPLAY: ":99"
+      DISPLAY_WIDTH: ${DISPLAY_WIDTH:-1366}
+      DISPLAY_HEIGHT: ${DISPLAY_HEIGHT:-768}
+      DISPLAY_DEPTH: "24"
+      BROWSER_PROFILE_DIR: /app/browser_data
+      DEBUG_DIR: /app/logs/debug
+      BROWSER_MODE: ${BROWSER_MODE:-ecs_cdp}
+      CDP_URL: ${CDP_URL:-http://127.0.0.1:9222}
+      CDP_CONNECT_TIMEOUT_SECONDS: ${CDP_CONNECT_TIMEOUT_SECONDS:-60}
+      ATTACH_ON_START: ${ATTACH_ON_START:-false}
+      CHATGPT_URL: ${CHATGPT_URL:-https://chatgpt.com/}
+      CHAT_TIMEOUT_SECONDS: ${CHAT_TIMEOUT_SECONDS:-120}
+      RESPONSE_STABLE_SECONDS: ${RESPONSE_STABLE_SECONDS:-5}
+      ENABLE_STEALTH: ${ENABLE_STEALTH:-true}
+      SLOW_MO_MS: ${SLOW_MO_MS:-50}
+      VIEWPORT_WIDTH: ${VIEWPORT_WIDTH:-1366}
+      VIEWPORT_HEIGHT: ${VIEWPORT_HEIGHT:-768}
+      VIEWPORT_JITTER_PX: ${VIEWPORT_JITTER_PX:-20}
+      BROWSER_CHANNEL: ${BROWSER_CHANNEL:-chrome}
+      BEFORE_TYPE_DELAY_MIN_MS: ${BEFORE_TYPE_DELAY_MIN_MS:-500}
+      BEFORE_TYPE_DELAY_MAX_MS: ${BEFORE_TYPE_DELAY_MAX_MS:-1200}
+      BEFORE_SEND_DELAY_MIN_MS: ${BEFORE_SEND_DELAY_MIN_MS:-300}
+      BEFORE_SEND_DELAY_MAX_MS: ${BEFORE_SEND_DELAY_MAX_MS:-600}
+      TYPING_DELAY_MIN_MS: ${TYPING_DELAY_MIN_MS:-0}
+      TYPING_DELAY_MAX_MS: ${TYPING_DELAY_MAX_MS:-0}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "${HOST_API_BIND:-127.0.0.1}:${HOST_API_PORT:-18000}:8000"
+      - "${HOST_NOVNC_BIND:-127.0.0.1}:${HOST_NOVNC_PORT:-6080}:6080"
+    volumes:
+      - ${HOST_BROWSER_DATA_DIR:-/var/lib/webdock/browser_data}:/app/browser_data
+      - ${HOST_LOGS_DIR:-/var/log/webdock}:/app/logs
+    shm_size: "2gb"
+    security_opt:
+      - seccomp=unconfined
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3

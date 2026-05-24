@@ -1,0 +1,74 @@
+from __future__ import annotations
+
+import time
+from typing import Any
+
+from src.browser import selectors
+from src.browser.debug_dump import save_debug_dump
+from src.browser.detector import any_selector_found, find_first, latest_assistant_text, wait_for_response_complete
+from src.browser.human import hover_and_click, paste_text, random_delay
+from src.config import get_settings
+from src.utils.errors import ErrorCode, RelayError
+
+
+class ChatGPTPage:
+    def __init__(self, page: Any) -> None:
+        self.page = page
+
+    async def ask(self, message: str) -> tuple[str, float]:
+        settings = get_settings()
+        started = time.monotonic()
+        try:
+            if await any_selector_found(self.page, selectors.LOGIN_INDICATORS):
+                raise RelayError(
+                    ErrorCode.NOT_LOGGED_IN,
+                    "ChatGPT is not logged in. Open noVNC and sign in manually.",
+                )
+
+            input_selector = await find_first(self.page, selectors.CHAT_INPUT, visible=True, timeout_ms=2500)
+            if not input_selector:
+                raise RelayError(
+                    ErrorCode.CHAT_INPUT_NOT_FOUND,
+                    "Cannot find ChatGPT input box. Open noVNC to inspect the page.",
+                )
+
+            await random_delay(settings.before_type_delay_min_ms, settings.before_type_delay_max_ms)
+            await paste_text(
+                self.page,
+                input_selector,
+                message,
+                delay_min_ms=settings.typing_delay_min_ms,
+                delay_max_ms=settings.typing_delay_max_ms,
+            )
+
+            send_selector = await find_first(self.page, selectors.SEND_BUTTON, visible=True, timeout_ms=2500)
+            if not send_selector:
+                raise RelayError(
+                    ErrorCode.SEND_BUTTON_NOT_FOUND,
+                    "Cannot find ChatGPT send button. Open noVNC to inspect the page.",
+                )
+            await random_delay(settings.before_send_delay_min_ms, settings.before_send_delay_max_ms)
+            await hover_and_click(self.page, send_selector)
+
+            answer = await wait_for_response_complete(
+                self.page,
+                timeout_seconds=settings.chat_timeout_seconds,
+                stable_seconds=settings.response_stable_seconds,
+            )
+            if not answer:
+                raise RelayError(
+                    ErrorCode.RESPONSE_TIMEOUT,
+                    "ChatGPT response did not finish before timeout.",
+                )
+
+            final_text = (await latest_assistant_text(self.page)) or answer
+            if not final_text.strip():
+                raise RelayError(ErrorCode.RESPONSE_EMPTY, "ChatGPT response is empty.")
+
+            return final_text.strip(), round(time.monotonic() - started, 3)
+        except RelayError as exc:
+            exc.debug_dir = await save_debug_dump(self.page, exc)
+            raise
+        except Exception as exc:
+            debug_dir = await save_debug_dump(self.page, exc)
+            raise RelayError(ErrorCode.UNKNOWN_ERROR, str(exc), debug_dir=debug_dir) from exc

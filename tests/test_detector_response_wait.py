@@ -12,6 +12,8 @@ class FakeLocator:
         self.index = -1
 
     async def count(self) -> int:
+        if self.selector == "article:has([data-message-author-role='assistant'])":
+            return 0
         if "assistant" in self.selector:
             return len(self.page.assistant_texts)
         return 0

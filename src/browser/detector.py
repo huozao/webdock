@@ -45,7 +45,9 @@ async def latest_assistant_text(page: Any) -> str:
 async def assistant_message_count(page: Any) -> int:
     for selector in selectors.ASSISTANT_MESSAGE:
         try:
-            return await page.locator(selector).count()
+            count = await page.locator(selector).count()
+            if count > 0:
+                return count
         except Exception:
             continue
     return 0

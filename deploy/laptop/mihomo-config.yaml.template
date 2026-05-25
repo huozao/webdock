@@ -1,5 +1,6 @@
 mixed-port: ${MIHOMO_MIXED_PORT}
-allow-lan: false
+allow-lan: true
+bind-address: ${MIHOMO_BIND_ADDRESS}
 mode: rule
 log-level: warning
 ipv6: false

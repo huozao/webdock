@@ -56,7 +56,9 @@ def test_mihomo_proxy_files_use_local_secret_env():
 
     assert "deploy/laptop/mihomo.env" in gitignore
     assert "MIHOMO_SUBSCRIPTION_URL=" in env_example
+    assert "MIHOMO_BIND_ADDRESS=172.17.0.1" in env_example
     assert "token=" not in env_example
+    assert "bind-address: ${MIHOMO_BIND_ADDRESS}" in template
     assert "proxy-providers:" in template
     assert "backup-subscription" in template
     assert "type: fallback" in template

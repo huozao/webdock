@@ -69,6 +69,33 @@ The default tunnel exposes the laptop API on ECS only at:
 http://127.0.0.1:11800/v1
 ```
 
+## Proxy Failover
+
+For ChatGPT and GitHub stability, run a local Mihomo proxy on the laptop. The expected port is `7897`, and WebDock should use:
+
+```env
+CHROME_PROXY_SERVER=http://host.docker.internal:7897
+```
+
+Create the local proxy env file:
+
+```bash
+cd /opt/webdock
+sudo cp deploy/laptop/mihomo.env.example deploy/laptop/mihomo.env
+sudo chmod 600 deploy/laptop/mihomo.env
+sudo nano deploy/laptop/mihomo.env
+```
+
+Fill in the self-hosted ECS node values and the backup subscription URL. Then install or refresh the Mihomo service:
+
+```bash
+sudo bash scripts/install-mihomo-proxy.sh
+sudo systemctl status mihomo --no-pager
+curl -I -x http://127.0.0.1:7897 https://github.com
+```
+
+The generated config keeps the ECS node as primary and uses the subscription as fallback.
+
 ## Keep It Awake
 
 For Ubuntu Desktop:

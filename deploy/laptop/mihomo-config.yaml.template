@@ -1,0 +1,162 @@
+mixed-port: ${MIHOMO_MIXED_PORT}
+allow-lan: false
+mode: rule
+log-level: warning
+ipv6: false
+tcp-concurrent: true
+unified-delay: true
+find-process-mode: strict
+
+profile:
+  store-selected: true
+  store-fake-ip: true
+
+sniffer:
+  enable: true
+  sniff:
+    HTTP:
+      ports: [80, 8080-8880]
+      override-destination: true
+    TLS:
+      ports: [443, 8443]
+    QUIC:
+      ports: [443, 8443]
+
+dns:
+  enable: true
+  ipv6: false
+  respect-rules: true
+  prefer-h3: false
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  use-hosts: true
+  use-system-hosts: true
+  default-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+  nameserver:
+    - https://dns.alidns.com/dns-query
+    - https://doh.pub/dns-query
+  fallback:
+    - https://1.1.1.1/dns-query#节点选择
+    - https://dns.google/dns-query#节点选择
+  fake-ip-filter:
+    - "*.lan"
+    - "*.local"
+    - "localhost.ptlogin2.qq.com"
+    - "+.msftconnecttest.com"
+    - "+.msftncsi.com"
+  nameserver-policy:
+    "+.openai.com":
+      - https://1.1.1.1/dns-query#节点选择
+      - https://dns.google/dns-query#节点选择
+    "+.chatgpt.com":
+      - https://1.1.1.1/dns-query#节点选择
+      - https://dns.google/dns-query#节点选择
+    "+.oaistatic.com":
+      - https://1.1.1.1/dns-query#节点选择
+      - https://dns.google/dns-query#节点选择
+    "+.oaiusercontent.com":
+      - https://1.1.1.1/dns-query#节点选择
+      - https://dns.google/dns-query#节点选择
+    "+.github.com":
+      - https://1.1.1.1/dns-query#节点选择
+      - https://dns.google/dns-query#节点选择
+    "+.githubusercontent.com":
+      - https://1.1.1.1/dns-query#节点选择
+      - https://dns.google/dns-query#节点选择
+    "+.githubassets.com":
+      - https://1.1.1.1/dns-query#节点选择
+      - https://dns.google/dns-query#节点选择
+    "+.google.com":
+      - https://1.1.1.1/dns-query#节点选择
+      - https://dns.google/dns-query#节点选择
+    "+.googleapis.com":
+      - https://1.1.1.1/dns-query#节点选择
+      - https://dns.google/dns-query#节点选择
+    "+.gstatic.com":
+      - https://1.1.1.1/dns-query#节点选择
+      - https://dns.google/dns-query#节点选择
+  proxy-server-nameserver:
+    - https://dns.alidns.com/dns-query
+    - https://doh.pub/dns-query
+
+proxy-providers:
+  backup-subscription:
+    type: http
+    url: "${MIHOMO_SUBSCRIPTION_URL}"
+    interval: 3600
+    path: ${MIHOMO_CONFIG_DIR}/providers/backup-subscription.yaml
+    health-check:
+      enable: true
+      interval: 300
+      lazy: true
+      url: https://www.gstatic.com/generate_204
+
+proxies:
+  - name: "${MIHOMO_PRIMARY_NAME}"
+    type: vless
+    server: ${MIHOMO_PRIMARY_SERVER}
+    port: ${MIHOMO_PRIMARY_PORT}
+    uuid: ${MIHOMO_PRIMARY_UUID}
+    udp: true
+    tls: true
+    servername: ${MIHOMO_PRIMARY_SERVERNAME}
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: ${MIHOMO_PRIMARY_PUBLIC_KEY}
+      short-id: ${MIHOMO_PRIMARY_SHORT_ID}
+    flow: xtls-rprx-vision
+    packet-encoding: xudp
+    network: tcp
+
+proxy-groups:
+  - name: "节点选择"
+    type: fallback
+    proxies:
+      - "${MIHOMO_PRIMARY_NAME}"
+      - "备用自动"
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+    lazy: false
+
+  - name: "备用自动"
+    type: url-test
+    use:
+      - backup-subscription
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+    tolerance: 80
+    lazy: true
+
+rules:
+  - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
+  - IP-CIDR,${MIHOMO_PRIMARY_SERVER}/32,DIRECT,no-resolve
+  - DOMAIN-SUFFIX,aliyun.com,DIRECT
+  - DOMAIN-SUFFIX,alibabacloud.com,DIRECT
+  - DOMAIN-SUFFIX,alicdn.com,DIRECT
+  - DOMAIN-SUFFIX,openai.com,节点选择
+  - DOMAIN-SUFFIX,chatgpt.com,节点选择
+  - DOMAIN-SUFFIX,oaistatic.com,节点选择
+  - DOMAIN-SUFFIX,oaiusercontent.com,节点选择
+  - DOMAIN-SUFFIX,auth.openai.com,节点选择
+  - DOMAIN-SUFFIX,github.com,节点选择
+  - DOMAIN-SUFFIX,githubusercontent.com,节点选择
+  - DOMAIN-SUFFIX,githubassets.com,节点选择
+  - DOMAIN-SUFFIX,raw.githubusercontent.com,节点选择
+  - DOMAIN-SUFFIX,google.com,节点选择
+  - DOMAIN-SUFFIX,gstatic.com,节点选择
+  - DOMAIN-SUFFIX,googleapis.com,节点选择
+  - DOMAIN-SUFFIX,googleusercontent.com,节点选择
+  - DOMAIN-SUFFIX,accounts.google.com,节点选择
+  - DOMAIN-SUFFIX,accounts.youtube.com,节点选择
+  - DOMAIN-SUFFIX,youtube.com,节点选择
+  - DOMAIN-SUFFIX,googlevideo.com,节点选择
+  - GEOSITE,CN,DIRECT
+  - GEOIP,CN,DIRECT,no-resolve
+  - MATCH,节点选择

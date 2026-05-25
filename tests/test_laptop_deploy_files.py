@@ -48,6 +48,21 @@ def test_ecs_tunnel_files_keep_webdock_private():
     assert "webdock-ecs-tunnel.service" in install_script
 
 
+def test_mihomo_proxy_files_use_local_secret_env():
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+    env_example = (ROOT / "deploy/laptop/mihomo.env.example").read_text(encoding="utf-8")
+    template = (ROOT / "deploy/laptop/mihomo-config.yaml.template").read_text(encoding="utf-8")
+    install_script = (ROOT / "scripts/install-mihomo-proxy.sh").read_text(encoding="utf-8")
+
+    assert "deploy/laptop/mihomo.env" in gitignore
+    assert "MIHOMO_SUBSCRIPTION_URL=" in env_example
+    assert "token=" not in env_example
+    assert "proxy-providers:" in template
+    assert "backup-subscription" in template
+    assert "type: fallback" in template
+    assert "-t -d" in install_script
+
+
 def test_entrypoint_warns_about_vnc_password_truncation():
     entrypoint = (ROOT / "docker/entrypoint.sh").read_text(encoding="utf-8")
 

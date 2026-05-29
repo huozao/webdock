@@ -13,6 +13,7 @@ from typing import Any
 
 from src.browser import selectors
 from src.browser.detector import any_selector_found
+from src.browser.lane_scheduler import LaneContext
 from src.browser.stealth import apply_stealth_if_enabled
 from src.config import Settings
 from src.config import get_settings
@@ -26,6 +27,8 @@ class BrowserManager:
         self._browser: Any | None = None
         self._context: Any | None = None
         self._page: Any | None = None
+        self._lane_pages: dict[str, Any] = {}
+        self._lane_contexts: dict[str, LaneContext] = {}
         self.last_error: str | None = None
 
     @property
@@ -35,6 +38,20 @@ class BrowserManager:
     @property
     def page(self) -> Any | None:
         return self._page
+
+    async def page_for_lane(self, lane: LaneContext) -> Any:
+        if self._context is None:
+            return self._page
+
+        existing = self._lane_pages.get(lane.key)
+        if existing is not None and not _is_page_closed(existing):
+            return existing
+
+        page = self._page if not self._lane_pages and self._page is not None else await self._context.new_page()
+        await _navigate_lane_page(page, lane, get_settings())
+        self._lane_pages[lane.key] = page
+        self._lane_contexts[lane.key] = lane
+        return page
 
     async def start(self) -> None:
         if self.started:
@@ -116,6 +133,8 @@ class BrowserManager:
             self._context = None
             self._playwright = None
             self._page = None
+            self._lane_pages = {}
+            self._lane_contexts = {}
 
     async def detach(self) -> None:
         await self.stop()
@@ -127,6 +146,17 @@ class BrowserManager:
         chrome_version = chrome_info.get("Browser")
         cdp_attached = self.started
         page = self._page
+        lane_status = {
+            key: {
+                "wechat_account": lane.wechat_account,
+                "chat_type": lane.chat_type,
+                "peer_id": lane.peer_id,
+                "project": lane.project,
+                "target_url": lane.target_url,
+                "page_closed": _is_page_closed(self._lane_pages.get(key)),
+            }
+            for key, lane in sorted(self._lane_contexts.items())
+        }
         if page is None:
             return {
                 "ok": True,
@@ -141,6 +171,7 @@ class BrowserManager:
                 "cloudflare_challenge_detected": False,
                 "auth_error_detected": False,
                 "login_status": "not_attached" if chrome_running else "chrome_not_running",
+                "lanes": lane_status,
                 "last_error": self.last_error,
             }
 
@@ -167,6 +198,7 @@ class BrowserManager:
             "cloudflare_challenge_detected": cloudflare_challenge_detected,
             "auth_error_detected": auth_error_detected,
             "login_status": login_status,
+            "lanes": lane_status,
             "last_error": self.last_error,
         }
 
@@ -208,6 +240,30 @@ def should_navigate_to_chatgpt(current_url: str | None) -> bool:
     if not current_url or current_url == "about:blank":
         return True
     return "chatgpt.com" not in current_url
+
+
+async def _navigate_lane_page(page: Any, lane: LaneContext, settings: Settings) -> None:
+    target_url = lane.target_url or settings.chatgpt_url
+    if not target_url:
+        return
+    try:
+        current_url = page.url
+    except Exception:
+        current_url = None
+    if current_url == target_url:
+        return
+    if should_navigate_to_chatgpt(current_url) or lane.target_url:
+        await page.goto(target_url, wait_until="domcontentloaded")
+
+
+def _is_page_closed(page: Any | None) -> bool:
+    if page is None:
+        return True
+    try:
+        is_closed = page.is_closed
+        return bool(is_closed() if callable(is_closed) else is_closed)
+    except Exception:
+        return False
 
 
 def detect_cloudflare_challenge(url: str | None, title: str | None) -> bool:

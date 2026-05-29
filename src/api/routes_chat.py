@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 from typing import Any
@@ -8,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from src.browser.chatgpt_page import ChatGPTPage
+from src.browser.lane_scheduler import LaneContext
 from src.models.request_models import ChatRequest, OpenAIChatCompletionRequest
 from src.models.response_models import build_openai_models_response, build_openai_response, build_openai_sse_events
 from src.utils.errors import ErrorCode, RelayError, error_response
@@ -23,7 +22,7 @@ _OPENCLAW_METADATA_RE = re.compile(
 
 @router.post("/chat")
 async def chat(request: Request, body: ChatRequest) -> JSONResponse:
-    result = await _ask_browser(request, body.message)
+    result = await _ask_browser(request, body.message, LaneContext.from_metadata(None))
     if isinstance(result, JSONResponse):
         return result
     answer, duration = result
@@ -55,7 +54,7 @@ async def openai_chat_completions(
             detail=error_response(ErrorCode.RESPONSE_EMPTY, "No text user message found in messages."),
         )
 
-    result = await _ask_browser(request, prompt)
+    result = await _ask_browser(request, prompt, LaneContext.from_metadata(body.metadata))
     if isinstance(result, JSONResponse):
         raise HTTPException(status_code=result.status_code, detail=json.loads(result.body))
 
@@ -121,29 +120,22 @@ def _content_to_text(content: Any) -> str:
     return str(content).strip()
 
 
-async def _ask_browser(request: Request, message: str) -> tuple[str, float] | JSONResponse:
+async def _ask_browser(request: Request, message: str, lane: LaneContext) -> tuple[str, float] | JSONResponse:
     browser = request.app.state.browser
     attach_error = await _ensure_browser_ready(browser)
     if attach_error:
         return attach_error
 
-    lock: asyncio.Lock = request.app.state.chat_lock
-    if lock.locked():
+    scheduler = request.app.state.chat_scheduler
+    try:
+        return await scheduler.ask(browser, lane, message)
+    except RelayError as exc:
+        browser.last_error = f"{exc.code.value}: {exc.message}"
+        status_code = _status_code_for_error(exc.code)
         return JSONResponse(
-            status_code=429,
-            content=error_response(ErrorCode.BUSY, "Browser is processing another request."),
+            status_code=status_code,
+            content=error_response(exc.code, exc.message, exc.debug_dir),
         )
-
-    async with lock:
-        try:
-            return await ChatGPTPage(browser.page).ask(message)
-        except RelayError as exc:
-            browser.last_error = f"{exc.code.value}: {exc.message}"
-            status_code = _status_code_for_error(exc.code)
-            return JSONResponse(
-                status_code=status_code,
-                content=error_response(exc.code, exc.message, exc.debug_dir),
-            )
 
 
 async def _ensure_browser_ready(browser: Any) -> JSONResponse | None:

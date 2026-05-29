@@ -36,6 +36,7 @@ class Settings:
     cdp_url: str = "http://127.0.0.1:9222"
     cdp_connect_timeout_seconds: int = 60
     attach_on_start: bool = False
+    max_concurrent_chats: int = 3
 
     def ensure_dirs(self) -> None:
         self.browser_profile_dir.mkdir(parents=True, exist_ok=True)
@@ -74,6 +75,7 @@ def get_settings() -> Settings:
         cdp_url=_get("CDP_URL", "http://127.0.0.1:9222", env),
         cdp_connect_timeout_seconds=int(_get("CDP_CONNECT_TIMEOUT_SECONDS", "60", env)),
         attach_on_start=_get("ATTACH_ON_START", "false", env).lower() == "true",
+        max_concurrent_chats=int(_get("MAX_CONCURRENT_CHATS", "3", env)),
     )
     settings.ensure_dirs()
     return settings

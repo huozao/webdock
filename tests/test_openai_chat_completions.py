@@ -13,6 +13,7 @@ class FakeBrowser:
         self.start_calls = 0
         self.last_error = None
         self._start_fails = start_fails
+        self.lane_keys: list[str] = []
 
     async def start(self) -> None:
         self.start_calls += 1
@@ -25,15 +26,23 @@ class FakeBrowser:
         self.started = False
         self.page = None
 
+    async def page_for_lane(self, lane):
+        self.lane_keys.append(lane.key)
+        return f"page:{lane.key}"
+
 
 async def fake_ask(self, message: str) -> tuple[str, float]:
     return f"answer for: {message}", 0.1
 
 
-def make_client(monkeypatch, *, browser: FakeBrowser | None = None) -> tuple[TestClient, FakeBrowser]:
-    from src.api import routes_chat
+async def fake_ask_with_page(self, message: str) -> tuple[str, float]:
+    return f"answer from {self.page}: {message}", 0.1
 
-    monkeypatch.setattr(routes_chat.ChatGPTPage, "ask", fake_ask)
+
+def make_client(monkeypatch, *, browser: FakeBrowser | None = None) -> tuple[TestClient, FakeBrowser]:
+    from src.browser import lane_scheduler
+
+    monkeypatch.setattr(lane_scheduler.ChatGPTPage, "ask", fake_ask)
     app = create_app(start_browser=False)
     fake_browser = browser or FakeBrowser()
     app.state.browser = fake_browser
@@ -175,3 +184,34 @@ def test_openai_chat_completion_auto_attach_once_then_reports_clear_error(monkey
     assert response.status_code == 503
     assert response.json()["detail"]["error_code"] == "BROWSER_NOT_STARTED"
     assert "CDP attach failed" in response.json()["detail"]["message"]
+
+
+def test_openai_chat_completion_routes_metadata_to_wechat_lane(monkeypatch):
+    from src.browser import lane_scheduler
+
+    monkeypatch.setattr(lane_scheduler.ChatGPTPage, "ask", fake_ask_with_page)
+    app = create_app(start_browser=False)
+    fake_browser = FakeBrowser()
+    app.state.browser = fake_browser
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer change-me"},
+        json={
+            "model": "browser-chatgpt",
+            "messages": [{"role": "user", "content": "hello A"}],
+            "metadata": {
+                "wechat_account": "A",
+                "chat_type": "private",
+                "peer_id": "user-1",
+                "chatgpt_project": "WeChat-A",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert fake_browser.lane_keys == ["wechat:A:private:user-1"]
+    assert response.json()["choices"][0]["message"]["content"] == (
+        "answer from page:wechat:A:private:user-1: hello A"
+    )

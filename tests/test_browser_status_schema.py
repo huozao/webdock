@@ -23,6 +23,7 @@ def test_browser_status_schema_when_browser_not_started():
         "cloudflare_challenge_detected",
         "auth_error_detected",
         "login_status",
+        "lanes",
         "last_error",
     }
     assert data["ok"] is True

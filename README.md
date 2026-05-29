@@ -8,6 +8,7 @@ The first service is a ChatGPT browser relay:
 - noVNC lets you manually log in to ChatGPT.
 - FastAPI attaches to the same browser through local CDP.
 - `/v1/chat/completions` exposes a minimal OpenAI-compatible text API for OpenClaw.
+- Requests can be routed into stable `wechat_account + chat_type + peer_id` lanes so test WeChat accounts A/B/C can keep separate ChatGPT pages while sharing one logged-in ChatGPT profile.
 
 ## Recommended Topology
 
@@ -57,3 +58,18 @@ curl -s http://127.0.0.1:18000/v1/chat/completions \
 - `docs/tailscale-network.md`
 - `docs/openclaw-integration.md`
 - `docs/operations.md`
+
+## Chat lanes
+
+WebDock accepts optional OpenAI-compatible request metadata:
+
+```json
+{
+  "wechat_account": "A",
+  "chat_type": "private",
+  "peer_id": "user-1",
+  "chatgpt_project": "WeChat-A"
+}
+```
+
+Each lane is serialized internally, while different lanes may run concurrently up to `MAX_CONCURRENT_CHATS` in `deploy/laptop/.env`.

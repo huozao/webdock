@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -10,6 +9,7 @@ from fastapi.responses import JSONResponse
 from src.api.routes_browser import router as browser_router
 from src.api.routes_chat import router as chat_router
 from src.api.routes_health import router as health_router
+from src.browser.lane_scheduler import ChatLaneScheduler
 from src.browser.manager import BrowserManager
 from src.config import get_settings
 from src.utils.errors import ErrorCode, error_response
@@ -23,7 +23,7 @@ def create_app(*, start_browser: bool = True) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.browser = BrowserManager()
-        app.state.chat_lock = asyncio.Lock()
+        app.state.chat_scheduler = ChatLaneScheduler(max_concurrent_chats=settings.max_concurrent_chats)
         if start_browser and settings.attach_on_start:
             try:
                 await app.state.browser.start()
@@ -34,7 +34,7 @@ def create_app(*, start_browser: bool = True) -> FastAPI:
 
     app = FastAPI(title="webdock", version="0.1.0", lifespan=lifespan)
     app.state.browser = BrowserManager()
-    app.state.chat_lock = asyncio.Lock()
+    app.state.chat_scheduler = ChatLaneScheduler(max_concurrent_chats=settings.max_concurrent_chats)
 
     @app.middleware("http")
     async def bearer_token_auth(request: Request, call_next):

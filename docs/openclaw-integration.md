@@ -33,6 +33,24 @@ Minimal request:
 }
 ```
 
+To keep test WeChat accounts A/B/C separate while sharing one ChatGPT login, pass metadata with each request:
+
+```json
+{
+  "model": "browser-chatgpt",
+  "messages": [{"role": "user", "content": "用户微信消息"}],
+  "metadata": {
+    "wechat_account": "A",
+    "chat_type": "private",
+    "peer_id": "user-1",
+    "chatgpt_project": "WeChat-A"
+  },
+  "stream": false
+}
+```
+
+WebDock maps this to a lane key like `wechat:A:private:user-1`. Messages in one lane are serialized. Different lanes can run concurrently up to `MAX_CONCURRENT_CHATS`.
+
 If webdock is offline, timed out, busy, or not logged in, the ECS bridge should return a short fallback message instead of blocking OpenClaw.
 
 ## Laptop Reverse Tunnel

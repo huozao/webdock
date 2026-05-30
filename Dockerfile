@@ -27,7 +27,15 @@ RUN sed -i \
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-RUN ln -sf "$(find /ms-playwright -path '*/chrome-linux/chrome' -type f | head -n 1)" /usr/bin/webdock-chrome
+# Use real Google Chrome instead of bundled Chromium (lower Cloudflare bot signal),
+# then point webdock-chrome at it. apt on jammy accepts an ASCII-armored signed-by key,
+# so no gnupg is required.
+RUN curl -fsSL https://dl.google.com/linux/linux_signing_key.pub -o /usr/share/keyrings/google-chrome.asc \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.asc] https://dl.google.com/linux/chrome/deb/ stable main" \
+       > /etc/apt/sources.list.d/google-chrome.list \
+    && apt-get update && apt-get install -y --no-install-recommends google-chrome-stable \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/google-chrome-stable /usr/bin/webdock-chrome
 
 COPY src/ src/
 COPY scripts/ scripts/

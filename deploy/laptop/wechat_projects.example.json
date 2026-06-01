@@ -1,0 +1,25 @@
+{
+  "__doc__": [
+    "Maps each WeChat account's peer_id to its ChatGPT project home URL.",
+    "Copy this file to the persistent volume as browser_data/wechat_projects.json",
+    "and fill in the real peer_id keys and project_url values. Do NOT commit the",
+    "filled-in file (it contains private peer ids and project links).",
+    "",
+    "- peer_id: the lane key webdock receives (see browser-status 'lanes').",
+    "- name: human label, used only in logs.",
+    "- project_url: the project HOME url, ending with /project. webdock navigates",
+    "  here on the first message (creating a conversation) and remembers the",
+    "  resulting /c/<id> in lane_state.json so later messages resume it.",
+    "Send '/新对话' from WeChat to start a fresh conversation inside the project."
+  ],
+  "lanes": {
+    "<peer_id_of_account_A>": {
+      "name": "WeChat-A",
+      "project_url": "https://chatgpt.com/g/g-p-XXXXXXXXXXXX-weixin-a/project"
+    },
+    "<peer_id_of_account_B>": {
+      "name": "WeChat-B",
+      "project_url": "https://chatgpt.com/g/g-p-XXXXXXXXXXXX-weixin-b/project"
+    }
+  }
+}

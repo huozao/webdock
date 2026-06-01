@@ -58,7 +58,7 @@ class BrowserManager:
             return
         settings = get_settings()
         settings.ensure_dirs()
-        from playwright.async_api import async_playwright
+        from patchright.async_api import async_playwright
 
         self._playwright = await async_playwright().start()
 
@@ -275,6 +275,8 @@ def detect_cloudflare_challenge(url: str | None, title: str | None) -> bool:
             "challenge-platform",
             "cloudflare",
             "verify you are human",
+            "请稍候",
+            "正在验证",
         )
     )
 

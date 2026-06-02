@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 
@@ -78,7 +79,7 @@ def get_settings() -> Settings:
         max_concurrent_chats=int(_get("MAX_CONCURRENT_CHATS", "3", env)),
     )
     settings.ensure_dirs()
-    return settings
+    return _apply_runtime_overrides(settings)
 
 
 def _get(name: str, default: str, env_file_values: dict[str, str]) -> str:
@@ -106,3 +107,30 @@ def _path_from_env(value: str) -> Path:
         if normalized == "/app/logs/debug":
             return Path("logs/debug")
     return Path(value)
+
+
+# Runtime overrides: tune a few hot values (chat timeout) WITHOUT recreating the
+# container. Edit browser_data/runtime.json and restart only the api process —
+# this avoids restarting Chrome, which would break the warmed-up ChatGPT login
+# session (project red line). Missing/corrupt file degrades to env/defaults.
+_RUNTIME_OVERRIDE_INT_FIELDS = ("chat_timeout_seconds", "response_stable_seconds")
+
+
+def _apply_runtime_overrides(settings: Settings) -> Settings:
+    path = settings.browser_profile_dir / "runtime.json"
+    try:
+        if not path.exists():
+            return settings
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return settings
+    if not isinstance(data, dict):
+        return settings
+    overrides: dict[str, int] = {}
+    for field in _RUNTIME_OVERRIDE_INT_FIELDS:
+        if field in data:
+            try:
+                overrides[field] = int(data[field])
+            except (TypeError, ValueError):
+                continue
+    return replace(settings, **overrides) if overrides else settings

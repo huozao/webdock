@@ -66,7 +66,12 @@ class ChatGPTPage:
             if not answer.strip():
                 raise RelayError(ErrorCode.RESPONSE_EMPTY, "ChatGPT response is empty.")
 
-            return answer.strip(), round(time.monotonic() - started, 3)
+            final_answer = answer.strip()
+            if settings.test_media_url:
+                # Stage-2 link check: append a MEDIA token so OpenClaw forwards an
+                # image to WeChat. Controlled by browser_data/runtime.json.
+                final_answer = f"{final_answer}\nMEDIA: {settings.test_media_url}".strip()
+            return final_answer, round(time.monotonic() - started, 3)
         except RelayError as exc:
             exc.debug_dir = await save_debug_dump(self.page, exc)
             raise

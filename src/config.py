@@ -38,6 +38,7 @@ class Settings:
     cdp_connect_timeout_seconds: int = 60
     attach_on_start: bool = False
     max_concurrent_chats: int = 3
+    test_media_url: str = ""
 
     def ensure_dirs(self) -> None:
         self.browser_profile_dir.mkdir(parents=True, exist_ok=True)
@@ -114,6 +115,7 @@ def _path_from_env(value: str) -> Path:
 # this avoids restarting Chrome, which would break the warmed-up ChatGPT login
 # session (project red line). Missing/corrupt file degrades to env/defaults.
 _RUNTIME_OVERRIDE_INT_FIELDS = ("chat_timeout_seconds", "response_stable_seconds")
+_RUNTIME_OVERRIDE_STR_FIELDS = ("test_media_url",)
 
 
 def _apply_runtime_overrides(settings: Settings) -> Settings:
@@ -126,11 +128,15 @@ def _apply_runtime_overrides(settings: Settings) -> Settings:
         return settings
     if not isinstance(data, dict):
         return settings
-    overrides: dict[str, int] = {}
+    overrides: dict[str, object] = {}
     for field in _RUNTIME_OVERRIDE_INT_FIELDS:
         if field in data:
             try:
                 overrides[field] = int(data[field])
             except (TypeError, ValueError):
                 continue
+    for field in _RUNTIME_OVERRIDE_STR_FIELDS:
+        value = data.get(field)
+        if isinstance(value, str):
+            overrides[field] = value
     return replace(settings, **overrides) if overrides else settings

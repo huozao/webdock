@@ -9,8 +9,10 @@ from fastapi.responses import JSONResponse
 from src.api.routes_browser import router as browser_router
 from src.api.routes_chat import router as chat_router
 from src.api.routes_health import router as health_router
+from src.api.routes_media import router as media_router
 from src.browser.lane_scheduler import ChatLaneScheduler
 from src.browser.manager import BrowserManager
+from src.browser.media_store import MediaStore
 from src.config import get_settings
 from src.utils.errors import ErrorCode, error_response
 from src.utils.logging import setup_logging
@@ -22,8 +24,12 @@ def create_app(*, start_browser: bool = True) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        app.state.media_store = MediaStore()
         app.state.browser = BrowserManager()
-        app.state.chat_scheduler = ChatLaneScheduler(max_concurrent_chats=settings.max_concurrent_chats)
+        app.state.chat_scheduler = ChatLaneScheduler(
+            max_concurrent_chats=settings.max_concurrent_chats,
+            media_store=app.state.media_store,
+        )
         if start_browser and settings.attach_on_start:
             try:
                 await app.state.browser.start()
@@ -33,12 +39,16 @@ def create_app(*, start_browser: bool = True) -> FastAPI:
         await app.state.browser.stop()
 
     app = FastAPI(title="webdock", version="0.1.0", lifespan=lifespan)
+    app.state.media_store = MediaStore()
     app.state.browser = BrowserManager()
-    app.state.chat_scheduler = ChatLaneScheduler(max_concurrent_chats=settings.max_concurrent_chats)
+    app.state.chat_scheduler = ChatLaneScheduler(
+        max_concurrent_chats=settings.max_concurrent_chats,
+        media_store=app.state.media_store,
+    )
 
     @app.middleware("http")
     async def bearer_token_auth(request: Request, call_next):
-        if request.url.path in {"/healthz", "/docs", "/redoc", "/openapi.json"}:
+        if request.url.path in {"/healthz", "/docs", "/redoc", "/openapi.json"} or request.url.path.startswith("/media/"):
             return await call_next(request)
         if not settings.api_token:
             return await call_next(request)
@@ -58,6 +68,7 @@ def create_app(*, start_browser: bool = True) -> FastAPI:
     app.include_router(health_router)
     app.include_router(browser_router)
     app.include_router(chat_router)
+    app.include_router(media_router)
     return app
 
 

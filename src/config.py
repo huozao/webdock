@@ -39,6 +39,7 @@ class Settings:
     attach_on_start: bool = False
     max_concurrent_chats: int = 3
     test_media_url: str = ""
+    media_base_url: str = ""
 
     def ensure_dirs(self) -> None:
         self.browser_profile_dir.mkdir(parents=True, exist_ok=True)
@@ -78,6 +79,7 @@ def get_settings() -> Settings:
         cdp_connect_timeout_seconds=int(_get("CDP_CONNECT_TIMEOUT_SECONDS", "60", env)),
         attach_on_start=_get("ATTACH_ON_START", "false", env).lower() == "true",
         max_concurrent_chats=int(_get("MAX_CONCURRENT_CHATS", "3", env)),
+        media_base_url=_get("MEDIA_BASE_URL", "", env),
     )
     settings.ensure_dirs()
     return _apply_runtime_overrides(settings)
@@ -115,7 +117,7 @@ def _path_from_env(value: str) -> Path:
 # this avoids restarting Chrome, which would break the warmed-up ChatGPT login
 # session (project red line). Missing/corrupt file degrades to env/defaults.
 _RUNTIME_OVERRIDE_INT_FIELDS = ("chat_timeout_seconds", "response_stable_seconds")
-_RUNTIME_OVERRIDE_STR_FIELDS = ("test_media_url",)
+_RUNTIME_OVERRIDE_STR_FIELDS = ("test_media_url", "media_base_url")
 
 
 def _apply_runtime_overrides(settings: Settings) -> Settings:

@@ -63,13 +63,18 @@ class ChatLaneScheduler:
         max_concurrent_chats: int,
         ask_func: AskFunc | None = None,
         router: LaneRouter | None = None,
+        media_store: Any | None = None,
     ) -> None:
         self.max_concurrent_chats = max(1, max_concurrent_chats)
         self._account_semaphore = asyncio.Semaphore(self.max_concurrent_chats)
         self._lane_locks: dict[str, asyncio.Lock] = {}
         self._lane_locks_guard = asyncio.Lock()
-        self._ask_func = ask_func or _ask_chatgpt_page
+        self._media_store = media_store
+        self._ask_func = ask_func or self._default_ask
         self._router = router or LaneRouter()
+
+    async def _default_ask(self, page: object, message: str) -> tuple[str, float]:
+        return await ChatGPTPage(page, media_store=self._media_store).ask(message)
 
     async def ask(self, browser: Any, lane: LaneContext, message: str) -> tuple[str, float]:
         force_new, clean_message = parse_new_conversation_trigger(message)

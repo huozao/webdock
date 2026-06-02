@@ -51,6 +51,11 @@ _RICH_TEXT_JS = r"""
       const tag = child.tagName;
       if (SKIP.has(tag)) continue;
       if (child.getAttribute && child.getAttribute("role") === "button") continue;
+      // Skip ChatGPT widget containers (clock/weather/etc) - they are captured
+      // as screenshots separately; their text is noise (e.g. clock dial digits).
+      const cls = typeof child.className === "string" ? child.className : "";
+      if (cls.indexOf("WidgetRenderer") >= 0 || cls.indexOf("not-markdown") >= 0) continue;
+      if (child.getAttribute && child.getAttribute("data-w-component")) continue;
       if (tag === "TABLE") { out += "\n" + tableToText(child) + "\n"; continue; }
       if (tag === "BR") { out += "\n"; continue; }
       if (tag === "LI") { out += "\n• " + walk(child).trim(); continue; }

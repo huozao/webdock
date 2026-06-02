@@ -10,10 +10,17 @@ from src.browser.human import hover_and_click, paste_text, random_delay
 from src.config import get_settings
 from src.utils.errors import ErrorCode, RelayError
 
+# ChatGPT renders rich widgets (clock / weather / stock cards) in a container
+# whose class contains "WidgetRenderer" (and is marked not-markdown). Their text
+# is noise, so we screenshot them and send as images instead.
+WIDGET_SELECTOR = "[class*='WidgetRenderer']"
+MAX_WIDGETS_PER_REPLY = 4
+
 
 class ChatGPTPage:
-    def __init__(self, page: Any) -> None:
+    def __init__(self, page: Any, media_store: Any | None = None) -> None:
         self.page = page
+        self._media_store = media_store
 
     async def ask(self, message: str) -> tuple[str, float]:
         settings = get_settings()
@@ -67,9 +74,9 @@ class ChatGPTPage:
                 raise RelayError(ErrorCode.RESPONSE_EMPTY, "ChatGPT response is empty.")
 
             final_answer = answer.strip()
+            final_answer = await self._append_widget_images(final_answer, settings.media_base_url)
             if settings.test_media_url:
-                # Stage-2 link check: append a MEDIA token so OpenClaw forwards an
-                # image to WeChat. Controlled by browser_data/runtime.json.
+                # Manual link-check switch (browser_data/runtime.json).
                 final_answer = f"{final_answer}\nMEDIA: {settings.test_media_url}".strip()
             return final_answer, round(time.monotonic() - started, 3)
         except RelayError as exc:
@@ -78,3 +85,35 @@ class ChatGPTPage:
         except Exception as exc:
             debug_dir = await save_debug_dump(self.page, exc)
             raise RelayError(ErrorCode.UNKNOWN_ERROR, str(exc), debug_dir=debug_dir) from exc
+
+    async def _append_widget_images(self, answer: str, media_base_url: str) -> str:
+        """Screenshot any ChatGPT widgets in the latest reply, store them, and
+        append 'MEDIA: <url>' tokens so OpenClaw forwards them to WeChat as
+        images. No-op without a media store / base url (so it stays off until
+        configured)."""
+        base = (media_base_url or "").rstrip("/")
+        if self._media_store is None or not base:
+            return answer
+        result = answer
+        for token in await self._capture_widget_tokens():
+            result = f"{result}\nMEDIA: {base}/media/{token}".strip()
+        return result
+
+    async def _capture_widget_tokens(self) -> list[str]:
+        tokens: list[str] = []
+        try:
+            assistant = self.page.locator(selectors.ASSISTANT_MESSAGE[-1]).last
+            widgets = assistant.locator(WIDGET_SELECTOR)
+            count = await widgets.count()
+        except Exception:
+            return tokens
+        for index in range(min(count, MAX_WIDGETS_PER_REPLY)):
+            try:
+                png = await widgets.nth(index).screenshot(timeout=5000)
+            except Exception:
+                continue
+            try:
+                tokens.append(self._media_store.put(png, "image/png"))
+            except Exception:
+                continue
+        return tokens

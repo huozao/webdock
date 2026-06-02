@@ -111,17 +111,39 @@ class ChatGPTPage:
         for index in range(min(count, MAX_WIDGETS_PER_REPLY)):
             widget = widgets.nth(index)
             await _wait_widget_rendered(widget)
-            try:
-                # animations="disabled" so a widget's moving parts (e.g. a clock's
-                # second hand) don't keep the element "unstable" and time out the shot.
-                png = await widget.screenshot(timeout=8000, animations="disabled")
-            except Exception:
+            png = await _screenshot_widget(self.page, widget)
+            if png is None:
                 continue
             try:
                 tokens.append(self._media_store.put(png, "image/png"))
             except Exception:
                 continue
         return tokens
+
+
+async def _screenshot_widget(page: Any, widget: Any) -> bytes | None:
+    """Screenshot a widget via a page-level clip of its bounding box. Unlike
+    Locator.screenshot this does NOT wait for the element to be 'stable', so a
+    widget's JS-driven animation (e.g. a clock's second hand) can't make it time
+    out — we capture the current frame."""
+    try:
+        await widget.scroll_into_view_if_needed(timeout=3000)
+    except Exception:
+        pass
+    try:
+        box = await widget.bounding_box()
+    except Exception:
+        box = None
+    if not box or box.get("width", 0) < 1 or box.get("height", 0) < 1:
+        return None
+    try:
+        return await page.screenshot(
+            clip={"x": box["x"], "y": box["y"], "width": box["width"], "height": box["height"]},
+            animations="disabled",
+            timeout=8000,
+        )
+    except Exception:
+        return None
 
 
 async def _wait_widget_rendered(widget: Any, timeout_seconds: float = 8.0) -> None:

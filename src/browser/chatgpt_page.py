@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -108,8 +109,10 @@ class ChatGPTPage:
         except Exception:
             return tokens
         for index in range(min(count, MAX_WIDGETS_PER_REPLY)):
+            widget = widgets.nth(index)
+            await _wait_widget_rendered(widget)
             try:
-                png = await widgets.nth(index).screenshot(timeout=5000)
+                png = await widget.screenshot(timeout=5000)
             except Exception:
                 continue
             try:
@@ -117,3 +120,24 @@ class ChatGPTPage:
             except Exception:
                 continue
         return tokens
+
+
+async def _wait_widget_rendered(widget: Any, timeout_seconds: float = 8.0) -> None:
+    """Wait until a widget actually renders before screenshotting (otherwise we
+    capture a blank container). Polls inner_text until it's non-empty and stable."""
+    last: str | None = None
+    stable = 0
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            text = (await widget.inner_text(timeout=2000)).strip()
+        except Exception:
+            text = ""
+        if text and text == last:
+            stable += 1
+            if stable >= 2:
+                return
+        else:
+            stable = 0
+            last = text
+        await asyncio.sleep(0.5)

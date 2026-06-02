@@ -28,10 +28,19 @@ COPY_BUTTON = [
     "button[aria-label*='复制']",
 ]
 
+# Only the real "stop generating" button. The previous broad aria-label*='Stop'
+# / '停止' matched unrelated buttons that appear AFTER generation finishes (e.g.
+# "停止朗读" / read-aloud), which made the completion check hang until timeout.
 STOP_BUTTON = [
     "button[data-testid='stop-button']",
-    "button[aria-label*='Stop']",
-    "button[aria-label*='停止']",
+]
+
+# Present only while a reply is actively streaming. Primary "still generating"
+# signal (more reliable than the stop button).
+STREAMING_INDICATOR = [
+    "[data-message-author-role='assistant'] .result-streaming",
+    ".result-streaming",
+    "[data-message-author-role='assistant'].result-streaming",
 ]
 
 LOGIN_INDICATORS = [
@@ -48,5 +57,6 @@ SELECTOR_GROUPS = {
     "ASSISTANT_MESSAGE": ASSISTANT_MESSAGE,
     "COPY_BUTTON": COPY_BUTTON,
     "STOP_BUTTON": STOP_BUTTON,
+    "STREAMING_INDICATOR": STREAMING_INDICATOR,
     "LOGIN_INDICATORS": LOGIN_INDICATORS,
 }

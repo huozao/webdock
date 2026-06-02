@@ -47,11 +47,42 @@ class BrowserManager:
         if existing is not None and not _is_page_closed(existing):
             return existing
 
+        adopted = await self._adopt_matching_page(lane)
+        if adopted is not None:
+            self._lane_pages[lane.key] = adopted
+            self._lane_contexts[lane.key] = lane
+            return adopted
+
         page = self._page if not self._lane_pages and self._page is not None else await self._context.new_page()
         await _navigate_lane_page(page, lane, get_settings())
         self._lane_pages[lane.key] = page
         self._lane_contexts[lane.key] = lane
         return page
+
+    async def _adopt_matching_page(self, lane: LaneContext) -> Any | None:
+        """Reuse an already-open tab for this lane's conversation (and close any
+        duplicates of it). Prevents tab pile-up after an api restart clears the
+        in-memory lane->page map. Only de-dupes concrete conversations (/c/<id>),
+        not the project home."""
+        conv_id = _conversation_id(lane.target_url)
+        if conv_id is None or self._context is None:
+            return None
+        matches = []
+        for page in self._context.pages:
+            try:
+                if not _is_page_closed(page) and _conversation_id(page.url) == conv_id:
+                    matches.append(page)
+            except Exception:
+                continue
+        if not matches:
+            return None
+        keep = matches[0]
+        for extra in matches[1:]:
+            try:
+                await extra.close()
+            except Exception:
+                pass
+        return keep
 
     async def start(self) -> None:
         if self.started:
@@ -254,6 +285,13 @@ async def _navigate_lane_page(page: Any, lane: LaneContext, settings: Settings) 
         return
     if should_navigate_to_chatgpt(current_url) or lane.target_url:
         await page.goto(target_url, wait_until="domcontentloaded")
+
+
+def _conversation_id(url: str | None) -> str | None:
+    if not url or "/c/" not in url:
+        return None
+    tail = url.split("/c/", 1)[1]
+    return tail.split("?")[0].split("#")[0].split("/")[0] or None
 
 
 def _is_page_closed(page: Any | None) -> bool:

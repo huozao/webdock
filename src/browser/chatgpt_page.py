@@ -103,7 +103,7 @@ class ChatGPTPage:
     async def _capture_widget_tokens(self) -> list[str]:
         tokens: list[str] = []
         try:
-            assistant = self.page.locator(selectors.ASSISTANT_MESSAGE[-1]).last
+            assistant = self.page.locator("[data-message-author-role='assistant']").last
             widgets = assistant.locator(WIDGET_SELECTOR)
             count = await widgets.count()
         except Exception:
@@ -112,7 +112,9 @@ class ChatGPTPage:
             widget = widgets.nth(index)
             await _wait_widget_rendered(widget)
             try:
-                png = await widget.screenshot(timeout=5000)
+                # animations="disabled" so a widget's moving parts (e.g. a clock's
+                # second hand) don't keep the element "unstable" and time out the shot.
+                png = await widget.screenshot(timeout=8000, animations="disabled")
             except Exception:
                 continue
             try:
@@ -123,21 +125,21 @@ class ChatGPTPage:
 
 
 async def _wait_widget_rendered(widget: Any, timeout_seconds: float = 8.0) -> None:
-    """Wait until a widget actually renders before screenshotting (otherwise we
-    capture a blank container). Polls inner_text until it's non-empty and stable."""
-    last: str | None = None
-    stable = 0
+    """Wait until a widget renders content before screenshotting (otherwise we
+    capture a blank container). Requires inner_text non-empty for two consecutive
+    checks; the text may keep changing (e.g. a live clock), so we only require
+    non-empty, not identical."""
+    nonempty = 0
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         try:
             text = (await widget.inner_text(timeout=2000)).strip()
         except Exception:
             text = ""
-        if text and text == last:
-            stable += 1
-            if stable >= 2:
+        if text:
+            nonempty += 1
+            if nonempty >= 2:
                 return
         else:
-            stable = 0
-            last = text
+            nonempty = 0
         await asyncio.sleep(0.5)

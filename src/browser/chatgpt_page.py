@@ -65,6 +65,22 @@ def _strip_media_noise(text: str) -> str:
     return "\n".join(kept).strip()
 
 
+def _image_reply_text(answer: str, previous_text: str) -> str:
+    """Text to keep for an IMAGE reply.
+
+    An image reply completes the wait on the NEW image src, not on the text
+    changing (detector.wait_for_response_complete), so `answer` can still be the
+    PREVIOUS turn's reply that the page never updated for this turn (e.g. the
+    earlier weather text shown again under a freshly generated picture). After
+    dropping UI/interim noise, if what's left merely repeats the pre-send
+    snapshot, it isn't this reply's own text — return "" so we deliver just the
+    picture."""
+    cleaned = _strip_media_noise(answer)
+    if cleaned and cleaned == _strip_media_noise(previous_text or ""):
+        return ""
+    return cleaned
+
+
 class ChatGPTPage:
     def __init__(self, page: Any, media_store: Any | None = None) -> None:
         self.page = page
@@ -131,8 +147,11 @@ class ChatGPTPage:
             prev_srcs = set(previous_image_srcs)
             new_image_srcs = [s for s in await generated_image_srcs(self.page) if s not in prev_srcs]
             if new_image_srcs:
-                # An image reply's text is only interim/UI noise — deliver the picture.
-                final_answer = _strip_media_noise(final_answer)
+                # An image reply's text is only interim/UI noise, and may still be
+                # the PREVIOUS turn's text (the wait completes on the new image
+                # src, not on the text changing) — deliver the picture, dropping
+                # text that merely repeats the pre-send snapshot.
+                final_answer = _image_reply_text(final_answer, previous_assistant_text)
             final_answer = await self._append_media_images(
                 final_answer, settings.media_base_url, prev_srcs
             )
@@ -166,7 +185,9 @@ class ChatGPTPage:
     async def _capture_widget_tokens(self) -> list[str]:
         tokens: list[str] = []
         try:
-            assistant = self.page.locator("[data-message-author-role='assistant']").last
+            # Anchor on the latest conversation-turn: image/widget replies no longer
+            # carry data-message-author-role, so the old selector found nothing.
+            assistant = self.page.locator("[data-testid^='conversation-turn']").last
             widgets = assistant.locator(WIDGET_SELECTOR)
             count = await widgets.count()
         except Exception:

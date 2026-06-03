@@ -86,10 +86,20 @@ async def image_generating(page: Any) -> bool:
 # Pure read (no DOM mutation). Falls back to inner_text if this returns empty.
 _RICH_TEXT_JS = r"""
 () => {
-  const ns = document.querySelectorAll("[data-message-author-role='assistant']");
-  const el = ns[ns.length - 1];
+  // ChatGPT virtualizes turns and, for image/reasoning replies, no longer marks
+  // the assistant message with data-message-author-role nor wraps prose in
+  // .markdown. Anchor on the LAST conversation-turn instead: if it's the user's
+  // own message the assistant hasn't replied yet (-> ""); otherwise its prose (if
+  // any) lives in .markdown, while the reasoning toggle ("已思考"/"Thought for…")
+  // and action buttons sit OUTSIDE it. A pure image/widget reply has NO .markdown
+  // -> "" (the image/widget is delivered separately). Anchoring on the latest turn
+  // means we never return stale text from an earlier turn.
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn']");
+  const el = turns[turns.length - 1];
   if (!el) return "";
-  const root = el.querySelector(".markdown") || el;
+  if (el.querySelector("[data-message-author-role='user']")) return "";
+  const root = el.querySelector(".markdown");
+  if (!root) return "";
   const dw = (s) => { let w = 0; for (const ch of s) { w += (ch.codePointAt(0) > 255 ? 2 : 1); } return w; };
   const pad = (s, n) => s + " ".repeat(Math.max(0, n - dw(s)));
   const SKIP = new Set(["BUTTON", "SVG", "PATH", "USE", "SCRIPT", "STYLE", "IMG"]);
@@ -204,8 +214,10 @@ async def latest_message_has_widget(page: Any) -> bool:
     etc card). Such replies can have NO markdown text — rich_assistant_text skips
     widget content — so completion detection can't rely on text alone."""
     try:
-        assistant = page.locator("[data-message-author-role='assistant']").last
-        return await assistant.locator("[class*='WidgetRenderer']").count() > 0
+        turn = page.locator("[data-testid^='conversation-turn']").last
+        if await turn.locator("[data-message-author-role='user']").count() > 0:
+            return False  # latest turn is the user's message, not an assistant reply
+        return await turn.locator("[class*='WidgetRenderer']").count() > 0
     except Exception:
         return False
 

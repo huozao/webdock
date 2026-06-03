@@ -15,6 +15,11 @@ SEND_BUTTON = [
 ]
 
 ASSISTANT_MESSAGE = [
+    # Current ChatGPT DOM: every message is a conversation-turn (user + assistant);
+    # image/reasoning replies no longer carry data-message-author-role nor a
+    # .markdown body, so the legacy author-role/article selectors miss them. The
+    # author-role/agent-turn entries stay as fallbacks for older/text replies.
+    "[data-testid^='conversation-turn']",
     "article:has([data-message-author-role='assistant'])",
     "div[data-message-author-role='assistant']",
     "[data-message-author-role='assistant']",

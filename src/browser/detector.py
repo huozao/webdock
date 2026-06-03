@@ -135,35 +135,72 @@ async def is_generating(page: Any) -> bool:
     )
 
 
+async def latest_message_has_widget(page: Any) -> bool:
+    """True if the latest assistant message contains a rich widget (clock/weather/
+    etc card). Such replies can have NO markdown text — rich_assistant_text skips
+    widget content — so completion detection can't rely on text alone."""
+    try:
+        assistant = page.locator("[data-message-author-role='assistant']").last
+        return await assistant.locator("[class*='WidgetRenderer']").count() > 0
+    except Exception:
+        return False
+
+
 async def wait_for_response_complete(
     page: Any,
     *,
     timeout_seconds: int,
     stable_seconds: int,
     previous_count: int = 0,
-) -> str:
+    previous_text: str = "",
+) -> str | None:
+    """Wait until the latest assistant reply is complete. Returns the reply text
+    (possibly "" for a widget-only reply that has no markdown text), or None on
+    timeout. The "" vs None distinction lets the caller tell a finished widget-only
+    reply (deliver the screenshot) apart from a real timeout."""
     start = time.monotonic()
-    last_text = ""
+    last_text: str | None = None
     stable_for = 0
+    observed_generating = False
 
     while time.monotonic() - start < timeout_seconds:
         current_count = await assistant_message_count(page)
         current = await rich_assistant_text(page)
-        generating = await is_generating(page)
-        has_new_assistant = current_count > previous_count
+        streaming = await any_selector_found(page, selectors.STREAMING_INDICATOR)
+        stop_button = await any_selector_found(page, selectors.STOP_BUTTON)
+        generating = streaming or stop_button
+        has_widget = await latest_message_has_widget(page)
+        if generating:
+            observed_generating = True
 
-        if current and current == last_text:
+        # Track stability of the text itself; "" stays stable across iterations too
+        # (a widget-only reply keeps yielding "", which is a valid stable state).
+        if current == last_text:
             stable_for += 1
         else:
             stable_for = 0
             last_text = current
 
-        if has_new_assistant and current and stable_for >= stable_seconds:
+        # "A new reply has arrived." ChatGPT virtualizes the message list, so the
+        # visible assistant-node count is NOT monotonic — a new reply often does not
+        # raise it (old messages scroll out as new ones scroll in). So treat the reply
+        # as new if the count grew, OR the text differs from before we sent, OR we saw
+        # a generation cycle (streaming) during this wait.
+        text_changed = bool(current) and current != previous_text
+        has_new = current_count > previous_count or text_changed or observed_generating
+
+        # A reply is "ready" once it has text OR a rendered widget. Widget-only
+        # replies have empty text (skipped on purpose), so fall back to widget
+        # presence — otherwise we'd wait out the full timeout on every clock card.
+        content_ready = bool(current) or has_widget
+        if has_new and content_ready and stable_for >= stable_seconds:
             if not generating:
                 return current
-            # Completion signal looks stuck (e.g. residual stop/read-aloud button)
-            # but text has been stable well past stable_seconds -> return anyway.
-            if stable_for >= stable_seconds + STUCK_GRACE_SECONDS:
+            # Only a residual stop/read-aloud button lingers (NOT real streaming):
+            # treat it as a stuck signal and return after grace. If result-streaming
+            # is genuinely active (e.g. ChatGPT still generating a DALL-E image),
+            # keep waiting — returning now would grab the PREVIOUS reply.
+            if not streaming and stable_for >= stable_seconds + STUCK_GRACE_SECONDS:
                 return current
 
         if int(time.monotonic() - start) > 0 and int(time.monotonic() - start) % 10 == 0:
@@ -171,7 +208,7 @@ async def wait_for_response_complete(
 
         await asyncio.sleep(1)
 
-    return ""
+    return None
 
 
 def _clean_assistant_text(text: str) -> str:

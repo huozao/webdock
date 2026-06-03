@@ -156,3 +156,111 @@ def test_wait_returns_when_count_static_but_text_changed():
     )
 
     assert answer == "现在是 21:22"
+
+
+def test_wait_holds_while_image_generating(monkeypatch):
+    # While the image-gen loading placeholder is up (image_generating True) and no
+    # NEW image yet, keep waiting — ignore interim text/reasoning.
+    page = FakePage(["正在生成图片，请稍候"], streaming=False)
+
+    async def gen(_page):
+        return True
+
+    monkeypatch.setattr(detector, "image_generating", gen)
+
+    answer = asyncio.run(wait_for_response_complete(page, timeout_seconds=2, stable_seconds=0, previous_count=0))
+
+    assert answer is None
+
+
+def test_wait_does_not_return_stale_reply_during_generation():
+    # Sending into a conversation that already showed a widget+text reply. While
+    # ChatGPT generates the new answer the page still shows that OLD reply (same
+    # text, same widget, no new image). Must NOT return the stale reply — this is
+    # the "画熊猫 got the previous clock back" bug (was caused by observed_generating).
+    page = FakePage(["现在是 23:55"], streaming=True, widget_count=1)
+
+    answer = asyncio.run(
+        wait_for_response_complete(
+            page,
+            timeout_seconds=3,
+            stable_seconds=0,
+            previous_count=1,
+            previous_text="现在是 23:55",
+            previous_has_widget=True,
+        )
+    )
+
+    assert answer is None
+
+
+def test_wait_returns_when_new_image_src_appears(monkeypatch):
+    # Repeated image request: an image was already on the page before sending.
+    # A NEW image (different src) appearing must count as a new reply — otherwise
+    # we'd resend the earlier image (the "连续画图发第一张" bug).
+    page = FakePage([""], streaming=False)
+
+    async def fake_srcs(_page, min_px=200):
+        return ["url_OLD", "url_NEW"]
+
+    monkeypatch.setattr(detector, "generated_image_srcs", fake_srcs)
+
+    answer = asyncio.run(
+        wait_for_response_complete(
+            page,
+            timeout_seconds=2,
+            stable_seconds=0,
+            previous_count=1,
+            previous_text="",
+            previous_image_srcs=["url_OLD"],
+        )
+    )
+
+    assert answer == ""  # completes because a new image src appeared
+
+
+def test_wait_holds_while_generating_ignores_reasoning(monkeypatch):
+    # Placeholder up + interim English reasoning that matches NO keyword: must keep
+    # waiting (the "画X got reasoning text" bug). Uses the DOM placeholder signal,
+    # not text keywords.
+    page = FakePage(["Generating another cartoon pig. The user asks for..."], streaming=False)
+
+    async def gen(_page):
+        return True
+
+    monkeypatch.setattr(detector, "image_generating", gen)
+
+    answer = asyncio.run(wait_for_response_complete(page, timeout_seconds=2, stable_seconds=0, previous_count=0))
+
+    assert answer is None
+
+
+def test_wait_returns_text_when_not_generating_image():
+    # No image-gen placeholder (e.g. ChatGPT refused the image) -> return the text
+    # reply instead of hanging forever on an image that never comes.
+    page = FakePage(["old", "抱歉，无法生成该图片"], streaming=False)
+
+    answer = asyncio.run(
+        wait_for_response_complete(page, timeout_seconds=2, stable_seconds=0, previous_count=1, previous_text="old")
+    )
+
+    assert answer == "抱歉，无法生成该图片"
+
+
+def test_wait_holds_for_interim_thinking_text():
+    # Long reasoning BEFORE the image-gen placeholder appears: only interim
+    # "正在思考/正在生成" status text shows. Must keep waiting (the 55s-thinking bug).
+    page = FakePage(["正在思考\n正在生成更细致的图片，请稍候。"], streaming=False)
+
+    answer = asyncio.run(wait_for_response_complete(page, timeout_seconds=2, stable_seconds=0, previous_count=0))
+
+    assert answer is None
+
+
+def test_wait_holds_for_various_interim_status():
+    # Any tool/working status (search, analyze, run code, read... not just image)
+    # keeps the wait open until it clears.
+    for status in ["正在搜索网页", "正在分析文件", "正在运行代码", "正在读取网页", "Searching the web", "Analyzing data"]:
+        page = FakePage([status], streaming=False)
+        answer = asyncio.run(wait_for_response_complete(page, timeout_seconds=1, stable_seconds=0, previous_count=0))
+        assert answer is None, status

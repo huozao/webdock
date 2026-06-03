@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import Any
 
@@ -12,6 +13,69 @@ from src.browser.human import idle_mouse_movement
 # anyway. Guards against false "still generating" signals (e.g. a residual
 # stop/read-aloud button) that would otherwise hang until timeout.
 STUCK_GRACE_SECONDS = 8
+
+# While ChatGPT generates an image it shows a loading placeholder whose
+# data-testid starts with 'image-gen-loading-state'; it disappears once the <img>
+# renders. This is the reliable "an image reply is in progress" signal — unlike
+# text keywords it is ABSENT when ChatGPT refuses or replies with text, so a
+# refusal/text reply returns normally instead of hanging on an image that never comes.
+_IMAGE_GENERATING_JS = """
+() => !!document.querySelector("[data-testid^='image-gen-loading-state']")
+"""
+# ChatGPT shows interim status text while it's still working — thinking, searching
+# the web, reading/browsing pages, analyzing files/data, running code, generating
+# an image, editing canvas/docs, navigating, etc. While any of these show, the
+# reply isn't finished, so keep waiting until they disappear. A finished reply or a
+# refusal matches none of these. Covers the ZH + EN variants ChatGPT uses.
+_INTERIM_RE = re.compile(
+    r"正在(思考|搜索|浏览|读取|分析|运行|生成|创作|绘制|画|更新|编辑|执行|导航|完成|处理|查找|制作|检索)|"
+    r"生成更细致|请稍候|搜索网页|读取网页|读取附件|运行代码|更新画布|编辑文档|完成任务|"
+    r"\b(thinking|searching|browsing|reading|analy[sz]ing|generating|creating|drawing|rendering|"
+    r"editing|updating|running|navigating|working)\b|"
+    r"^(let me|i'?ll|i am going to|i will|the user (asks|wants|is asking|requested))",
+    re.IGNORECASE,
+)
+# A real ChatGPT-generated image (DALL-E etc) renders as <img> with a backend
+# estuary/content (or oaiusercontent) src at a real size.
+_GENERATED_IMG_SRCS_JS = """
+(minPx) => {
+  const out = [];
+  const seen = new Set();
+  for (const im of document.querySelectorAll('img')) {
+    if (im.clientWidth < minPx || im.clientHeight < minPx) continue;
+    const src = im.currentSrc || im.src || '';
+    if (!src || seen.has(src)) continue;
+    if (!/backend-api\\/(estuary|files)\\/|oaiusercontent/.test(src)) continue;
+    seen.add(src);
+    out.push(src);
+  }
+  return out;
+}
+"""
+
+
+async def generated_image_srcs(page: Any, min_px: int = 200) -> list[str]:
+    """Srcs of ChatGPT-generated images (DALL-E etc; backend estuary/content)
+    rendered at a real size, de-duped. Empty list on failure."""
+    try:
+        srcs = await page.evaluate(_GENERATED_IMG_SRCS_JS, min_px)
+        return list(srcs) if srcs else []
+    except Exception:
+        return []
+
+
+async def has_generated_image(page: Any, min_px: int = 200) -> bool:
+    """True if any ChatGPT-generated image is rendered at a real size."""
+    return bool(await generated_image_srcs(page, min_px))
+
+
+async def image_generating(page: Any) -> bool:
+    """True while ChatGPT is generating an image (loading-state placeholder shown).
+    Distinguishes an in-progress image reply from a refusal / plain-text reply."""
+    try:
+        return await page.evaluate(_IMAGE_GENERATING_JS)
+    except Exception:
+        return False
 
 
 # Walk the latest assistant message DOM into WeChat-friendly plain text:
@@ -153,15 +217,16 @@ async def wait_for_response_complete(
     stable_seconds: int,
     previous_count: int = 0,
     previous_text: str = "",
+    previous_image_srcs: list[str] | None = None,
+    previous_has_widget: bool = False,
 ) -> str | None:
     """Wait until the latest assistant reply is complete. Returns the reply text
-    (possibly "" for a widget-only reply that has no markdown text), or None on
-    timeout. The "" vs None distinction lets the caller tell a finished widget-only
-    reply (deliver the screenshot) apart from a real timeout."""
+    (possibly "" for a widget/image-only reply that has no markdown text), or None
+    on timeout. The "" vs None distinction lets the caller tell a finished
+    media-only reply (deliver the screenshot/image) apart from a real timeout."""
     start = time.monotonic()
     last_text: str | None = None
     stable_for = 0
-    observed_generating = False
 
     while time.monotonic() - start < timeout_seconds:
         current_count = await assistant_message_count(page)
@@ -170,8 +235,8 @@ async def wait_for_response_complete(
         stop_button = await any_selector_found(page, selectors.STOP_BUTTON)
         generating = streaming or stop_button
         has_widget = await latest_message_has_widget(page)
-        if generating:
-            observed_generating = True
+        current_image_srcs = await generated_image_srcs(page)
+        has_image = bool(current_image_srcs)
 
         # Track stability of the text itself; "" stays stable across iterations too
         # (a widget-only reply keeps yielding "", which is a valid stable state).
@@ -181,19 +246,26 @@ async def wait_for_response_complete(
             stable_for = 0
             last_text = current
 
-        # "A new reply has arrived." ChatGPT virtualizes the message list, so the
-        # visible assistant-node count is NOT monotonic — a new reply often does not
-        # raise it (old messages scroll out as new ones scroll in). So treat the reply
-        # as new if the count grew, OR the text differs from before we sent, OR we saw
-        # a generation cycle (streaming) during this wait.
+        # "A NEW reply has arrived." ChatGPT virtualizes the message list (visible
+        # node count isn't monotonic) and reuses the page across turns, so compare
+        # against the state captured BEFORE sending: text changed, OR a generated
+        # image / widget appeared that wasn't there before. We must NOT treat "a
+        # generation is in progress" as new — during it the page still shows the
+        # PREVIOUS reply, which we'd then wrongly return.
         text_changed = bool(current) and current != previous_text
-        has_new = current_count > previous_count or text_changed or observed_generating
+        new_image = bool(set(current_image_srcs) - set(previous_image_srcs or []))
+        new_widget = has_widget and not previous_has_widget
+        has_new = current_count > previous_count or text_changed or new_image or new_widget
 
-        # A reply is "ready" once it has text OR a rendered widget. Widget-only
-        # replies have empty text (skipped on purpose), so fall back to widget
-        # presence — otherwise we'd wait out the full timeout on every clock card.
-        content_ready = bool(current) or has_widget
-        if has_new and content_ready and stable_for >= stable_seconds:
+        # A reply is "ready" once it has text OR a rendered widget OR a generated image.
+        content_ready = bool(current) or has_widget or has_image
+        # ChatGPT keeps working asynchronously (thinking, searching, generating an
+        # image, etc) WITHOUT result-streaming, showing interim status text and/or
+        # an image-gen placeholder meanwhile. While either is present the reply
+        # isn't done — keep waiting (ignore the interim text) until it clears (and,
+        # for images, a NEW src appears). A refusal / plain reply has neither.
+        in_progress = (await image_generating(page) or bool(_INTERIM_RE.search(current or ""))) and not new_image
+        if has_new and content_ready and not in_progress and stable_for >= stable_seconds:
             if not generating:
                 return current
             # Only a residual stop/read-aloud button lingers (NOT real streaming):

@@ -186,6 +186,78 @@ def test_openai_chat_completion_auto_attach_once_then_reports_clear_error(monkey
     assert "CDP attach failed" in response.json()["detail"]["message"]
 
 
+_PNG_DATA_URL = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+)
+
+
+def test_openai_chat_completion_accepts_vision_image_and_uploads(monkeypatch):
+    from src.browser import lane_scheduler
+
+    uploaded: list[tuple[object, list[str]]] = []
+
+    async def fake_upload(page, images):
+        uploaded.append((page, list(images)))
+        return len(images)
+
+    monkeypatch.setattr(lane_scheduler.ChatGPTPage, "ask", fake_ask_with_page)
+    monkeypatch.setattr(lane_scheduler, "upload_images", fake_upload)
+    app = create_app(start_browser=False)
+    app.state.browser = FakeBrowser()
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer change-me"},
+        json={
+            "model": "browser-chatgpt",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "把这张图改成卡通风格"},
+                        {"type": "image_url", "image_url": {"url": _PNG_DATA_URL}},
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(uploaded) == 1
+    _page, images = uploaded[0]
+    assert images == [_PNG_DATA_URL]
+    assert response.json()["choices"][0]["message"]["content"].endswith("把这张图改成卡通风格")
+
+
+def test_openai_chat_completion_accepts_image_only_message(monkeypatch):
+    from src.browser import lane_scheduler
+
+    async def fake_upload(page, images):
+        return len(images)
+
+    monkeypatch.setattr(lane_scheduler.ChatGPTPage, "ask", fake_ask)
+    monkeypatch.setattr(lane_scheduler, "upload_images", fake_upload)
+    app = create_app(start_browser=False)
+    app.state.browser = FakeBrowser()
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer change-me"},
+        json={
+            "model": "browser-chatgpt",
+            "messages": [
+                {"role": "user", "content": [{"type": "image_url", "image_url": {"url": _PNG_DATA_URL}}]}
+            ],
+        },
+    )
+
+    # An image with no text used to 400 ("Only plain text content is supported").
+    assert response.status_code == 200
+
+
 def test_openai_chat_completion_routes_metadata_to_wechat_lane(monkeypatch):
     from src.browser import lane_scheduler
 

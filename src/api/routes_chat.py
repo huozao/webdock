@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from src.browser.image_input import extract_image_urls
 from src.browser.lane_scheduler import LaneContext
 from src.models.request_models import ChatRequest, OpenAIChatCompletionRequest
 from src.models.response_models import build_openai_models_response, build_openai_response, build_openai_sse_events
@@ -47,14 +48,16 @@ async def openai_chat_completions(
             ),
         )
 
-    prompt = build_prompt_from_messages([msg.model_dump() for msg in body.messages])
-    if not prompt.strip():
+    messages = [msg.model_dump() for msg in body.messages]
+    prompt = build_prompt_from_messages(messages)
+    images = extract_images_from_messages(messages)
+    if not prompt.strip() and not images:
         raise HTTPException(
             status_code=400,
             detail=error_response(ErrorCode.RESPONSE_EMPTY, "No text user message found in messages."),
         )
 
-    result = await _ask_browser(request, prompt, LaneContext.from_metadata(body.metadata))
+    result = await _ask_browser(request, prompt, LaneContext.from_metadata(body.metadata), images=images)
     if isinstance(result, JSONResponse):
         raise HTTPException(status_code=result.status_code, detail=json.loads(result.body))
 
@@ -96,31 +99,35 @@ def clean_openclaw_metadata(text: str) -> str:
     return _OPENCLAW_METADATA_RE.sub("", text).strip()
 
 
+def extract_images_from_messages(messages: list[dict[str, Any]]) -> list[str]:
+    """Image URLs (data: or http(s)) carried by the latest user message, in
+    OpenAI vision format. Empty when the message is plain text."""
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            return extract_image_urls(message.get("content"))
+    return []
+
+
 def _content_to_text(content: Any) -> str:
     if content is None:
         return ""
     if isinstance(content, str):
         return content.strip()
     if isinstance(content, list):
-        parts = []
-        for item in content:
-            if not isinstance(item, dict):
-                continue
-            if item.get("type") == "text":
-                parts.append(str(item.get("text", "")).strip())
-            else:
-                raise HTTPException(
-                    status_code=400,
-                    detail=error_response(
-                        ErrorCode.SELECTOR_FAILED,
-                        "Only plain text content is supported. Images and files are intentionally disabled.",
-                    ),
-                )
+        # Pull the text parts; image parts are handled separately (uploaded to
+        # ChatGPT), so they are skipped here rather than rejected.
+        parts = [
+            str(item.get("text", "")).strip()
+            for item in content
+            if isinstance(item, dict) and item.get("type") == "text"
+        ]
         return "\n".join(part for part in parts if part)
     return str(content).strip()
 
 
-async def _ask_browser(request: Request, message: str, lane: LaneContext) -> tuple[str, float] | JSONResponse:
+async def _ask_browser(
+    request: Request, message: str, lane: LaneContext, images: list[str] | None = None
+) -> tuple[str, float] | JSONResponse:
     browser = request.app.state.browser
     attach_error = await _ensure_browser_ready(browser)
     if attach_error:
@@ -128,7 +135,7 @@ async def _ask_browser(request: Request, message: str, lane: LaneContext) -> tup
 
     scheduler = request.app.state.chat_scheduler
     try:
-        return await scheduler.ask(browser, lane, message)
+        return await scheduler.ask(browser, lane, message, images=images)
     except RelayError as exc:
         browser.last_error = f"{exc.code.value}: {exc.message}"
         status_code = _status_code_for_error(exc.code)

@@ -4,11 +4,12 @@ import asyncio
 import dataclasses
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from src.browser import selectors
-from src.browser.chatgpt_page import ChatGPTPage
+from src.browser.chatgpt_page import ChatGPTPage, upload_images
 from src.browser.detector import find_first
 from src.browser.lane_routing import (
     LaneRouter,
@@ -25,6 +26,15 @@ _SAFE_KEY_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
 
 # After navigating to a project/conversation URL, wait this long for the editor.
 ROUTE_INPUT_TIMEOUT_MS = 10000
+
+# Sentinel peer_id produced by LaneContext.from_metadata when a request carries
+# no OpenClaw routing metadata (see _safe_part).
+DEFAULT_PEER = "default"
+# A WeChat "text + images" send arrives as several separate requests and only the
+# text one carries metadata; the image requests reach us metadata-less. For this
+# long after a configured lane was last seen, a metadata-less request inherits it
+# so those images land in the same conversation instead of a stray default chat.
+LANE_FALLBACK_WINDOW_SECONDS = 120.0
 
 
 @dataclass(frozen=True)
@@ -64,6 +74,8 @@ class ChatLaneScheduler:
         ask_func: AskFunc | None = None,
         router: LaneRouter | None = None,
         media_store: Any | None = None,
+        lane_fallback_window_seconds: float = LANE_FALLBACK_WINDOW_SECONDS,
+        image_uploader: Callable[[Any, list[str]], Awaitable[int]] | None = None,
     ) -> None:
         self.max_concurrent_chats = max(1, max_concurrent_chats)
         self._account_semaphore = asyncio.Semaphore(self.max_concurrent_chats)
@@ -72,15 +84,19 @@ class ChatLaneScheduler:
         self._media_store = media_store
         self._ask_func = ask_func or self._default_ask
         self._router = router or LaneRouter()
+        self._image_uploader = image_uploader or upload_images
+        self._lane_fallback_window_seconds = lane_fallback_window_seconds
+        self._last_active_lane: LaneContext | None = None
+        self._last_active_at = 0.0
 
     async def _default_ask(self, page: object, message: str) -> tuple[str, float]:
         return await ChatGPTPage(page, media_store=self._media_store).ask(message)
 
-    async def ask(self, browser: Any, lane: LaneContext, message: str) -> tuple[str, float]:
+    async def ask(
+        self, browser: Any, lane: LaneContext, message: str, images: list[str] | None = None
+    ) -> tuple[str, float]:
         force_new, clean_message = parse_new_conversation_trigger(message)
-        target_url = self._router.resolve_target_url(lane.peer_id, force_new=force_new)
-        if target_url and target_url != lane.target_url:
-            lane = dataclasses.replace(lane, target_url=target_url)
+        lane = self._resolve_lane(lane, force_new=force_new)
 
         lane_lock = await self._get_lane_lock(lane.key)
         async with lane_lock:
@@ -93,9 +109,42 @@ class ChatLaneScheduler:
 
                 page = await _page_for_lane(browser, lane)
                 await self._route_page(page, lane.target_url, force_new=force_new)
+                if images:
+                    # Attach the inbound image(s) to this lane's composer so the
+                    # text that follows edits/answers about them in one turn.
+                    await self._image_uploader(page, images)
                 answer, duration = await self._ask_func(page, clean_message)
                 self._record_conversation(lane.peer_id, page)
                 return answer, duration
+
+    def _resolve_lane(self, lane: LaneContext, *, force_new: bool) -> LaneContext:
+        """Pick the lane this request really belongs to and attach its target URL.
+
+        A metadata-less request (default sentinel peer_id) inherits the most
+        recent configured lane within the fallback window, so a WeChat image that
+        arrived as its own request right after the text lands in the same
+        conversation rather than opening a stray default chat. '/新对话'
+        (force_new) is never inherited — it always means "this exact lane".
+        """
+        if not force_new and lane.peer_id == DEFAULT_PEER:
+            inherited = self._recent_active_lane()
+            if inherited is not None:
+                lane = inherited
+        if self._router.is_configured(lane.peer_id):
+            self._last_active_lane = lane
+            self._last_active_at = time.monotonic()
+        target_url = self._router.resolve_target_url(lane.peer_id, force_new=force_new)
+        if target_url and target_url != lane.target_url:
+            lane = dataclasses.replace(lane, target_url=target_url)
+        return lane
+
+    def _recent_active_lane(self) -> LaneContext | None:
+        lane = self._last_active_lane
+        if lane is None:
+            return None
+        if time.monotonic() - self._last_active_at > self._lane_fallback_window_seconds:
+            return None
+        return lane
 
     async def _route_page(self, page: Any, target_url: str | None, *, force_new: bool) -> None:
         """Make sure the lane's page is on its project/conversation URL.

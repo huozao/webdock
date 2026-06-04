@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
 import re
+import tempfile
 import time
 from typing import Any
 
@@ -18,6 +20,7 @@ from src.browser.detector import (
     wait_for_response_complete,
 )
 from src.browser.human import hover_and_click, paste_text, random_delay
+from src.browser.image_input import resolve_image_inputs
 from src.config import get_settings
 from src.utils.errors import ErrorCode, RelayError
 
@@ -31,6 +34,13 @@ MAX_WIDGETS_PER_REPLY = 4
 # the logged-in session to fetch. detector.generated_image_srcs locates them (by
 # rendered size); we download in-page (so cookies apply) and serve via /media.
 MAX_IMAGES_PER_REPLY = 4
+
+# Inbound image upload: how long to look for the hidden file input, and how long
+# to let an attachment finalize on ChatGPT's side before sending the text.
+UPLOAD_INPUT_TIMEOUT_MS = 5000
+_UPLOAD_DETECT_TIMEOUT_SECONDS = 8.0
+_UPLOAD_SETTLE_SECONDS = 2.0
+_UPLOAD_FALLBACK_SECONDS = 3.0
 _FETCH_IMG_B64_JS = """
 async (src) => {
   try {
@@ -326,3 +336,58 @@ async def _wait_widget_rendered(widget: Any, timeout_seconds: float = 8.0) -> No
         else:
             nonempty = 0
         await asyncio.sleep(0.5)
+
+
+async def upload_images(page: Any, image_urls: list[str]) -> int:
+    """Attach inbound WeChat images to the ChatGPT composer before the text turn.
+
+    Resolves each URL (base64 data URL or http(s)) to bytes, writes them to temp
+    files, and sets them on ChatGPT's hidden <input type="file"> so the next send
+    includes them. Best-effort: any failure leaves the turn to proceed as
+    text-only. Returns how many images were actually attached."""
+    resolved = resolve_image_inputs(image_urls)
+    if not resolved:
+        return 0
+    paths = _write_temp_images(resolved)
+    if not paths:
+        return 0
+    try:
+        selector = await find_first(page, selectors.FILE_INPUT, timeout_ms=UPLOAD_INPUT_TIMEOUT_MS)
+        if not selector:
+            return 0
+        await page.set_input_files(selector, paths)
+        await _wait_uploads_ready(page)
+        return len(paths)
+    finally:
+        for path in paths:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+def _write_temp_images(resolved: list[tuple[bytes, str]]) -> list[str]:
+    paths: list[str] = []
+    for data, ext in resolved:
+        try:
+            fd, path = tempfile.mkstemp(prefix="webdock-upload-", suffix=ext)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+            paths.append(path)
+        except OSError:
+            continue
+    return paths
+
+
+async def _wait_uploads_ready(page: Any) -> None:
+    """Give the upload time to finalize before sending. Waits for an attachment
+    preview to appear, then a short settle; if no preview selector matches (DOM
+    drift), falls back to a fixed wait so we don't send before the upload lands."""
+    deadline = time.monotonic() + _UPLOAD_DETECT_TIMEOUT_SECONDS
+    detected = False
+    while time.monotonic() < deadline:
+        if await any_selector_found(page, selectors.ATTACHMENT_PREVIEW):
+            detected = True
+            break
+        await asyncio.sleep(0.5)
+    await asyncio.sleep(_UPLOAD_SETTLE_SECONDS if detected else _UPLOAD_FALLBACK_SECONDS)

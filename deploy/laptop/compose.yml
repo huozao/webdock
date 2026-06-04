@@ -2,10 +2,14 @@ name: webdock
 
 services:
   webdock:
+    # The image is built and pushed to GHCR by webdock's release workflow, so the
+    # 旧电脑 just pulls it (`docker compose pull && up -d`) instead of building.
+    # Pin WEBDOCK_IMAGE to a SHA/Vx tag for a repeatable deploy. `build:` stays as
+    # a local-dev fallback (`docker compose build`); it is not used on the laptop.
     build:
       context: ../..
       dockerfile: Dockerfile
-    image: ${WEBDOCK_IMAGE:-webdock:local}
+    image: ${WEBDOCK_IMAGE:-ghcr.io/huozao/webdock:latest}
     container_name: webdock
     restart: unless-stopped
     env_file:

@@ -219,6 +219,22 @@ def test_wait_returns_when_new_image_src_appears(monkeypatch):
     assert answer == ""  # completes because a new image src appeared
 
 
+def test_generated_image_srcs_excludes_user_turn_images():
+    class InspectPage:
+        script = ""
+
+        async def evaluate(self, script, min_px=200):
+            self.script = script
+            return []
+
+    page = InspectPage()
+
+    asyncio.run(detector.generated_image_srcs(page))
+
+    assert "[data-testid^='conversation-turn']" in page.script
+    assert "[data-message-author-role='user']" in page.script
+
+
 def test_wait_holds_while_generating_ignores_reasoning(monkeypatch):
     # Placeholder up + interim English reasoning that matches NO keyword: must keep
     # waiting (the "画X got reasoning text" bug). Uses the DOM placeholder signal,

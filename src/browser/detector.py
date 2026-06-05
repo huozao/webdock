@@ -43,6 +43,8 @@ _GENERATED_IMG_SRCS_JS = """
   const seen = new Set();
   for (const im of document.querySelectorAll('img')) {
     if (im.clientWidth < minPx || im.clientHeight < minPx) continue;
+    const turn = im.closest("[data-testid^='conversation-turn']");
+    if (turn && turn.querySelector("[data-message-author-role='user']")) continue;
     const src = im.currentSrc || im.src || '';
     if (!src || seen.has(src)) continue;
     if (!/backend-api\\/(estuary|files)\\/|oaiusercontent/.test(src)) continue;

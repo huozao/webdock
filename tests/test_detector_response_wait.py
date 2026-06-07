@@ -97,24 +97,27 @@ def test_wait_does_not_return_while_streaming():
     assert answer is None
 
 
-def test_wait_returns_when_residual_stop_button_lingers(monkeypatch):
-    # result-streaming is GONE but a stop/read-aloud button lingers (a false
-    # "generating" signal). After text is stable past stable_seconds + grace,
-    # return anyway.
+def test_wait_returns_when_residual_streaming_lingers(monkeypatch):
+    # The stop button is GONE but a residual .result-streaming class lingers (a
+    # stale "generating" signal). The stop button is the authoritative completion
+    # signal, so once the text is stable past stable_seconds + grace, return anyway
+    # instead of hanging until timeout.
     monkeypatch.setattr(detector, "STUCK_GRACE_SECONDS", 1)
-    page = FakePage(["final answer"], streaming=False, stop_button=True)
+    page = FakePage(["final answer"], streaming=True, stop_button=False)
 
     answer = asyncio.run(wait_for_response_complete(page, timeout_seconds=10, stable_seconds=1, previous_count=0))
 
     assert answer == "final answer"
 
 
-def test_wait_keeps_waiting_while_truly_streaming(monkeypatch):
-    # result-streaming genuinely active (e.g. ChatGPT generating a DALL-E image):
-    # even with text stable past grace, must NOT return early — that would grab the
-    # PREVIOUS reply. Keeps waiting (times out here since streaming never ends).
+def test_wait_keeps_waiting_while_stop_button_present(monkeypatch):
+    # The stop button is the authoritative "still generating" signal: while it is
+    # present (a preamble→已思考→answer reply, or ChatGPT generating a DALL-E image)
+    # the reply must NOT complete even when the current text is stable past grace —
+    # returning now would grab the preamble / previous reply (the 62-char truncation
+    # bug). Times out here since the stop button never clears.
     monkeypatch.setattr(detector, "STUCK_GRACE_SECONDS", 1)
-    page = FakePage(["partial"], streaming=True)
+    page = FakePage(["partial"], streaming=False, stop_button=True)
 
     answer = asyncio.run(wait_for_response_complete(page, timeout_seconds=4, stable_seconds=1, previous_count=0))
 

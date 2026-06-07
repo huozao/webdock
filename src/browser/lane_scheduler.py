@@ -17,6 +17,8 @@ from src.browser.lane_routing import (
     is_conversation_url,
     parse_new_conversation_trigger,
 )
+from src.browser.message_archive import archive_exchange
+from src.utils.errors import RelayError
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +78,7 @@ class ChatLaneScheduler:
         media_store: Any | None = None,
         lane_fallback_window_seconds: float = LANE_FALLBACK_WINDOW_SECONDS,
         image_uploader: Callable[[Any, list[str]], Awaitable[int]] | None = None,
+        archiver: Callable[..., Awaitable[None]] | None = None,
     ) -> None:
         self.max_concurrent_chats = max(1, max_concurrent_chats)
         self._account_semaphore = asyncio.Semaphore(self.max_concurrent_chats)
@@ -85,6 +88,7 @@ class ChatLaneScheduler:
         self._ask_func = ask_func or self._default_ask
         self._router = router or LaneRouter()
         self._image_uploader = image_uploader or upload_images
+        self._archiver = archiver or archive_exchange
         self._lane_fallback_window_seconds = lane_fallback_window_seconds
         self._last_active_lane: LaneContext | None = None
         self._last_active_at = 0.0
@@ -105,6 +109,10 @@ class ChatLaneScheduler:
                 # next real message opens a fresh chat in the project. No round-trip.
                 if force_new and not clean_message:
                     self._router.clear_conversation(lane.peer_id)
+                    await self._archiver(
+                        lane, clean_message, images,
+                        answer=NEW_CONVERSATION_ACK, duration=0.0, kind="new_conversation",
+                    )
                     return NEW_CONVERSATION_ACK, 0.0
 
                 page = await _page_for_lane(browser, lane)
@@ -113,8 +121,15 @@ class ChatLaneScheduler:
                     # Attach the inbound image(s) to this lane's composer so the
                     # text that follows edits/answers about them in one turn.
                     await self._image_uploader(page, images)
-                answer, duration = await self._ask_func(page, clean_message)
+                try:
+                    answer, duration = await self._ask_func(page, clean_message)
+                except RelayError as exc:
+                    # Archive the failed exchange too (with the DOM-snapshot dir
+                    # save_debug_dump attached), then let the caller handle it.
+                    await self._archiver(lane, clean_message, images, error=exc)
+                    raise
                 self._record_conversation(lane.peer_id, page)
+                await self._archiver(lane, clean_message, images, answer=answer, duration=duration)
                 return answer, duration
 
     def _resolve_lane(self, lane: LaneContext, *, force_new: bool) -> LaneContext:

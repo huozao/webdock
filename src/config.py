@@ -17,6 +17,8 @@ class Settings:
     novnc_port: int = 6080
     browser_profile_dir: Path = Path("browser_data")
     debug_dir: Path = Path("logs/debug")
+    archive_dir: Path = Path("logs/archive")
+    archive_enabled: bool = True
     chatgpt_url: str = "https://chatgpt.com/"
     chat_timeout_seconds: int = 120
     response_stable_seconds: int = 5
@@ -44,6 +46,8 @@ class Settings:
     def ensure_dirs(self) -> None:
         self.browser_profile_dir.mkdir(parents=True, exist_ok=True)
         self.debug_dir.mkdir(parents=True, exist_ok=True)
+        if self.archive_enabled:
+            self.archive_dir.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache
@@ -58,6 +62,8 @@ def get_settings() -> Settings:
         novnc_port=int(_get("NOVNC_PORT", "6080", env)),
         browser_profile_dir=_path_from_env(_get("BROWSER_PROFILE_DIR", "browser_data", env)),
         debug_dir=_path_from_env(_get("DEBUG_DIR", "logs/debug", env)),
+        archive_dir=_path_from_env(_get("ARCHIVE_DIR", "logs/archive", env)),
+        archive_enabled=_get("ARCHIVE_ENABLED", "true", env).lower() == "true",
         chatgpt_url=_get("CHATGPT_URL", "https://chatgpt.com/", env),
         chat_timeout_seconds=int(_get("CHAT_TIMEOUT_SECONDS", "120", env)),
         response_stable_seconds=int(_get("RESPONSE_STABLE_SECONDS", "5", env)),
@@ -109,6 +115,8 @@ def _path_from_env(value: str) -> Path:
             return Path("browser_data")
         if normalized == "/app/logs/debug":
             return Path("logs/debug")
+        if normalized == "/app/logs/archive":
+            return Path("logs/archive")
     return Path(value)
 
 

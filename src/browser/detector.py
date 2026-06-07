@@ -8,10 +8,11 @@ from typing import Any
 from src.browser import selectors
 from src.browser.human import idle_mouse_movement
 
-# If the page still looks "generating" (streaming indicator / stop button) but
-# the reply text has been stable this many seconds beyond stable_seconds, return
-# anyway. Guards against false "still generating" signals (e.g. a residual
-# stop/read-aloud button) that would otherwise hang until timeout.
+# Grace fallback for a residual .result-streaming class that lingers with NO stop
+# button: if the reply text has been stable this many seconds beyond stable_seconds
+# we return anyway, so a stuck streaming indicator can't hang until timeout. The
+# stop button is treated as the authoritative "still generating" signal and is NOT
+# bypassed by this grace — while it's present we keep waiting.
 STUCK_GRACE_SECONDS = 8
 
 # While ChatGPT generates an image it shows a loading placeholder whose
@@ -96,12 +97,17 @@ _RICH_TEXT_JS = r"""
   // and action buttons sit OUTSIDE it. A pure image/widget reply has NO .markdown
   // -> "" (the image/widget is delivered separately). Anchoring on the latest turn
   // means we never return stale text from an earlier turn.
+  //
+  // A "preamble -> 已思考/Thought -> answer" reply puts the opening line and the
+  // real answer in SEPARATE .markdown blocks inside the same turn, so we must walk
+  // EVERY .markdown (not just the first) or we drop the answer and return only the
+  // preamble.
   const turns = document.querySelectorAll("[data-testid^='conversation-turn']");
   const el = turns[turns.length - 1];
   if (!el) return "";
   if (el.querySelector("[data-message-author-role='user']")) return "";
-  const root = el.querySelector(".markdown");
-  if (!root) return "";
+  const roots = el.querySelectorAll(".markdown");
+  if (!roots.length) return "";
   const dw = (s) => { let w = 0; for (const ch of s) { w += (ch.codePointAt(0) > 255 ? 2 : 1); } return w; };
   const pad = (s, n) => s + " ".repeat(Math.max(0, n - dw(s)));
   const SKIP = new Set(["BUTTON", "SVG", "PATH", "USE", "SCRIPT", "STYLE", "IMG"]);
@@ -141,7 +147,9 @@ _RICH_TEXT_JS = r"""
     }
     return out;
   };
-  return walk(root).replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  const parts = [];
+  for (const root of roots) parts.push(walk(root));
+  return parts.join("\n\n").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 """
 
@@ -282,11 +290,13 @@ async def wait_for_response_complete(
         if has_new and content_ready and not in_progress and stable_for >= stable_seconds:
             if not generating:
                 return current
-            # Only a residual stop/read-aloud button lingers (NOT real streaming):
-            # treat it as a stuck signal and return after grace. If result-streaming
-            # is genuinely active (e.g. ChatGPT still generating a DALL-E image),
-            # keep waiting — returning now would grab the PREVIOUS reply.
-            if not streaming and stable_for >= stable_seconds + STUCK_GRACE_SECONDS:
+            # The stop button is the authoritative "still generating" signal: it
+            # stays present continuously through a preamble→已思考→answer reply
+            # (observed), so while it's there we keep waiting — that is what stops us
+            # returning the opening preamble early (the 62-char truncation bug). Only
+            # when the stop button is GONE but a residual .result-streaming class
+            # lingers do we treat it as stuck and return after grace.
+            if not stop_button and stable_for >= stable_seconds + STUCK_GRACE_SECONDS:
                 return current
 
         if int(time.monotonic() - start) > 0 and int(time.monotonic() - start) % 10 == 0:

@@ -13,7 +13,27 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Gate the image build on the unit tests. A direct push to main does NOT run
+  # ci.yml (that only fires on pull_request), so without this gate a broken commit
+  # pushed straight to main would still ship an image. Tests patch the browser
+  # layer, so no Chrome/Playwright download is needed here.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest -q
+
   build-push:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read

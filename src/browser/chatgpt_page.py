@@ -35,12 +35,16 @@ MAX_WIDGETS_PER_REPLY = 4
 # rendered size); we download in-page (so cookies apply) and serve via /media.
 MAX_IMAGES_PER_REPLY = 4
 
-# Inbound image upload: how long to look for the hidden file input, and how long
+# Inbound file upload: how long to look for the hidden file input, and how long
 # to let an attachment finalize on ChatGPT's side before sending the text.
 UPLOAD_INPUT_TIMEOUT_MS = 5000
 _UPLOAD_DETECT_TIMEOUT_SECONDS = 8.0
 _UPLOAD_SETTLE_SECONDS = 2.0
 _UPLOAD_FALLBACK_SECONDS = 3.0
+# ChatGPT disables the send button while processing document uploads (PDF, DOCX…).
+# We poll until it re-enables before sending the message.
+_UPLOAD_SEND_READY_TIMEOUT_SECONDS = 60.0
+_IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".heif", ".avif"})
 _FETCH_IMG_B64_JS = """
 async (src) => {
   try {
@@ -339,24 +343,26 @@ async def _wait_widget_rendered(widget: Any, timeout_seconds: float = 8.0) -> No
 
 
 async def upload_images(page: Any, image_urls: list[str]) -> int:
-    """Attach inbound WeChat images to the ChatGPT composer before the text turn.
+    """Attach inbound WeChat files (images or documents) to the ChatGPT composer.
 
-    Resolves each URL (base64 data URL or http(s)) to bytes, writes them to temp
-    files, and sets them on ChatGPT's hidden <input type="file"> so the next send
-    includes them. Best-effort: any failure leaves the turn to proceed as
-    text-only. Returns how many images were actually attached."""
+    Resolves each URL (base64 data URL or http(s)) to bytes, writes temp files,
+    and sets them on ChatGPT's hidden <input type="file">. For document uploads
+    (PDF, DOCX, XLSX…) ChatGPT disables the send button while processing; we wait
+    for it to re-enable before returning. Best-effort: any failure leaves the turn
+    to proceed as text-only. Returns how many files were actually attached."""
     resolved = resolve_image_inputs(image_urls)
     if not resolved:
         return 0
     paths = _write_temp_images(resolved)
     if not paths:
         return 0
+    has_documents = any(ext.lower() not in _IMAGE_EXTENSIONS for _, ext in resolved)
     try:
         selector = await find_first(page, selectors.FILE_INPUT, timeout_ms=UPLOAD_INPUT_TIMEOUT_MS)
         if not selector:
             return 0
         await page.set_input_files(selector, paths)
-        await _wait_uploads_ready(page)
+        await _wait_uploads_ready(page, has_documents=has_documents)
         return len(paths)
     finally:
         for path in paths:
@@ -379,15 +385,38 @@ def _write_temp_images(resolved: list[tuple[bytes, str]]) -> list[str]:
     return paths
 
 
-async def _wait_uploads_ready(page: Any) -> None:
-    """Give the upload time to finalize before sending. Waits for an attachment
-    preview to appear, then a short settle; if no preview selector matches (DOM
-    drift), falls back to a fixed wait so we don't send before the upload lands."""
+async def _wait_uploads_ready(page: Any, has_documents: bool = False) -> None:
+    """Give the upload time to finalize before sending.
+
+    Phase 1 (all types): wait for an attachment preview chip — quick signal that
+    the browser registered the file. Phase 2: for documents ChatGPT disables the
+    send button while processing; poll until it re-enables. For images only the
+    original short settle is sufficient."""
     deadline = time.monotonic() + _UPLOAD_DETECT_TIMEOUT_SECONDS
     detected = False
     while time.monotonic() < deadline:
         if await any_selector_found(page, selectors.ATTACHMENT_PREVIEW):
             detected = True
             break
+        await asyncio.sleep(0.3)
+    if has_documents:
+        await _wait_send_button_enabled(page)
+    else:
+        await asyncio.sleep(_UPLOAD_SETTLE_SECONDS if detected else _UPLOAD_FALLBACK_SECONDS)
+
+
+async def _wait_send_button_enabled(page: Any, timeout_seconds: float = _UPLOAD_SEND_READY_TIMEOUT_SECONDS) -> None:
+    """Poll until ChatGPT's send button is not disabled (document processing done)."""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            result = await page.evaluate(
+                "() => { const b = document.querySelector(\"button[data-testid='send-button']\");"
+                " if (!b) return null;"
+                " return b.disabled || b.getAttribute('aria-disabled') === 'true'; }"
+            )
+            if result is False:
+                return
+        except Exception:
+            pass
         await asyncio.sleep(0.5)
-    await asyncio.sleep(_UPLOAD_SETTLE_SECONDS if detected else _UPLOAD_FALLBACK_SECONDS)

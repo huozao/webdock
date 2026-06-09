@@ -21,11 +21,28 @@ _DATA_URL_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 _EXT_BY_MIME = {
+    # Images
     "image/png": ".png",
     "image/jpeg": ".jpg",
     "image/jpg": ".jpg",
     "image/webp": ".webp",
     "image/gif": ".gif",
+    "image/heic": ".heic",
+    "image/heif": ".heif",
+    "image/avif": ".avif",
+    # Binary documents (ChatGPT-supported)
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/msword": ".doc",
+    "application/vnd.ms-excel": ".xls",
+    "application/vnd.ms-powerpoint": ".ppt",
+    "application/zip": ".zip",
+    "text/plain": ".txt",
+    "text/csv": ".csv",
+    "text/markdown": ".md",
+    "application/json": ".json",
 }
 
 
@@ -118,4 +135,4 @@ def _ext_for(data: bytes, mime: str | None) -> str:
         return ".gif"
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return ".webp"
-    return ".png"
+    return ".bin"

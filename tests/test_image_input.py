@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+
 from src.browser.image_input import (
     MAX_INPUT_IMAGES,
     extract_image_urls,
@@ -71,3 +73,47 @@ def test_resolve_image_inputs_skips_failures():
     out = resolve_image_inputs([PNG_DATA_URL, "not-a-url", "data:nocomma"])
 
     assert len(out) == 1
+
+
+# --- Document / non-image MIME types ---
+
+PDF_BYTES = b"%PDF-1.4 stub content"
+PDF_DATA_URL = "data:application/pdf;base64," + base64.b64encode(PDF_BYTES).decode()
+
+DOCX_DATA_URL = (
+    "data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,"
+    + base64.b64encode(b"PK stub docx").decode()
+)
+
+
+def test_resolve_image_handles_pdf_data_url():
+    result = resolve_image(PDF_DATA_URL)
+
+    assert result is not None
+    data, ext = result
+    assert ext == ".pdf"
+    assert data == PDF_BYTES
+
+
+def test_resolve_image_handles_docx_data_url():
+    result = resolve_image(DOCX_DATA_URL)
+
+    assert result is not None
+    _, ext = result
+    assert ext == ".docx"
+
+
+def test_resolve_image_fallback_ext_is_bin_for_unknown_mime():
+    unknown = base64.b64encode(b"this is not any known format xyz").decode()
+    result = resolve_image(f"data:application/octet-stream;base64,{unknown}")
+
+    assert result is not None
+    _, ext = result
+    assert ext == ".bin"
+
+
+def test_resolve_image_still_sniffs_png_when_mime_missing():
+    result = resolve_image(f"data:;base64,{PNG_B64}")
+
+    assert result is not None
+    assert result[1] == ".png"

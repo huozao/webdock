@@ -9,6 +9,7 @@ The first service is a ChatGPT browser relay:
 - FastAPI attaches to the same browser through local CDP.
 - `/v1/chat/completions` exposes a minimal OpenAI-compatible text API for OpenClaw.
 - Requests can be routed into stable `wechat_account + chat_type + peer_id` lanes so test WeChat accounts A/B/C can keep separate ChatGPT pages while sharing one logged-in ChatGPT profile.
+- `/storage/photos` stores Couple Memory original photos on the old laptop for AliECS.
 
 ## Recommended Topology
 
@@ -17,6 +18,8 @@ WeChat -> ECS OpenClaw -> ECS bridge -> Tailscale -> Ubuntu laptop webdock -> br
 ```
 
 Keep `18000` and `6080` private. Prefer Tailscale between ECS and the laptop. Do not expose noVNC to the public internet.
+
+Couple Memory photos are stored under `HOST_PHOTO_STORAGE_DIR` on the laptop and are accessed by AliECS through the private WebDock API token, not by direct public laptop URLs.
 
 ## Ubuntu Laptop Quick Start
 

@@ -2,6 +2,7 @@ fastapi>=0.115
 uvicorn[standard]>=0.32
 pydantic>=2.5
 python-dotenv>=1.0
+python-multipart>=0.0.20
 patchright==1.60.0
 pytest>=8.0
 httpx>=0.27

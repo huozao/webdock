@@ -18,6 +18,7 @@ class Settings:
     browser_profile_dir: Path = Path("browser_data")
     debug_dir: Path = Path("logs/debug")
     archive_dir: Path = Path("logs/archive")
+    photo_storage_dir: Path = Path("photo_storage")
     archive_enabled: bool = True
     chatgpt_url: str = "https://chatgpt.com/"
     chat_timeout_seconds: int = 120
@@ -46,6 +47,7 @@ class Settings:
     def ensure_dirs(self) -> None:
         self.browser_profile_dir.mkdir(parents=True, exist_ok=True)
         self.debug_dir.mkdir(parents=True, exist_ok=True)
+        self.photo_storage_dir.mkdir(parents=True, exist_ok=True)
         if self.archive_enabled:
             self.archive_dir.mkdir(parents=True, exist_ok=True)
 
@@ -63,6 +65,7 @@ def get_settings() -> Settings:
         browser_profile_dir=_path_from_env(_get("BROWSER_PROFILE_DIR", "browser_data", env)),
         debug_dir=_path_from_env(_get("DEBUG_DIR", "logs/debug", env)),
         archive_dir=_path_from_env(_get("ARCHIVE_DIR", "logs/archive", env)),
+        photo_storage_dir=_path_from_env(_get("PHOTO_STORAGE_DIR", "photo_storage", env)),
         archive_enabled=_get("ARCHIVE_ENABLED", "true", env).lower() == "true",
         chatgpt_url=_get("CHATGPT_URL", "https://chatgpt.com/", env),
         chat_timeout_seconds=int(_get("CHAT_TIMEOUT_SECONDS", "120", env)),

@@ -10,6 +10,7 @@ from src.api.routes_browser import router as browser_router
 from src.api.routes_chat import router as chat_router
 from src.api.routes_health import router as health_router
 from src.api.routes_media import router as media_router
+from src.api.routes_storage import router as storage_router
 from src.browser.lane_scheduler import ChatLaneScheduler
 from src.browser.manager import BrowserManager
 from src.browser.media_store import MediaStore
@@ -69,6 +70,7 @@ def create_app(*, start_browser: bool = True) -> FastAPI:
     app.include_router(browser_router)
     app.include_router(chat_router)
     app.include_router(media_router)
+    app.include_router(storage_router)
     return app
 
 

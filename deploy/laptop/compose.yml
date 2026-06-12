@@ -28,6 +28,7 @@ services:
       DISPLAY_DEPTH: "24"
       BROWSER_PROFILE_DIR: /app/browser_data
       DEBUG_DIR: /app/logs/debug
+      PHOTO_STORAGE_DIR: /app/photo_storage
       BROWSER_MODE: ${BROWSER_MODE:-ecs_cdp}
       CDP_URL: ${CDP_URL:-http://127.0.0.1:9222}
       CDP_CONNECT_TIMEOUT_SECONDS: ${CDP_CONNECT_TIMEOUT_SECONDS:-60}
@@ -57,6 +58,7 @@ services:
     volumes:
       - ${HOST_BROWSER_DATA_DIR:-/var/lib/webdock/browser_data}:/app/browser_data
       - ${HOST_LOGS_DIR:-/var/log/webdock}:/app/logs
+      - ${HOST_PHOTO_STORAGE_DIR:-/var/lib/webdock/photo_storage}:/app/photo_storage
     shm_size: "2gb"
     security_opt:
       - seccomp=unconfined

@@ -93,6 +93,28 @@ def test_openai_prompt_builder_removes_openclaw_metadata_prefix():
     assert prompt == "bridge test"
 
 
+def test_openai_prompt_builder_removes_unfenced_openclaw_metadata_prefix():
+    prompt = build_prompt_from_messages(
+        [
+            {
+                "role": "user",
+                "content": (
+                    "[Fri 2026-06-12 02:55 UTC] Conversation info (untrusted metadata):\n"
+                    "json\n"
+                    '{\n'
+                    '  "chat_id": "o9cq80whD47YZs0xR1Y9Ih8rdVnc@im.wechat",\n'
+                    '  "message_id": "openclaw-weixin:1781232935667-3a8642ac",\n'
+                    '  "timestamp": "Fri 2026-06-12 02:55:35 UTC"\n'
+                    "}\n"
+                    "/新对话 现在几点了？"
+                ),
+            }
+        ]
+    )
+
+    assert prompt == "/新对话 现在几点了？"
+
+
 def test_openai_prompt_builder_accepts_text_content_list():
     prompt = build_prompt_from_messages(
         [

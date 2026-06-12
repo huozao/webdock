@@ -15,8 +15,8 @@ from src.utils.errors import ErrorCode, RelayError, error_response
 
 router = APIRouter()
 
-_OPENCLAW_METADATA_RE = re.compile(
-    r"\AConversation info \(untrusted metadata\):\s*```json\s*.*?```\s*",
+_OPENCLAW_METADATA_PREFIX_RE = re.compile(
+    r"\A(?:\[[^\]\n]*UTC\]\s*)?Conversation info \(untrusted metadata\):\s*",
     flags=re.DOTALL,
 )
 
@@ -96,7 +96,37 @@ def build_prompt_from_messages(messages: list[dict[str, Any]]) -> str:
 def clean_openclaw_metadata(text: str) -> str:
     if not isinstance(text, str):
         return ""
-    return _OPENCLAW_METADATA_RE.sub("", text).strip()
+    metadata_end = _openclaw_metadata_prefix_end(text)
+    return (text[metadata_end:] if metadata_end else text).strip()
+
+
+def _openclaw_metadata_prefix_end(text: str) -> int:
+    match = _OPENCLAW_METADATA_PREFIX_RE.match(text)
+    if not match:
+        return 0
+
+    pos = match.end()
+    fence = re.match(r"```json\s*", text[pos:], flags=re.IGNORECASE)
+    if fence:
+        payload_start = pos + fence.end()
+        payload_end = text.find("```", payload_start)
+        if payload_end < 0:
+            return 0
+        end = payload_end + 3
+    else:
+        language = re.match(r"json(?:\s+|$)", text[pos:], flags=re.IGNORECASE)
+        if language:
+            pos += language.end()
+        while pos < len(text) and text[pos].isspace():
+            pos += 1
+        try:
+            _payload, end = json.JSONDecoder().raw_decode(text, pos)
+        except json.JSONDecodeError:
+            return 0
+
+    while end < len(text) and text[end].isspace():
+        end += 1
+    return end
 
 
 def extract_images_from_messages(messages: list[dict[str, Any]]) -> list[str]:

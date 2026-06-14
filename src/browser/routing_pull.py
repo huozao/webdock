@@ -9,7 +9,7 @@ from threading import Event
 from typing import Any, Callable
 from urllib.request import urlopen
 
-from src.browser.lane_routing import CONFIG_FILENAME
+from src.browser.lane_routing import CONFIG_FILENAME, FEISHU_CONFIG_FILENAME
 from src.config import get_settings
 
 log = logging.getLogger(__name__)
@@ -61,6 +61,31 @@ class RoutingConfigPuller:
         while not stop.is_set():
             self.run_once()
             sleep(self.interval_seconds)
+
+
+def build_pullers(
+    backend_base_url: str | None,
+    profile_dir: Path,
+    *,
+    interval_seconds: int = 60,
+) -> list[RoutingConfigPuller]:
+    """Build one puller per channel, or [] when no backend URL is configured.
+
+    Returning [] (graceful no-op) keeps webdock working standalone when the
+    control-plane backend URL is not set in the environment.
+    """
+    if not backend_base_url:
+        return []
+    return [
+        RoutingConfigPuller(
+            backend_base_url, profile_dir / CONFIG_FILENAME,
+            channel="wechat", interval_seconds=interval_seconds,
+        ),
+        RoutingConfigPuller(
+            backend_base_url, profile_dir / FEISHU_CONFIG_FILENAME,
+            channel="feishu", interval_seconds=interval_seconds,
+        ),
+    ]
 
 
 def _is_valid_config(data: Any) -> bool:

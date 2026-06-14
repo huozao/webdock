@@ -45,3 +45,21 @@ def test_pull_routing_config_failure_keeps_old_file(tmp_path):
 
     assert ok is False
     assert json.loads(target.read_text(encoding="utf-8")) == original
+
+
+def test_build_pullers_empty_when_no_url(tmp_path):
+    from src.browser.routing_pull import build_pullers
+
+    assert build_pullers(None, tmp_path) == []
+    assert build_pullers("", tmp_path) == []
+
+
+def test_build_pullers_returns_wechat_and_feishu(tmp_path):
+    from src.browser.routing_pull import build_pullers
+
+    pullers = build_pullers("https://aliecs.example/api", tmp_path, interval_seconds=30)
+
+    assert {p.channel for p in pullers} == {"wechat", "feishu"}
+    assert {p.target_path.name for p in pullers} == {"wechat_projects.json", "feishu_projects.json"}
+    assert all(p.interval_seconds == 30 for p in pullers)
+    assert all(p.backend_base_url == "https://aliecs.example/api" for p in pullers)

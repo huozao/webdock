@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import threading
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -14,6 +16,7 @@ from src.api.routes_storage import router as storage_router
 from src.browser.lane_scheduler import ChatLaneScheduler
 from src.browser.manager import BrowserManager
 from src.browser.media_store import MediaStore
+from src.browser.routing_pull import build_pullers
 from src.config import get_settings
 from src.utils.errors import ErrorCode, error_response
 from src.utils.logging import setup_logging
@@ -36,7 +39,23 @@ def create_app(*, start_browser: bool = True) -> FastAPI:
                 await app.state.browser.start()
             except Exception as exc:
                 app.state.browser.last_error = str(exc)
+        # Periodically pull DB-driven routing (wechat/feishu) from backend so the
+        # control-plane (企微A表→DB→运行时) reaches webdock. No-ops gracefully
+        # when ALI_ECS_BACKEND_URL/BACKEND_BASE_URL is unset (standalone mode).
+        app.state.routing_stop = threading.Event()
+        app.state.routing_threads = []
+        backend_url = os.getenv("ALI_ECS_BACKEND_URL") or os.getenv("BACKEND_BASE_URL")
+        for puller in build_pullers(backend_url, settings.browser_profile_dir):
+            thread = threading.Thread(
+                target=puller.run_forever,
+                args=(app.state.routing_stop,),
+                name=f"routing-puller-{puller.channel}",
+                daemon=True,
+            )
+            thread.start()
+            app.state.routing_threads.append(thread)
         yield
+        app.state.routing_stop.set()
         await app.state.browser.stop()
 
     app = FastAPI(title="webdock", version="0.1.0", lifespan=lifespan)

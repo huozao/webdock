@@ -41,6 +41,7 @@ LANE_FALLBACK_WINDOW_SECONDS = 120.0
 
 @dataclass(frozen=True)
 class LaneContext:
+    channel: str
     wechat_account: str
     chat_type: str
     peer_id: str
@@ -49,17 +50,20 @@ class LaneContext:
 
     @property
     def key(self) -> str:
-        return build_lane_key(self.wechat_account, self.chat_type, self.peer_id)
+        return build_channel_lane_key(self.channel, self.wechat_account, self.chat_type, self.peer_id)
 
     @classmethod
     def from_metadata(cls, metadata: dict[str, Any] | None) -> "LaneContext":
         data = metadata or {}
+        channel = _safe_channel(data.get("channel") or data.get("platform") or data.get("source"))
         wechat_account = _safe_part(data.get("wechat_account") or data.get("account") or "default")
         chat_type = _safe_part(data.get("chat_type") or "private")
-        peer_id = _safe_part(data.get("peer_id") or data.get("chat_id") or data.get("user_id") or "default")
-        project = _safe_project(data.get("chatgpt_project") or data.get("project") or f"WeChat-{wechat_account}")
+        peer_id = _safe_part(data.get("peer_id") or data.get("open_id") or data.get("chat_id") or data.get("user_id") or "default")
+        default_project = "Feishu" if channel == "feishu" else f"WeChat-{wechat_account}"
+        project = _safe_project(data.get("chatgpt_project") or data.get("project") or default_project)
         target_url = data.get("chatgpt_conversation_url") or data.get("chatgpt_project_url") or data.get("chatgpt_url")
         return cls(
+            channel=channel,
             wechat_account=wechat_account,
             chat_type=chat_type,
             peer_id=peer_id,
@@ -108,7 +112,7 @@ class ChatLaneScheduler:
                 # "/新对话" with no payload: just drop the saved conversation so the
                 # next real message opens a fresh chat in the project. No round-trip.
                 if force_new and not clean_message:
-                    self._router.clear_conversation(lane.peer_id)
+                    _router_clear_conversation(self._router, lane)
                     await self._archiver(
                         lane, clean_message, images,
                         answer=NEW_CONVERSATION_ACK, duration=0.0, kind="new_conversation",
@@ -128,7 +132,7 @@ class ChatLaneScheduler:
                     # save_debug_dump attached), then let the caller handle it.
                     await self._archiver(lane, clean_message, images, error=exc)
                     raise
-                self._record_conversation(lane.peer_id, page)
+                self._record_conversation(lane, page)
                 await self._archiver(lane, clean_message, images, answer=answer, duration=duration)
                 return answer, duration
 
@@ -145,10 +149,10 @@ class ChatLaneScheduler:
             inherited = self._recent_active_lane()
             if inherited is not None:
                 lane = inherited
-        if self._router.is_configured(lane.peer_id):
+        if _router_is_configured(self._router, lane):
             self._last_active_lane = lane
             self._last_active_at = time.monotonic()
-        target_url = self._router.resolve_target_url(lane.peer_id, force_new=force_new)
+        target_url = _router_resolve_target_url(self._router, lane, force_new=force_new)
         if target_url and target_url != lane.target_url:
             lane = dataclasses.replace(lane, target_url=target_url)
         return lane
@@ -178,10 +182,13 @@ class ChatLaneScheduler:
         except Exception as exc:  # navigation failure must not block the chat
             log.warning("Lane routing navigation to %s failed: %s", target_url, exc)
 
-    def _record_conversation(self, peer_id: str, page: Any) -> None:
+    def _record_conversation(self, lane: LaneContext, page: Any) -> None:
         url = _safe_page_url(page)
         if is_conversation_url(url):
-            self._router.record_conversation_url(peer_id, url)
+            try:
+                self._router.record_conversation_url(lane.peer_id, url, channel=lane.channel)
+            except TypeError:
+                self._router.record_conversation_url(lane.peer_id, url)
 
     async def status(self) -> dict[str, Any]:
         return {
@@ -200,6 +207,12 @@ class ChatLaneScheduler:
 
 def build_lane_key(wechat_account: str, chat_type: str, peer_id: str) -> str:
     return f"wechat:{_safe_part(wechat_account)}:{_safe_part(chat_type)}:{_safe_part(peer_id)}"
+
+
+def build_channel_lane_key(channel: str, wechat_account: str, chat_type: str, peer_id: str) -> str:
+    if _safe_channel(channel) == "feishu":
+        return f"feishu:{_safe_part(peer_id)}"
+    return build_lane_key(wechat_account, chat_type, peer_id)
 
 
 async def _page_for_lane(browser: Any, lane: LaneContext) -> object:
@@ -225,6 +238,34 @@ def _safe_part(value: Any) -> str:
     return _SAFE_KEY_RE.sub("_", text)[:96]
 
 
+def _safe_channel(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"feishu", "lark"}:
+        return "feishu"
+    return "wechat"
+
+
 def _safe_project(value: Any) -> str:
     text = str(value or "").strip() or "WeChat-default"
     return text[:128]
+
+
+def _router_is_configured(router: LaneRouter, lane: LaneContext) -> bool:
+    try:
+        return router.is_configured(lane.peer_id, channel=lane.channel)
+    except TypeError:
+        return router.is_configured(lane.peer_id)
+
+
+def _router_resolve_target_url(router: LaneRouter, lane: LaneContext, *, force_new: bool) -> str | None:
+    try:
+        return router.resolve_target_url(lane.peer_id, force_new=force_new, channel=lane.channel)
+    except TypeError:
+        return router.resolve_target_url(lane.peer_id, force_new=force_new)
+
+
+def _router_clear_conversation(router: LaneRouter, lane: LaneContext) -> None:
+    try:
+        router.clear_conversation(lane.peer_id, channel=lane.channel)
+    except TypeError:
+        router.clear_conversation(lane.peer_id)

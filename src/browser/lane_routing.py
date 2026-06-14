@@ -16,6 +16,7 @@ NEW_CONVERSATION_TRIGGER = "/新对话"
 NEW_CONVERSATION_ACK = "✅ 已为你开启新对话，请发送你的问题。"
 
 CONFIG_FILENAME = "wechat_projects.json"
+FEISHU_CONFIG_FILENAME = "feishu_projects.json"
 STATE_FILENAME = "lane_state.json"
 
 
@@ -57,60 +58,72 @@ class LaneRouter:
     files degrade gracefully to "no routing" (fallback to current behaviour).
     """
 
-    def __init__(self, config_path: Path | None = None, state_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        config_path: Path | None = None,
+        state_path: Path | None = None,
+        feishu_config_path: Path | None = None,
+    ) -> None:
         if config_path is None or state_path is None:
             base = get_settings().browser_profile_dir
+        else:
+            base = Path(config_path).parent
         self._config_path = Path(config_path) if config_path else base / CONFIG_FILENAME
+        self._feishu_config_path = Path(feishu_config_path) if feishu_config_path else base / FEISHU_CONFIG_FILENAME
         self._state_path = Path(state_path) if state_path else base / STATE_FILENAME
         self._lock = Lock()
-        self._config = self._load_config()
+        self._configs = {
+            "wechat": self._load_config(self._config_path),
+            "feishu": self._load_config(self._feishu_config_path),
+        }
+        self._config = self._configs["wechat"]
         self._state = self._load_state()
 
     # ---- public API ----
-    def resolve_target_url(self, peer_id: str | None, *, force_new: bool = False) -> str | None:
+    def resolve_target_url(self, peer_id: str | None, *, force_new: bool = False, channel: str = "wechat") -> str | None:
         """The URL this lane should be on. None => not configured => fallback."""
         if not peer_id:
             return None
-        entry = self._config.get(peer_id)
+        entry = self._config_for(channel).get(peer_id)
         if not entry:
             return None
         project_url = entry.get("project_url")
         if force_new:
             return project_url
-        conversation_url = (self._state.get(peer_id) or {}).get("conversation_url")
+        conversation_url = (self._state.get(_state_key(channel, peer_id)) or {}).get("conversation_url")
         return conversation_url or project_url
 
-    def record_conversation_url(self, peer_id: str | None, url: str | None) -> None:
+    def record_conversation_url(self, peer_id: str | None, url: str | None, *, channel: str = "wechat") -> None:
         """Remember the live conversation URL for a configured peer."""
-        if not peer_id or not url or peer_id not in self._config:
+        if not peer_id or not url or peer_id not in self._config_for(channel):
             return
         with self._lock:
-            entry = self._state.setdefault(peer_id, {})
+            entry = self._state.setdefault(_state_key(channel, peer_id), {})
             if entry.get("conversation_url") == url:
                 return
             entry["conversation_url"] = url
             self._save_state_locked()
 
-    def clear_conversation(self, peer_id: str | None) -> None:
+    def clear_conversation(self, peer_id: str | None, *, channel: str = "wechat") -> None:
         """Forget the live conversation so the next message starts a new one."""
         if not peer_id:
             return
         with self._lock:
-            entry = self._state.get(peer_id)
+            entry = self._state.get(_state_key(channel, peer_id))
             if entry and "conversation_url" in entry:
                 entry.pop("conversation_url", None)
                 self._save_state_locked()
 
-    def is_configured(self, peer_id: str | None) -> bool:
-        return bool(peer_id) and peer_id in self._config
+    def is_configured(self, peer_id: str | None, *, channel: str = "wechat") -> bool:
+        return bool(peer_id) and peer_id in self._config_for(channel)
 
-    def lane_name(self, peer_id: str | None) -> str:
-        entry = self._config.get(peer_id or "")
+    def lane_name(self, peer_id: str | None, *, channel: str = "wechat") -> str:
+        entry = self._config_for(channel).get(peer_id or "")
         return (entry or {}).get("name") or (peer_id or "")
 
     # ---- internal ----
-    def _load_config(self) -> dict[str, dict[str, Any]]:
-        data = _read_json(self._config_path)
+    def _load_config(self, path: Path) -> dict[str, dict[str, Any]]:
+        data = _read_json(path)
         lanes = data.get("lanes") if isinstance(data, dict) else None
         if not isinstance(lanes, dict):
             return {}
@@ -119,6 +132,9 @@ class LaneRouter:
             if isinstance(entry, dict) and entry.get("project_url"):
                 config[str(peer_id)] = entry
         return config
+
+    def _config_for(self, channel: str) -> dict[str, dict[str, Any]]:
+        return self._configs.get(_normalize_channel(channel), self._configs["wechat"])
 
     def _load_state(self) -> dict[str, dict[str, Any]]:
         data = _read_json(self._state_path)
@@ -142,3 +158,12 @@ def _read_json(path: Path) -> Any:
     except Exception as exc:
         log.warning("Cannot read JSON %s: %s", path, exc)
         return {}
+
+
+def _normalize_channel(channel: str | None) -> str:
+    return "feishu" if str(channel or "").strip().lower() in {"feishu", "lark"} else "wechat"
+
+
+def _state_key(channel: str, peer_id: str) -> str:
+    normalized = _normalize_channel(channel)
+    return peer_id if normalized == "wechat" else f"{normalized}:{peer_id}"

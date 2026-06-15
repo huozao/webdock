@@ -90,6 +90,9 @@ class ChatLaneScheduler:
         self._lane_locks_guard = asyncio.Lock()
         self._media_store = media_store
         self._ask_func = ask_func or self._default_ask
+        # Only our default ask accepts the channel arg; injected ask_funcs (tests)
+        # keep the legacy (page, message) signature.
+        self._ask_func_takes_channel = ask_func is None
         self._router = router or LaneRouter()
         self._image_uploader = image_uploader or upload_images
         self._archiver = archiver or archive_exchange
@@ -97,8 +100,8 @@ class ChatLaneScheduler:
         self._last_active_lane: LaneContext | None = None
         self._last_active_at = 0.0
 
-    async def _default_ask(self, page: object, message: str) -> tuple[str, float]:
-        return await ChatGPTPage(page, media_store=self._media_store).ask(message)
+    async def _default_ask(self, page: object, message: str, channel: str = "wechat") -> tuple[str, float]:
+        return await ChatGPTPage(page, media_store=self._media_store, channel=channel).ask(message)
 
     async def ask(
         self, browser: Any, lane: LaneContext, message: str, images: list[str] | None = None
@@ -126,7 +129,11 @@ class ChatLaneScheduler:
                     # text that follows edits/answers about them in one turn.
                     await self._image_uploader(page, images)
                 try:
-                    answer, duration = await self._ask_func(page, clean_message)
+                    if self._ask_func_takes_channel:
+                        answer, duration = await self._ask_func(page, clean_message, lane.channel)
+                    else:
+                        # Injected ask_func uses the legacy (page, message) signature.
+                        answer, duration = await self._ask_func(page, clean_message)
                 except RelayError as exc:
                     # Archive the failed exchange too (with the DOM-snapshot dir
                     # save_debug_dump attached), then let the caller handle it.

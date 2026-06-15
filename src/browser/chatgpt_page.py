@@ -16,6 +16,7 @@ from src.browser.detector import (
     find_first,
     generated_image_srcs,
     latest_message_has_widget,
+    rich_assistant_markdown,
     rich_assistant_text,
     wait_for_response_complete,
 )
@@ -96,9 +97,10 @@ def _image_reply_text(answer: str, previous_text: str) -> str:
 
 
 class ChatGPTPage:
-    def __init__(self, page: Any, media_store: Any | None = None) -> None:
+    def __init__(self, page: Any, media_store: Any | None = None, channel: str = "wechat") -> None:
         self.page = page
         self._media_store = media_store
+        self._channel = channel
 
     async def ask(self, message: str) -> tuple[str, float]:
         settings = get_settings()
@@ -166,6 +168,13 @@ class ChatGPTPage:
                 # src, not on the text changing) — deliver the picture, dropping
                 # text that merely repeats the pre-send snapshot.
                 final_answer = _image_reply_text(final_answer, previous_assistant_text)
+            elif self._channel == "feishu":
+                # Feishu renders markdown (OpenClaw feishu plugin -> rich card), so
+                # send the structure-preserving markdown instead of the WeChat-style
+                # flattened plain text. No-op fallback if the markdown walk is empty.
+                markdown = await rich_assistant_markdown(self.page)
+                if markdown:
+                    final_answer = markdown
             final_answer = await self._append_media_images(
                 final_answer, settings.media_base_url, prev_srcs
             )

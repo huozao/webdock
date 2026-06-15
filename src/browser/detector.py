@@ -154,6 +154,107 @@ _RICH_TEXT_JS = r"""
 """
 
 
+# Walk the latest assistant message DOM into Markdown, preserving structure that
+# rich channels (Feishu) render: headings, bold/italic, inline code, fenced code
+# blocks (with language), links, ordered/unordered (nested) lists, tables, block
+# quotes and rules. Block-level elements are skipped inside inline() so a list/
+# table/code block never leaks into a paragraph. Widgets/buttons/SVG are dropped
+# (delivered as screenshots separately). Pure read; falls back to plain rich text.
+_RICH_MARKDOWN_JS = r"""
+() => {
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn']");
+  const el = turns[turns.length - 1];
+  if (!el) return "";
+  if (el.querySelector("[data-message-author-role='user']")) return "";
+  const roots = el.querySelectorAll(".markdown");
+  if (!roots.length) return "";
+  const SKIP = new Set(["BUTTON", "SVG", "PATH", "USE", "SCRIPT", "STYLE", "IMG"]);
+  const BLOCK = new Set(["P","H1","H2","H3","H4","H5","H6","UL","OL","PRE","BLOCKQUOTE","TABLE","HR","DIV","SECTION","ARTICLE"]);
+  const skip = (n) => {
+    if (SKIP.has(n.tagName)) return true;
+    if (n.getAttribute && n.getAttribute("role") === "button") return true;
+    const cls = typeof n.className === "string" ? n.className : "";
+    if (cls.indexOf("WidgetRenderer") >= 0 || cls.indexOf("not-markdown") >= 0) return true;
+    if (n.getAttribute && n.getAttribute("data-w-component")) return true;
+    return false;
+  };
+  const inline = (node) => {
+    let out = "";
+    for (const c of node.childNodes) {
+      if (c.nodeType === 3) { out += c.nodeValue; continue; }
+      if (c.nodeType !== 1 || skip(c)) continue;
+      const tag = c.tagName;
+      if (BLOCK.has(tag)) continue;
+      if (tag === "BR") { out += "  \n"; continue; }
+      if (tag === "STRONG" || tag === "B") { out += "**" + inline(c).trim() + "**"; continue; }
+      if (tag === "EM" || tag === "I") { out += "*" + inline(c).trim() + "*"; continue; }
+      if (tag === "DEL" || tag === "S") { out += "~~" + inline(c).trim() + "~~"; continue; }
+      if (tag === "CODE") { out += "`" + (c.innerText || c.textContent || "") + "`"; continue; }
+      if (tag === "A") {
+        const href = c.getAttribute("href") || "";
+        const txt = inline(c).trim() || href;
+        out += href ? "[" + txt + "](" + href + ")" : txt;
+        continue;
+      }
+      out += inline(c);
+    }
+    return out;
+  };
+  const cell = (c) => inline(c).replace(/\s+/g, " ").trim().replace(/\|/g, "\\|");
+  const table = (t) => {
+    const rows = [...t.querySelectorAll("tr")].map((tr) => [...tr.querySelectorAll("th,td")].map(cell)).filter((r) => r.length);
+    if (!rows.length) return "";
+    const cols = Math.max(...rows.map((r) => r.length));
+    const fill = (r) => { const a = r.slice(); while (a.length < cols) a.push(""); return a; };
+    const lines = ["| " + fill(rows[0]).join(" | ") + " |", "| " + Array(cols).fill("---").join(" | ") + " |"];
+    rows.slice(1).forEach((r) => lines.push("| " + fill(r).join(" | ") + " |"));
+    return lines.join("\n");
+  };
+  const list = (node, ordered, depth) => {
+    let out = "";
+    let i = 1;
+    for (const li of node.children) {
+      if (li.tagName !== "LI") continue;
+      const marker = ordered ? (i++ + ". ") : "- ";
+      out += "  ".repeat(depth) + marker + inline(li).trim() + "\n";
+      for (const ch of li.children) {
+        if (ch.tagName === "UL") out += list(ch, false, depth + 1);
+        else if (ch.tagName === "OL") out += list(ch, true, depth + 1);
+      }
+    }
+    return out;
+  };
+  const block = (node) => {
+    let out = "";
+    for (const c of node.childNodes) {
+      if (c.nodeType === 3) { if (c.nodeValue && c.nodeValue.trim()) out += c.nodeValue.trim() + " "; continue; }
+      if (c.nodeType !== 1 || skip(c)) continue;
+      const tag = c.tagName;
+      if (/^H[1-6]$/.test(tag)) { out += "\n" + "#".repeat(+tag[1]) + " " + inline(c).trim() + "\n\n"; continue; }
+      if (tag === "P") { const t = inline(c).trim(); if (t) out += t + "\n\n"; continue; }
+      if (tag === "UL") { out += list(c, false, 0) + "\n"; continue; }
+      if (tag === "OL") { out += list(c, true, 0) + "\n"; continue; }
+      if (tag === "PRE") {
+        const code = c.querySelector("code");
+        const cls = code && typeof code.className === "string" ? code.className : "";
+        const m = cls.match(/language-([\w+#.-]+)/);
+        const txt = ((code || c).innerText || (code || c).textContent || "").replace(/\n+$/, "");
+        out += "```" + (m ? m[1] : "") + "\n" + txt + "\n```\n\n"; continue;
+      }
+      if (tag === "BLOCKQUOTE") { out += block(c).trim().split("\n").map((l) => "> " + l).join("\n") + "\n\n"; continue; }
+      if (tag === "TABLE") { out += table(c) + "\n\n"; continue; }
+      if (tag === "HR") { out += "---\n\n"; continue; }
+      out += block(c);
+    }
+    return out;
+  };
+  const parts = [];
+  for (const root of roots) parts.push(block(root));
+  return parts.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+"""
+
+
 async def find_first(page: Any, selector_list: list[str], *, visible: bool = False, timeout_ms: int = 1000) -> str | None:
     state = "visible" if visible else "attached"
     for selector in selector_list:
@@ -198,6 +299,19 @@ async def rich_assistant_text(page: Any) -> str:
     if not text:
         return await latest_assistant_text(page)
     return _clean_assistant_text(text)
+
+
+async def rich_assistant_markdown(page: Any) -> str:
+    """Markdown of the latest assistant message (tables/code/links/emphasis kept),
+    for channels that render markdown (Feishu). Falls back to the plain WeChat-style
+    text if the markdown walk yields nothing."""
+    try:
+        text = await page.evaluate(_RICH_MARKDOWN_JS)
+    except Exception:
+        text = ""
+    if not text or not text.strip():
+        return await rich_assistant_text(page)
+    return text.strip()
 
 
 async def assistant_message_count(page: Any) -> int:

@@ -72,10 +72,12 @@ class LaneRouter:
         self._feishu_config_path = Path(feishu_config_path) if feishu_config_path else base / FEISHU_CONFIG_FILENAME
         self._state_path = Path(state_path) if state_path else base / STATE_FILENAME
         self._lock = Lock()
+        self._config_paths = {"wechat": self._config_path, "feishu": self._feishu_config_path}
         self._configs = {
             "wechat": self._load_config(self._config_path),
             "feishu": self._load_config(self._feishu_config_path),
         }
+        self._config_mtimes = {ch: _mtime(p) for ch, p in self._config_paths.items()}
         self._config = self._configs["wechat"]
         self._state = self._load_state()
 
@@ -134,7 +136,28 @@ class LaneRouter:
         return config
 
     def _config_for(self, channel: str) -> dict[str, dict[str, Any]]:
-        return self._configs.get(_normalize_channel(channel), self._configs["wechat"])
+        normalized = _normalize_channel(channel)
+        self._maybe_reload(normalized)
+        return self._configs.get(normalized, self._configs["wechat"])
+
+    def _maybe_reload(self, channel: str) -> None:
+        """Reload a channel's config from disk when its file changed. The routing
+        puller rewrites wechat_projects.json / feishu_projects.json every ~60s from
+        the control-plane sheet, so a long-running webdock must pick up project_url
+        changes without a restart (config is otherwise only read at __init__)."""
+        path = self._config_paths.get(channel)
+        if path is None:
+            return
+        mtime = _mtime(path)
+        if mtime == self._config_mtimes.get(channel):
+            return
+        with self._lock:
+            if mtime == self._config_mtimes.get(channel):
+                return
+            self._configs[channel] = self._load_config(path)
+            self._config_mtimes[channel] = mtime
+            if channel == "wechat":
+                self._config = self._configs["wechat"]
 
     def _load_state(self) -> dict[str, dict[str, Any]]:
         data = _read_json(self._state_path)
@@ -148,6 +171,13 @@ class LaneRouter:
             os.replace(tmp, self._state_path)
         except Exception as exc:  # never let state IO break a chat
             log.warning("Cannot save lane state %s: %s", self._state_path, exc)
+
+
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def _read_json(path: Path) -> Any:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 
 from src.browser.lane_routing import (
     LaneRouter,
@@ -36,6 +37,24 @@ def test_parse_trigger_variants():
     assert parse_new_conversation_trigger("你好") == (False, "你好")
     # boundary: a longer word that merely starts with the trigger is NOT a trigger
     assert parse_new_conversation_trigger("/新对话题目") == (False, "/新对话题目")
+
+
+def test_config_hot_reloads_when_file_changes(tmp_path):
+    """The routing puller rewrites the config file when the control-plane sheet
+    changes; a long-running LaneRouter must pick up the new project_url without a
+    restart (so /新对话 opens the NEW project)."""
+    config = tmp_path / "wechat_projects.json"
+    _write_config(config, {"A": {"name": "微信A", "project_url": PROJECT_A}})
+    router = LaneRouter(config_path=config, state_path=tmp_path / "lane_state.json")
+
+    assert router.resolve_target_url("A", force_new=True) == PROJECT_A
+
+    new_project = "https://chatgpt.com/g/g-p-bbbb-weixin-a/project"
+    _write_config(config, {"A": {"name": "微信A", "project_url": new_project}})
+    os.utime(config, (config.stat().st_atime, config.stat().st_mtime + 5))  # ensure mtime change is seen
+
+    assert router.resolve_target_url("A", force_new=True) == new_project
+    assert router.is_configured("A") is True
 
 
 def test_is_conversation_url():

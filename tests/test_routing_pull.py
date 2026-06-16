@@ -33,6 +33,33 @@ def test_pull_routing_config_success_overwrites_local_file(tmp_path):
     assert json.loads(target.read_text(encoding="utf-8")) == {"lanes": {"wxid_a": {"name": "张三", "project_url": "p1"}}}
 
 
+def test_pull_routing_config_calls_opener_like_urlopen(tmp_path):
+    """Regression: the opener must be called the way urllib.request.urlopen is
+    (url, data=None, timeout=...). A positional second arg lands in `data` (the
+    request body) and makes the real urlopen raise TypeError, so the routing file
+    silently never updates from the backend."""
+    target = tmp_path / "wechat_projects.json"
+    target.write_text(json.dumps({"lanes": {"old": {"project_url": "old"}}}), encoding="utf-8")
+    captured: dict = {}
+
+    def urlopen_like(url, data=None, timeout=None):  # mirrors urllib.request.urlopen
+        if data is not None:
+            raise TypeError("message_body should be a bytes-like object or an iterable")
+        captured["timeout"] = timeout
+        return FakeResponse({"lanes": {"wxid_a": {"project_url": "p1"}}})
+
+    ok = pull_routing_config(
+        "https://aliecs.example/v1/routing/wechat-projects.json",
+        target,
+        timeout=7.0,
+        opener=urlopen_like,
+    )
+
+    assert ok is True
+    assert captured["timeout"] == 7.0
+    assert json.loads(target.read_text(encoding="utf-8")) == {"lanes": {"wxid_a": {"project_url": "p1"}}}
+
+
 def test_pull_routing_config_failure_keeps_old_file(tmp_path):
     target = tmp_path / "wechat_projects.json"
     original = {"lanes": {"old": {"project_url": "old"}}}

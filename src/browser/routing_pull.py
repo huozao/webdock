@@ -20,7 +20,10 @@ OpenUrl = Callable[[str, float], Any]
 def pull_routing_config(url: str, target_path: Path, *, timeout: float = 5.0, opener: OpenUrl | None = None) -> bool:
     open_url = opener or urlopen
     try:
-        with open_url(url, timeout) as response:
+        # Pass timeout as a keyword: the real urllib.request.urlopen takes
+        # (url, data=None, timeout=...), so a positional second arg would be sent
+        # as the request BODY (data) and raise TypeError, silently never updating.
+        with open_url(url, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
         if not _is_valid_config(data):
             raise ValueError("routing config must be an object with lanes")

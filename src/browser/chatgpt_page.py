@@ -298,14 +298,17 @@ def _build_render_html(widget_html: str) -> str:
 
 
 async def _screenshot_widget(page: Any, widget: Any) -> bytes | None:
-    """Render a static, self-contained copy of the widget in a throwaway page and
-    screenshot that. The widget's outerHTML is cloned with all computed styles
-    inlined, then loaded via set_content into a fresh page that has no ChatGPT JS
-    — so animations (e.g. a clock's second hand) are frozen at the captured frame
-    and there is no scroll/clip misalignment. Returns None on any failure (better
-    no image than a wrong one)."""
+    """Screenshot the live widget first, preserving inherited page/background
+    styles. If that fails, render a static copy in a throwaway page and screenshot
+    that as a fallback. Returns None on total failure."""
     try:
         await widget.scroll_into_view_if_needed(timeout=3000)
+    except Exception:
+        pass
+    try:
+        live = await widget.screenshot(timeout=8000)
+        if live:
+            return live
     except Exception:
         pass
     try:

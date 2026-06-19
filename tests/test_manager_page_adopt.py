@@ -58,6 +58,11 @@ def _lane(target_url: str) -> LaneContext:
     return dataclasses.replace(lane, target_url=target_url)
 
 
+def _lane_with_previous(target_url: str, previous_target_url: str) -> LaneContext:
+    lane = LaneContext.from_metadata({"peer_id": "u1"})
+    return dataclasses.replace(lane, target_url=target_url, previous_target_url=previous_target_url)
+
+
 def test_adopt_reuses_first_and_closes_duplicates():
     conv = "https://chatgpt.com/g/g-p-x/c/dup-1"
     p1 = FakePage(conv)
@@ -104,3 +109,22 @@ def test_reset_lane_page_closes_existing_and_opens_new_tab():
     assert new_page.goto_calls == ["https://chatgpt.com/g/g-p-x/project"]
     assert mgr._lane_pages[lane.key] is new_page
     assert mgr._page is new_page
+
+
+def test_reset_lane_page_closes_untracked_previous_conversation_after_restart():
+    old_page = FakePage("https://chatgpt.com/g/g-p-x/c/old-active")
+    other_page = FakePage("https://chatgpt.com/g/g-p-x/c/other")
+    context = FakeContext([old_page, other_page])
+    lane = _lane_with_previous(
+        "https://chatgpt.com/g/g-p-x/project",
+        "https://chatgpt.com/g/g-p-x/c/old-active",
+    )
+    mgr = BrowserManager()
+    mgr._context = context
+
+    new_page = asyncio.run(mgr.reset_lane_page(lane))
+
+    assert old_page.closed_called
+    assert not other_page.closed_called
+    assert new_page is context.created_pages[0]
+    assert new_page.goto_calls == ["https://chatgpt.com/g/g-p-x/project"]

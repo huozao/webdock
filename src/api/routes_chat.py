@@ -27,7 +27,11 @@ async def chat(request: Request, body: ChatRequest) -> JSONResponse:
     if isinstance(result, JSONResponse):
         return result
     answer, duration = result
-    return JSONResponse(content={"ok": True, "answer": answer, "duration_seconds": duration})
+    payload: dict[str, Any] = {"ok": True, "answer": answer, "duration_seconds": duration}
+    metadata = getattr(result, "metadata", None)
+    if metadata:
+        payload["metadata"] = metadata
+    return JSONResponse(content=payload)
 
 
 @router.get("/v1/models")
@@ -62,13 +66,14 @@ async def openai_chat_completions(
         raise HTTPException(status_code=result.status_code, detail=json.loads(result.body))
 
     answer, _duration = result
+    metadata = getattr(result, "metadata", None)
     if body.stream:
         return StreamingResponse(
             iter(build_openai_sse_events(body.model, answer)),
             media_type="text/event-stream; charset=utf-8",
             headers={"Cache-Control": "no-cache"},
         )
-    return build_openai_response(body.model, answer, prompt)
+    return build_openai_response(body.model, answer, prompt, metadata=metadata)
 
 
 def build_prompt_from_messages(messages: list[dict[str, Any]]) -> str:
@@ -157,7 +162,7 @@ def _content_to_text(content: Any) -> str:
 
 async def _ask_browser(
     request: Request, message: str, lane: LaneContext, images: list[str] | None = None
-) -> tuple[str, float] | JSONResponse:
+) -> Any | JSONResponse:
     browser = request.app.state.browser
     attach_error = await _ensure_browser_ready(browser)
     if attach_error:

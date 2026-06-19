@@ -47,6 +47,7 @@ class LaneContext:
     peer_id: str
     project: str
     target_url: str | None = None
+    previous_target_url: str | None = None
 
     @property
     def key(self) -> str:
@@ -62,6 +63,7 @@ class LaneContext:
         default_project = "Feishu" if channel == "feishu" else f"WeChat-{wechat_account}"
         project = _safe_project(data.get("chatgpt_project") or data.get("project") or default_project)
         target_url = data.get("chatgpt_conversation_url") or data.get("chatgpt_project_url") or data.get("chatgpt_url")
+        previous_target_url = data.get("previous_chatgpt_conversation_url") or data.get("previous_chatgpt_url")
         return cls(
             channel=channel,
             wechat_account=wechat_account,
@@ -69,7 +71,35 @@ class LaneContext:
             peer_id=peer_id,
             project=project,
             target_url=str(target_url).strip() if target_url else None,
+            previous_target_url=str(previous_target_url).strip() if previous_target_url else None,
         )
+
+
+@dataclass(frozen=True)
+class ChatResult:
+    answer: str
+    duration_seconds: float
+    lane: LaneContext
+    chatgpt_conversation_url: str | None = None
+
+    def __iter__(self):
+        yield self.answer
+        yield self.duration_seconds
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        lane = {
+            "key": self.lane.key,
+            "channel": self.lane.channel,
+            "chat_type": self.lane.chat_type,
+            "peer_id": self.lane.peer_id,
+            "project": self.lane.project,
+            "target_url": self.lane.target_url,
+        }
+        metadata: dict[str, Any] = {"lane": lane}
+        if self.chatgpt_conversation_url:
+            metadata["chatgpt_conversation_url"] = self.chatgpt_conversation_url
+        return metadata
 
 
 class ChatLaneScheduler:
@@ -105,7 +135,7 @@ class ChatLaneScheduler:
 
     async def ask(
         self, browser: Any, lane: LaneContext, message: str, images: list[str] | None = None
-    ) -> tuple[str, float]:
+    ) -> ChatResult:
         force_new, clean_message = parse_new_conversation_trigger(message)
         lane = self._resolve_lane(lane, force_new=force_new)
 
@@ -124,7 +154,7 @@ class ChatLaneScheduler:
                         lane, clean_message, images,
                         answer=NEW_CONVERSATION_ACK, duration=0.0, kind="new_conversation",
                     )
-                    return NEW_CONVERSATION_ACK, 0.0
+                    return ChatResult(NEW_CONVERSATION_ACK, 0.0, lane)
 
                 page = reset_page or await _page_for_lane(browser, lane)
                 await self._route_page(page, lane.target_url, force_new=force_new)
@@ -143,9 +173,9 @@ class ChatLaneScheduler:
                     # save_debug_dump attached), then let the caller handle it.
                     await self._archiver(lane, clean_message, images, error=exc)
                     raise
-                self._record_conversation(lane, page)
+                conversation_url = self._record_conversation(lane, page)
                 await self._archiver(lane, clean_message, images, answer=answer, duration=duration)
-                return answer, duration
+                return ChatResult(answer, duration, lane, conversation_url)
 
     def _resolve_lane(self, lane: LaneContext, *, force_new: bool) -> LaneContext:
         """Pick the lane this request really belongs to and attach its target URL.
@@ -193,13 +223,15 @@ class ChatLaneScheduler:
         except Exception as exc:  # navigation failure must not block the chat
             log.warning("Lane routing navigation to %s failed: %s", target_url, exc)
 
-    def _record_conversation(self, lane: LaneContext, page: Any) -> None:
+    def _record_conversation(self, lane: LaneContext, page: Any) -> str | None:
         url = _safe_page_url(page)
-        if is_conversation_url(url):
-            try:
-                self._router.record_conversation_url(lane.peer_id, url, channel=lane.channel)
-            except TypeError:
-                self._router.record_conversation_url(lane.peer_id, url)
+        if not is_conversation_url(url):
+            return None
+        try:
+            self._router.record_conversation_url(lane.peer_id, url, channel=lane.channel)
+        except TypeError:
+            self._router.record_conversation_url(lane.peer_id, url)
+        return url
 
     async def status(self) -> dict[str, Any]:
         return {

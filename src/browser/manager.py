@@ -70,6 +70,7 @@ class BrowserManager:
                 await existing.close()
             except Exception:
                 pass
+        await self._close_previous_lane_pages(lane, skip=existing)
 
         page = await self._context.new_page()
         await _navigate_lane_page(page, lane, get_settings())
@@ -77,6 +78,19 @@ class BrowserManager:
         self._lane_contexts[lane.key] = lane
         self._page = page
         return page
+
+    async def _close_previous_lane_pages(self, lane: LaneContext, *, skip: Any | None = None) -> None:
+        conv_id = _conversation_id(getattr(lane, "previous_target_url", None))
+        if conv_id is None or self._context is None:
+            return
+        for page in list(self._context.pages):
+            if page is skip or _is_page_closed(page):
+                continue
+            try:
+                if _conversation_id(page.url) == conv_id:
+                    await page.close()
+            except Exception:
+                continue
 
     async def _adopt_matching_page(self, lane: LaneContext) -> Any | None:
         """Reuse an already-open tab for this lane's conversation (and close any

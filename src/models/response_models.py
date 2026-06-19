@@ -56,7 +56,12 @@ class OpenAIChatCompletionResponse(BaseModel):
     usage: OpenAIUsage = Field(default_factory=OpenAIUsage)
 
 
-def build_openai_response(model: str, answer: str, prompt: str) -> dict[str, Any]:
+def build_openai_response(
+    model: str,
+    answer: str,
+    prompt: str,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     prompt_tokens = max(1, len(prompt) // 4)
     completion_tokens = max(1, len(answer) // 4)
     response = OpenAIChatCompletionResponse(
@@ -68,7 +73,10 @@ def build_openai_response(model: str, answer: str, prompt: str) -> dict[str, Any
             total_tokens=prompt_tokens + completion_tokens,
         ),
     )
-    return response.model_dump()
+    payload = response.model_dump()
+    if metadata:
+        payload["metadata"] = metadata
+    return payload
 
 
 def build_openai_models_response() -> dict[str, Any]:

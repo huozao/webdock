@@ -31,12 +31,42 @@ class FakeBrowser:
         return f"page:{lane.key}"
 
 
+class FakePage:
+    def __init__(self, url: str = "https://chatgpt.com/") -> None:
+        self._url = url
+
+    @property
+    def url(self) -> str:
+        return self._url
+
+    async def goto(self, url: str, **kwargs) -> None:
+        self._url = url
+
+    async def wait_for_selector(self, selector: str, **kwargs):
+        return object()
+
+
+class FakeBrowserWithPage(FakeBrowser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.lane_page = FakePage()
+
+    async def page_for_lane(self, lane):
+        self.lane_keys.append(lane.key)
+        return self.lane_page
+
+
 async def fake_ask(self, message: str) -> tuple[str, float]:
     return f"answer for: {message}", 0.1
 
 
 async def fake_ask_with_page(self, message: str) -> tuple[str, float]:
     return f"answer from {self.page}: {message}", 0.1
+
+
+async def fake_ask_sets_conversation_url(self, message: str) -> tuple[str, float]:
+    self.page._url = "https://chatgpt.com/g/g-p-lark/c/conv-feishu-1"
+    return f"answer from {self.page.url}: {message}", 0.1
 
 
 def make_client(monkeypatch, *, browser: FakeBrowser | None = None) -> tuple[TestClient, FakeBrowser]:
@@ -309,3 +339,36 @@ def test_openai_chat_completion_routes_metadata_to_wechat_lane(monkeypatch):
     assert response.json()["choices"][0]["message"]["content"] == (
         "answer from page:wechat:A:private:user-1: hello A"
     )
+
+
+def test_openai_chat_completion_returns_lane_conversation_metadata(monkeypatch):
+    from src.browser import lane_scheduler
+
+    monkeypatch.setattr(lane_scheduler.ChatGPTPage, "ask", fake_ask_sets_conversation_url)
+    app = create_app(start_browser=False)
+    fake_browser = FakeBrowserWithPage()
+    app.state.browser = fake_browser
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer change-me"},
+        json={
+            "model": "browser-chatgpt",
+            "messages": [{"role": "user", "content": "hello feishu"}],
+            "metadata": {
+                "channel": "feishu",
+                "chat_type": "group",
+                "peer_id": "group:oc_group1",
+                "chatgpt_project_url": "https://chatgpt.com/g/g-p-lark/project",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["choices"][0]["message"]["content"] == (
+        "answer from https://chatgpt.com/g/g-p-lark/c/conv-feishu-1: hello feishu"
+    )
+    assert body["metadata"]["chatgpt_conversation_url"] == "https://chatgpt.com/g/g-p-lark/c/conv-feishu-1"
+    assert body["metadata"]["lane"]["key"] == "feishu:group:oc_group1"

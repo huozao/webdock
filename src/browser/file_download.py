@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import mimetypes
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -50,13 +51,20 @@ def parse_download_targets(raw_targets: object) -> list[DownloadTarget]:
         kind = str(raw.get("kind") or "").strip().lower()
         href = _clean_optional(raw.get("href"))
         filename = _target_filename(raw)
-        if not filename or not _has_allowed_extension(filename):
+        if not filename:
             continue
         if href:
-            if not _is_chatgpt_generated_href(href):
+            # Link targets carry a real filename in the URL/label.
+            if not _is_chatgpt_generated_href(href) or not _has_allowed_extension(filename):
                 continue
-        elif kind != "button":
-            continue
+        else:
+            # Button targets are labelled with a localized action ("下载 PDF 扫描件"),
+            # not a filename. Accept on download intent; the authoritative filename
+            # and extension come from the download event (see _download_button).
+            if kind != "button":
+                continue
+            if not (_has_allowed_extension(filename) or _is_download_intent(filename)):
+                continue
         target = DownloadTarget(kind=kind or ("link" if href else "button"), filename=filename, href=href)
         if target.key in seen:
             continue
@@ -109,6 +117,10 @@ async def _download_button(page: object, target: DownloadTarget) -> DownloadedFi
     if not data or len(data) > MAX_DOWNLOAD_BYTES:
         return None
     filename = _safe_filename(getattr(download, "suggested_filename", "") or target.filename) or target.filename
+    if not _has_allowed_extension(filename):
+        # The real download decides the type; never forward a non-whitelisted file
+        # even if the button label looked like a download.
+        return None
     return DownloadedFile(filename=filename, content_type=_guess_content_type(filename), data=data)
 
 
@@ -138,6 +150,22 @@ def _is_chatgpt_generated_href(href: str) -> bool:
 
 def _has_allowed_extension(filename: str) -> bool:
     return Path(filename).suffix.lower() in ALLOWED_GENERATED_FILE_EXTENSIONS
+
+
+# ChatGPT labels a generated-file button with a localized action, not a filename
+# (e.g. "下载 PDF 扫描件", "Download the report"). Match download intent so we only
+# click real download affordances and never pay an expect_download timeout on an
+# unrelated inline button.
+_DOWNLOAD_INTENT_RE = re.compile(
+    r"下载|下載|导出|導出|另存|保存|download|export"
+    r"|\b(?:pdf|word|excel|csv|pptx?|docx?|xlsx?|txt)\b"
+    r"|文档|文檔|表格|文件|附件",
+    re.IGNORECASE,
+)
+
+
+def _is_download_intent(label: str | None) -> bool:
+    return bool(label and _DOWNLOAD_INTENT_RE.search(label))
 
 
 def _safe_filename(value: str | None) -> str | None:

@@ -120,9 +120,14 @@ class _FakeBrowser:
     def __init__(self, page):
         self._page = page
         self.calls = []
+        self.reset_calls = []
 
     async def page_for_lane(self, lane):
         self.calls.append(lane.key)
+        return self._page
+
+    async def reset_lane_page(self, lane):
+        self.reset_calls.append(lane.key)
         return self._page
 
 
@@ -159,6 +164,7 @@ def test_new_conversation_trigger_acks_and_clears(tmp_path):
 
     assert answer == NEW_CONVERSATION_ACK
     assert browser.calls == []  # never opened a page
+    assert browser.reset_calls == ["wechat:default:private:u1"]
     # conversation pointer cleared -> next message starts fresh in the project
     assert router.resolve_target_url("u1") == PROJECT_A
 
@@ -216,6 +222,7 @@ def test_scheduler_force_new_with_payload_navigates_to_project(tmp_path):
     answer, _ = asyncio.run(scheduler.ask(browser, lane, "/新对话 重新开始"))
 
     assert answer == "reply:重新开始"
+    assert browser.reset_calls == ["wechat:default:private:u1"]
     assert page.goto_calls == [PROJECT_A]  # forced back to project home
     assert router.resolve_target_url("u1") == CONV_A2  # recorded the new conversation
 

@@ -59,6 +59,25 @@ class BrowserManager:
         self._lane_contexts[lane.key] = lane
         return page
 
+    async def reset_lane_page(self, lane: LaneContext) -> Any:
+        if self._context is None:
+            return self._page
+
+        existing = self._lane_pages.pop(lane.key, None)
+        self._lane_contexts.pop(lane.key, None)
+        if existing is not None and not _is_page_closed(existing):
+            try:
+                await existing.close()
+            except Exception:
+                pass
+
+        page = await self._context.new_page()
+        await _navigate_lane_page(page, lane, get_settings())
+        self._lane_pages[lane.key] = page
+        self._lane_contexts[lane.key] = lane
+        self._page = page
+        return page
+
     async def _adopt_matching_page(self, lane: LaneContext) -> Any | None:
         """Reuse an already-open tab for this lane's conversation (and close any
         duplicates of it). Prevents tab pile-up after an api restart clears the

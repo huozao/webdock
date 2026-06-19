@@ -114,15 +114,18 @@ class ChatLaneScheduler:
             async with self._account_semaphore:
                 # "/新对话" with no payload: just drop the saved conversation so the
                 # next real message opens a fresh chat in the project. No round-trip.
-                if force_new and not clean_message:
+                reset_page = None
+                if force_new:
                     _router_clear_conversation(self._router, lane)
+                    reset_page = await _reset_lane_page(browser, lane)
+                if force_new and not clean_message:
                     await self._archiver(
                         lane, clean_message, images,
                         answer=NEW_CONVERSATION_ACK, duration=0.0, kind="new_conversation",
                     )
                     return NEW_CONVERSATION_ACK, 0.0
 
-                page = await _page_for_lane(browser, lane)
+                page = reset_page or await _page_for_lane(browser, lane)
                 await self._route_page(page, lane.target_url, force_new=force_new)
                 if images:
                     # Attach the inbound image(s) to this lane's composer so the
@@ -226,6 +229,12 @@ async def _page_for_lane(browser: Any, lane: LaneContext) -> object:
     if hasattr(browser, "page_for_lane"):
         return await browser.page_for_lane(lane)
     return browser.page
+
+
+async def _reset_lane_page(browser: Any, lane: LaneContext) -> object | None:
+    if hasattr(browser, "reset_lane_page"):
+        return await browser.reset_lane_page(lane)
+    return None
 
 
 async def _ask_chatgpt_page(page: object, message: str) -> tuple[str, float]:

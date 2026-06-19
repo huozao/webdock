@@ -117,7 +117,8 @@ class ChatLaneScheduler:
                 reset_page = None
                 if force_new:
                     _router_clear_conversation(self._router, lane)
-                    reset_page = await _reset_lane_page(browser, lane)
+                    if lane.target_url:
+                        reset_page = await _reset_lane_page(browser, lane)
                 if force_new and not clean_message:
                     await self._archiver(
                         lane, clean_message, images,

@@ -241,3 +241,21 @@ def test_unconfigured_peer_falls_back_without_navigation(tmp_path):
     asyncio.run(scheduler.ask(browser, lane, "你好"))
 
     assert page.goto_calls == []  # unconfigured -> no routing
+
+
+def test_unconfigured_new_conversation_does_not_open_default_tab(tmp_path):
+    router = _router(tmp_path, {"u1": {"project_url": PROJECT_A}})
+
+    async def ask_func(page, message):
+        raise AssertionError("ask_func must not run for a bare /新对话")
+
+    page = _FakePage("https://chatgpt.com/")
+    browser = _FakeBrowser(page)
+    scheduler = ChatLaneScheduler(max_concurrent_chats=1, ask_func=ask_func, router=router)
+    lane = LaneContext.from_metadata({"peer_id": "stranger"})
+
+    answer, _ = asyncio.run(scheduler.ask(browser, lane, "/新对话"))
+
+    assert answer == NEW_CONVERSATION_ACK
+    assert browser.calls == []
+    assert browser.reset_calls == []

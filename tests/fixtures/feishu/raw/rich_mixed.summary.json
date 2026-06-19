@@ -1,0 +1,6 @@
+{
+  "url": "https://chatgpt.com/c/6a34d6d6-ff1c-83e8-8652-88af9f4a2e4b",
+  "title": "Markdown 渲染测试",
+  "turnCount": 2,
+  "text": "已思考若干秒\nMarkdown 渲染测试\n数学与基础元素\n\n行内数学：$a^2+b^2=c^2$\n\n块级数学：\n\nE=mc\n2\n\n 未完成项\n\n 已完成项\n\n水分子：H<sub>2</sub>O\n平方：x<sup>2</sup>\n\n正文内嵌图片：\n\nPython\n运行\ndef greet(name: str) -> str:\n    message = f\"你好，{name}！\"\n    return message\n\nfor user in [\"张三\", \"李四\", \"王五\"]:\n    print(greet(user))\n左对齐\t居中对齐\t右对齐\n苹果\t水果\t3\n香蕉\t水果\t12\n西瓜\t水果\t108\n列一\t列二\t列三\t列四\t列五\t列六\t列七\t列八\n数据A1\t数据A2\t数据A3\t数据A4\t数据A5\t数据A6\t数据A7\t数据A8\n数据B1\t数据B2\t数据B3\t数据B4\t数据B5\t数据B6\t数据B7\t数据B8\n\n第一层有序列表\n\n第二层无序列表\n\n第三层有序列表\n\n第三层有序列表第二项\n\n第二层无序列表第二项\n\n第一层有序列表第二项\n\n第二层有序列表\n\n第三层无序列表\n\n第三层无序列表第二项\n\n一级引用内容\n\n二级引用内容"
+}

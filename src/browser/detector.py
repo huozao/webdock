@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 from src.browser import selectors
+from src.browser.file_download import DownloadTarget, parse_download_targets
 from src.browser.human import idle_mouse_movement
 
 # Grace fallback for a residual .result-streaming class that lingers with NO stop
@@ -55,6 +56,32 @@ _GENERATED_IMG_SRCS_JS = """
   return out;
 }
 """
+_DOWNLOAD_SCAN_JS = """
+() => {
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn']");
+  const el = turns.length ? turns[turns.length - 1] : document;
+  if (!el) return [];
+  if (el.querySelector && el.querySelector("[data-message-author-role='user']")) return [];
+  const out = [];
+  for (const a of el.querySelectorAll("a[href]")) {
+    out.push({
+      kind: "link",
+      href: a.getAttribute("href") || a.href || "",
+      text: (a.innerText || a.textContent || "").trim(),
+      download: a.getAttribute("download") || ""
+    });
+  }
+  for (const b of el.querySelectorAll("button.behavior-btn, button.entity-underline")) {
+    out.push({
+      kind: "button",
+      href: "",
+      text: (b.innerText || b.textContent || "").trim(),
+      download: ""
+    });
+  }
+  return out;
+}
+"""
 
 
 async def generated_image_srcs(page: Any, min_px: int = 200) -> list[str]:
@@ -65,6 +92,16 @@ async def generated_image_srcs(page: Any, min_px: int = 200) -> list[str]:
         return list(srcs) if srcs else []
     except Exception:
         return []
+
+
+async def generated_file_targets(page: Any) -> list[DownloadTarget]:
+    """ChatGPT-generated file download targets in the latest assistant reply.
+    Filtering lives in file_download.py so arbitrary external links are ignored."""
+    try:
+        raw = await page.evaluate(_DOWNLOAD_SCAN_JS)
+    except Exception:
+        raw = []
+    return parse_download_targets(raw)
 
 
 async def has_generated_image(page: Any, min_px: int = 200) -> bool:
@@ -110,7 +147,7 @@ _RICH_TEXT_JS = r"""
   if (!roots.length) return "";
   const dw = (s) => { let w = 0; for (const ch of s) { w += (ch.codePointAt(0) > 255 ? 2 : 1); } return w; };
   const pad = (s, n) => s + " ".repeat(Math.max(0, n - dw(s)));
-  const SKIP = new Set(["BUTTON", "SVG", "PATH", "USE", "SCRIPT", "STYLE", "IMG"]);
+  const SKIP = new Set(["BUTTON", "SVG", "PATH", "USE", "SCRIPT", "STYLE"]);
   const BLOCK = new Set(["P", "DIV", "H1", "H2", "H3", "H4", "H5", "H6", "PRE", "BLOCKQUOTE", "SECTION", "ARTICLE", "UL", "OL"]);
   const tableToText = (t) => {
     const rows = [...t.querySelectorAll("tr")].map((tr) =>
@@ -168,7 +205,7 @@ _RICH_MARKDOWN_JS = r"""
   if (el.querySelector("[data-message-author-role='user']")) return "";
   const roots = el.querySelectorAll(".markdown");
   if (!roots.length) return "";
-  const SKIP = new Set(["BUTTON", "SVG", "PATH", "USE", "SCRIPT", "STYLE", "IMG"]);
+  const SKIP = new Set(["BUTTON", "SVG", "PATH", "USE", "SCRIPT", "STYLE"]);
   const BLOCK = new Set(["P","H1","H2","H3","H4","H5","H6","UL","OL","PRE","BLOCKQUOTE","TABLE","HR","DIV","SECTION","ARTICLE"]);
   const skip = (n) => {
     if (SKIP.has(n.tagName)) return true;
@@ -176,12 +213,17 @@ _RICH_MARKDOWN_JS = r"""
     const cls = typeof n.className === "string" ? n.className : "";
     if (cls.indexOf("WidgetRenderer") >= 0 || cls.indexOf("not-markdown") >= 0) return true;
     if (n.getAttribute && n.getAttribute("data-w-component")) return true;
+    if (n.classList && (n.classList.contains("katex-mathml") || n.classList.contains("katex-html"))) return true;
     return false;
   };
   const inline = (node) => {
     let out = "";
     for (const c of node.childNodes) {
       if (c.nodeType === 3) { out += c.nodeValue; continue; }
+      if (c.nodeType === 1 && c.classList && c.classList.contains("katex")) {
+        const tex = c.querySelector('annotation[encoding="application/x-tex"]');
+        if (tex) { out += "$" + (tex.textContent || "").trim() + "$"; continue; }
+      }
       if (c.nodeType !== 1 || skip(c)) continue;
       const tag = c.tagName;
       if (BLOCK.has(tag)) continue;
@@ -189,9 +231,22 @@ _RICH_MARKDOWN_JS = r"""
       if (tag === "STRONG" || tag === "B") { out += "**" + inline(c).trim() + "**"; continue; }
       if (tag === "EM" || tag === "I") { out += "*" + inline(c).trim() + "*"; continue; }
       if (tag === "DEL" || tag === "S") { out += "~~" + inline(c).trim() + "~~"; continue; }
+      if (tag === "SUP") { out += "^(" + inline(c).trim() + ")"; continue; }
+      if (tag === "SUB") { out += "_(" + inline(c).trim() + ")"; continue; }
       if (tag === "CODE") { out += "`" + (c.innerText || c.textContent || "") + "`"; continue; }
+      if (tag === "IMG") {
+        const src = c.getAttribute("src") || "";
+        const alt = (c.getAttribute("alt") || "").replace(/\]/g, "\\]").replace(/\n/g, " ").trim();
+        if (src) out += "![" + alt + "](" + src + ")";
+        continue;
+      }
       if (tag === "A") {
         const href = c.getAttribute("href") || "";
+        if (c.closest && c.closest('[data-testid="webpage-citation-pill"]')) {
+          const txt = (c.innerText || c.textContent || "").replace(/\s+/g, " ").trim() || "source";
+          out += href ? "[" + txt + "](" + href + ")" : txt;
+          continue;
+        }
         const txt = inline(c).trim() || href;
         out += href ? "[" + txt + "](" + href + ")" : txt;
         continue;
@@ -202,22 +257,48 @@ _RICH_MARKDOWN_JS = r"""
   };
   const cell = (c) => inline(c).replace(/\s+/g, " ").trim().replace(/\|/g, "\\|");
   const table = (t) => {
-    const rows = [...t.querySelectorAll("tr")].map((tr) => [...tr.querySelectorAll("th,td")].map(cell)).filter((r) => r.length);
+    const rowCells = [...t.querySelectorAll("tr")].map((tr) => [...tr.querySelectorAll("th,td")]).filter((r) => r.length);
+    const rows = rowCells.map((r) => r.map(cell));
     if (!rows.length) return "";
     const cols = Math.max(...rows.map((r) => r.length));
     const fill = (r) => { const a = r.slice(); while (a.length < cols) a.push(""); return a; };
-    const lines = ["| " + fill(rows[0]).join(" | ") + " |", "| " + Array(cols).fill("---").join(" | ") + " |"];
+    const alignFor = (c) => {
+      const raw = ((c && c.getAttribute && c.getAttribute("align")) || (c && c.style && c.style.textAlign) || "").toLowerCase();
+      if (raw === "center") return ":---:";
+      if (raw === "right") return "---:";
+      return raw === "left" ? ":---" : "---";
+    };
+    const headerCells = rowCells[0].slice();
+    while (headerCells.length < cols) headerCells.push(null);
+    const lines = ["| " + fill(rows[0]).join(" | ") + " |", "| " + headerCells.map(alignFor).join(" | ") + " |"];
     rows.slice(1).forEach((r) => lines.push("| " + fill(r).join(" | ") + " |"));
     return lines.join("\n");
   };
   const list = (node, ordered, depth) => {
     let out = "";
-    let i = 1;
+    let i = ordered ? (parseInt(node.getAttribute("start") || "1", 10) || 1) : 1;
     for (const li of node.children) {
       if (li.tagName !== "LI") continue;
-      const marker = ordered ? (i++ + ". ") : "- ";
-      out += "  ".repeat(depth) + marker + inline(li).trim() + "\n";
+      const cb = li.querySelector('input[type="checkbox"]');
+      let marker = ordered ? (i++ + ". ") : "- ";
+      if (cb) marker = "- [" + (cb.checked ? "x" : " ") + "] ";
+      let text = inline(li).trim();
+      if (!text) {
+        const chunks = [];
+        for (const ch of li.children) {
+          if (ch.tagName === "UL" || ch.tagName === "OL") continue;
+          const t = inline(ch).trim();
+          if (t) chunks.push(t);
+        }
+        text = chunks.join(" ");
+      }
+      out += "  ".repeat(depth) + marker + text + "\n";
+      const nested = [];
       for (const ch of li.children) {
+        if (ch.tagName === "UL" || ch.tagName === "OL") nested.push(ch);
+        else nested.push(...ch.querySelectorAll(":scope > ul, :scope > ol"));
+      }
+      for (const ch of nested) {
         if (ch.tagName === "UL") out += list(ch, false, depth + 1);
         else if (ch.tagName === "OL") out += list(ch, true, depth + 1);
       }
@@ -230,6 +311,10 @@ _RICH_MARKDOWN_JS = r"""
       if (c.nodeType === 3) { if (c.nodeValue && c.nodeValue.trim()) out += c.nodeValue.trim() + " "; continue; }
       if (c.nodeType !== 1 || skip(c)) continue;
       const tag = c.tagName;
+      if (c.classList && c.classList.contains("katex-display")) {
+        const tex = c.querySelector('annotation[encoding="application/x-tex"]');
+        if (tex) { out += "$$" + (tex.textContent || "").trim() + "$$\n\n"; continue; }
+      }
       if (/^H[1-6]$/.test(tag)) { out += "\n" + "#".repeat(+tag[1]) + " " + inline(c).trim() + "\n\n"; continue; }
       if (tag === "P") { const t = inline(c).trim(); if (t) out += t + "\n\n"; continue; }
       if (tag === "UL") { out += list(c, false, 0) + "\n"; continue; }

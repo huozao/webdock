@@ -11,7 +11,11 @@ from src.main import create_app
 def test_put_then_get_roundtrip():
     store = MediaStore()
     token = store.put(b"PNGDATA", "image/png")
-    assert store.get(token) == (b"PNGDATA", "image/png")
+    item = store.get(token)
+    assert item is not None
+    assert item.data == b"PNGDATA"
+    assert item.content_type == "image/png"
+    assert item.filename is None
     assert store.get("missing") is None
 
 

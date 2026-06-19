@@ -15,5 +15,8 @@ async def get_media(token: str, request: Request) -> Response:
     item = store.get(token) if store is not None else None
     if item is None:
         return JSONResponse(status_code=404, content={"error": "media not found or expired"})
-    data, content_type = item
-    return Response(content=data, media_type=content_type, headers={"Cache-Control": "no-store"})
+    headers = {"Cache-Control": "no-store"}
+    if item.filename:
+        safe_filename = item.filename.replace("\\", "_").replace("/", "_").replace('"', "_")
+        headers["Content-Disposition"] = f'attachment; filename="{safe_filename}"'
+    return Response(content=item.data, media_type=item.content_type, headers=headers)

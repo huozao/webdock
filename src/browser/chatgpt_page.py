@@ -7,6 +7,7 @@ import re
 import tempfile
 import time
 from typing import Any
+from urllib.parse import quote
 
 from src.browser import selectors
 from src.browser.debug_dump import save_debug_dump
@@ -14,12 +15,15 @@ from src.browser.detector import (
     assistant_message_count,
     any_selector_found,
     find_first,
+    generated_file_targets,
     generated_image_srcs,
     latest_message_has_widget,
     rich_assistant_markdown,
     rich_assistant_text,
     wait_for_response_complete,
 )
+from src.browser.feishu_format import feishu_safe_markdown
+from src.browser.file_download import download_chatgpt_file
 from src.browser.human import hover_and_click, paste_text, random_delay
 from src.browser.image_input import resolve_image_inputs
 from src.config import get_settings
@@ -35,6 +39,7 @@ MAX_WIDGETS_PER_REPLY = 4
 # the logged-in session to fetch. detector.generated_image_srcs locates them (by
 # rendered size); we download in-page (so cookies apply) and serve via /media.
 MAX_IMAGES_PER_REPLY = 4
+MAX_FILES_PER_REPLY = 4
 
 # Inbound file upload: how long to look for the hidden file input, and how long
 # to let an attachment finalize on ChatGPT's side before sending the text.
@@ -174,10 +179,14 @@ class ChatGPTPage:
                 # flattened plain text. No-op fallback if the markdown walk is empty.
                 markdown = await rich_assistant_markdown(self.page)
                 if markdown:
-                    final_answer = markdown
+                    final_answer = feishu_safe_markdown(markdown)
             final_answer = await self._append_media_images(
                 final_answer, settings.media_base_url, prev_srcs
             )
+            if self._channel == "feishu":
+                final_answer = await self._append_generated_files(
+                    final_answer, settings.media_base_url, set()
+                )
             if settings.test_media_url:
                 # Manual link-check switch (browser_data/runtime.json).
                 final_answer = f"{final_answer}\nMEDIA: {settings.test_media_url}".strip()
@@ -252,6 +261,33 @@ class ChatGPTPage:
             except Exception:
                 continue
         return tokens
+
+    async def _append_generated_files(self, answer: str, media_base_url: str, exclude_file_keys: set[str]) -> str:
+        """Download ChatGPT-generated files from the latest reply and append
+        'FILE: <url>' tokens. Targets are detector-filtered to ChatGPT sandbox/
+        generated-file controls, never arbitrary external links."""
+        base = (media_base_url or "").rstrip("/")
+        if self._media_store is None or not base:
+            return answer
+        result = answer
+        emitted: set[str] = set()
+        for target in await generated_file_targets(self.page):
+            if target.key in exclude_file_keys or target.key in emitted:
+                continue
+            file = await download_chatgpt_file(self.page, target)
+            if file is None:
+                continue
+            try:
+                token = self._media_store.put(file.data, file.content_type, filename=file.filename)
+            except Exception:
+                continue
+            marker_name = quote(file.filename, safe="._-()")
+            marker_mime = quote(file.content_type, safe="/.+-")
+            result = f"{result}\nFILE: {base}/media/{token} name={marker_name} mime={marker_mime}".strip()
+            emitted.add(target.key)
+            if len(emitted) >= MAX_FILES_PER_REPLY:
+                break
+        return result
 
 
 # Clone the widget with every computed style inlined onto each node so it renders

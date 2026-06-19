@@ -372,39 +372,44 @@ git commit -m "feat(detector): render task-list checkboxes in feishu markdown"
 
 ---
 
-## Task 5: 渲染层 —— Markdown→飞书富卡片 映射 + fallback（OpenClaw 插件）
+## Task 5: 渲染层 —— 在我方边界整形 + 不可渲染的降级为图片/文件（**不改 OpenClaw 插件**）
 
-**Files:**（路径以 Task 0 recon.md 为准）
-- Modify: OpenClaw 飞书插件卡片构建函数
-- Create: 插件侧测试（markdown→card payload 契约）
-- Reference: `docs/ops/openclaw-feishu-plugin-recon.md`
+> **架构决定（2026-06-19 修订）**：OpenClaw 飞书插件是 `node_modules/@openclaw/feishu` 的 npm 包（host 上、会随升级整包覆盖、不在我们的 git）。**禁止在 node_modules 里裸改**——升级即丢、违反 `hotpatch-must-commit-to-github`。把"渲染成什么"的责任收回到**我们拥有的边界**（webdock + bridge），插件只当"喂什么发什么"的传输层。优先级：
+> 1. **首选**：webdock/bridge 端把 markdown 整形到飞书卡片**能渲染的子集**（`feishu_format.py` 即此模式）。
+> 2. **降级**：飞书渲染不好的（超宽表 G、代码块 H、数学 A）→ 复用**已有的** `MEDIA:`(截图发图)/`FILE:`(发文件) 通道，转图片或文件发出。
+> 3. **仅当非改插件不可**：用插件官方配置/模板钩子（`renderMode` 等，配置在 `/root/.openclaw/openclaw.json`，restic 有备）；再不行才 `patch-package`(可重放 diff) + 给上游提 PR。**永不**在 node_modules 裸改。
 
-- [ ] **Step 1: 写契约失败测试**
+**Files:**
+- Modify: `webdock/src/browser/feishu_format.py`（我方整形：列表/数学/代码降级判定）
+- Modify: `webdock/src/browser/chatgpt_page.py`（需要转图/转文件时，调用 §Task 6/7 的 MEDIA/FILE 通道）
+- Test: `webdock/tests/test_feishu_format.py`
+- Reference: `docs/ops/openclaw-feishu-plugin-recon.md`（飞书卡片能力矩阵 + 插件已有 `sendMediaFeishu` 能按 content-type 分流图/文件）
 
-对每个 markdown 特性断言生成的飞书卡片 payload：
+- [ ] **Step 0: 真机先看插件现状再决定降级**
+
+`ssh aliecs` + 真机各发一条含「表格 / 多行代码 / `$$公式$$`」的回复，肉眼确认飞书卡片**实际**渲染成什么（recon 说当前插件卡片只吃 `markdown/hr/button` 子集）。据此确定每类要不要降级。**没真机结论不写降级逻辑**。
+
+- [ ] **Step 1: 写我方整形的失败测试（纯函数，飞书端可渲染子集）**
+
 ```python
-def test_card_code_block_uses_code_element():
-    card = build_feishu_card("```python\nprint(1)\n```")
-    assert _has_element(card, "code")  # 或 fallback: 等宽 text + 复制
-def test_card_table_renders_or_falls_back():
-    card = build_feishu_card("| a | b |\n|---|---|\n| 1 | 2 |")
-    assert _has_element(card, "table") or _has_image_fallback(card)
-def test_card_math_keeps_tex_text():
-    card = build_feishu_card("$$E=mc^2$$")
-    assert "E=mc^2" in _flatten(card)  # 飞书无 LaTeX，至少保 TeX 文本
+def test_wide_table_marked_for_file_fallback():
+    md = "| a | b | c | d | e | f | g |\n|---|---|---|---|---|---|---|\n| 1 | 2 | 3 | 4 | 5 | 6 | 7 |"
+    shaped, attachments = shape_for_feishu(md)
+    assert attachments and attachments[0].kind in {"image", "file"}  # 超宽表降级
+def test_math_kept_as_text_when_no_image():
+    shaped, _ = shape_for_feishu("$$E=mc^2$$")
+    assert "E=mc^2" in shaped  # 飞书无 LaTeX，至少保 TeX 文本
 ```
 
-- [ ] **Step 2: 跑测确认失败**（当前插件多半把 markdown 拍平成纯文本）。
+- [ ] **Step 2: 跑测确认失败** → `cd webdock && python -m pytest tests/test_feishu_format.py -q` → FAIL。
 
-- [ ] **Step 3: 实现映射器**——按 recon 能力矩阵：标题/粗斜体/列表/链接→lark_md；代码块→code 组件或等宽 text；表格→table 组件，列数>6 或宽超限→走 §G fallback(转图/CSV 文件，复用 FILE 投递)；数学→TeX 文本(增强：webdock 渲 PNG 走 MEDIA)；hr/quote→对应组件。**保留 §3 红线：插件改完回灌 git。**
+- [ ] **Step 3: 实现 `shape_for_feishu()`（在 webdock，纯我方代码）**
 
-- [ ] **Step 4: 跑测确认通过 + 校验卡片 JSON Schema**（飞书卡片结构合法）。
+按 Step 0 真机结论：飞书能渲染的（标题/粗斜体/列表/链接/分割线）原样保留；渲染不好的按降级表处理——超宽表(列>6)→截原表 DOM 走 `MEDIA:` 或导出 CSV 走 `FILE:`；多行代码→若飞书卡片不渲染则截图或保留纯文本；数学→保 TeX 文本，增强项 KaTeX→PNG 走 `MEDIA:`。降级产物复用 Task 6/7 的投递通道。**全部在 webdock，无任何插件改动。**
 
-- [ ] **Step 5: Commit（OpenClaw 仓）+ host 回灌**
+- [ ] **Step 4: 跑测通过 + 全量回归** → `cd webdock && python -m pytest -q` → PASS。
 
-```bash
-# 本地仓 commit；host 上 ssh aliecs 同步后回灌 git（红线 hotpatch-must-commit-to-github）
-```
+- [ ] **Step 5: Commit（webdock 直推 main 前本地 pytest 全绿）。无插件改动、无 host 回灌、升级免疫。**
 
 ---
 

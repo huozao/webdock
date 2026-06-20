@@ -65,6 +65,91 @@ class FakePage:
         raise RuntimeError("no evaluate in fake page")
 
 
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def test_wait_extends_past_soft_timeout_while_progress_changes(monkeypatch):
+    clock = FakeClock()
+    page = FakePage([""])
+
+    async def changing_text(_page):
+        if clock.now < 2:
+            return "正在处理第 1 步"
+        if clock.now < 4:
+            return "正在处理第 2 步"
+        return "最终结果"
+
+    monkeypatch.setattr(detector.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(detector.asyncio, "sleep", clock.sleep)
+    monkeypatch.setattr(detector, "rich_assistant_text", changing_text)
+
+    answer = asyncio.run(
+        wait_for_response_complete(
+            page,
+            timeout_seconds=2,
+            stable_seconds=0,
+            idle_timeout_seconds=2,
+            hard_timeout_seconds=8,
+        )
+    )
+
+    assert answer == "最终结果"
+    assert clock.now == 4
+
+
+def test_wait_times_out_after_post_soft_deadline_inactivity(monkeypatch):
+    clock = FakeClock()
+    page = FakePage(["正在处理"], stop_button=True)
+    monkeypatch.setattr(detector.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(detector.asyncio, "sleep", clock.sleep)
+
+    answer = asyncio.run(
+        wait_for_response_complete(
+            page,
+            timeout_seconds=2,
+            stable_seconds=0,
+            idle_timeout_seconds=2,
+            hard_timeout_seconds=8,
+        )
+    )
+
+    assert answer is None
+    assert clock.now == 4
+
+
+def test_wait_hard_timeout_wins_even_with_continuous_progress(monkeypatch):
+    clock = FakeClock()
+    page = FakePage([""])
+
+    async def always_changing(_page):
+        return f"正在处理第 {int(clock.now)} 步"
+
+    monkeypatch.setattr(detector.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(detector.asyncio, "sleep", clock.sleep)
+    monkeypatch.setattr(detector, "rich_assistant_text", always_changing)
+
+    answer = asyncio.run(
+        wait_for_response_complete(
+            page,
+            timeout_seconds=1,
+            stable_seconds=0,
+            idle_timeout_seconds=2,
+            hard_timeout_seconds=5,
+        )
+    )
+
+    assert answer is None
+    assert clock.now == 5
+
+
 def test_wait_times_out_when_no_new_assistant_message():
     # Same text as before sending, count didn't grow, no generation observed -> not new.
     page = FakePage(["old answer"])

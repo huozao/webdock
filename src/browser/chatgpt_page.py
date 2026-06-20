@@ -150,6 +150,8 @@ class ChatGPTPage:
                 self.page,
                 timeout_seconds=settings.chat_timeout_seconds,
                 stable_seconds=settings.response_stable_seconds,
+                idle_timeout_seconds=settings.response_idle_timeout_seconds,
+                hard_timeout_seconds=settings.response_hard_timeout_seconds,
                 previous_count=previous_assistant_count,
                 previous_text=previous_assistant_text,
                 previous_image_srcs=previous_image_srcs,

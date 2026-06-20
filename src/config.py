@@ -23,6 +23,8 @@ class Settings:
     chatgpt_url: str = "https://chatgpt.com/"
     chat_timeout_seconds: int = 120
     response_stable_seconds: int = 5
+    response_idle_timeout_seconds: int = 15
+    response_hard_timeout_seconds: int = 1200
     log_level: str = "INFO"
     enable_stealth: bool = True
     slow_mo_ms: int = 50
@@ -70,6 +72,8 @@ def get_settings() -> Settings:
         chatgpt_url=_get("CHATGPT_URL", "https://chatgpt.com/", env),
         chat_timeout_seconds=int(_get("CHAT_TIMEOUT_SECONDS", "120", env)),
         response_stable_seconds=int(_get("RESPONSE_STABLE_SECONDS", "5", env)),
+        response_idle_timeout_seconds=int(_get("RESPONSE_IDLE_TIMEOUT_SECONDS", "15", env)),
+        response_hard_timeout_seconds=int(_get("RESPONSE_HARD_TIMEOUT_SECONDS", "1200", env)),
         log_level=_get("LOG_LEVEL", "INFO", env),
         enable_stealth=_get("ENABLE_STEALTH", "true", env).lower() == "true",
         slow_mo_ms=int(_get("SLOW_MO_MS", "50", env)),
@@ -127,7 +131,12 @@ def _path_from_env(value: str) -> Path:
 # container. Edit browser_data/runtime.json and restart only the api process —
 # this avoids restarting Chrome, which would break the warmed-up ChatGPT login
 # session (project red line). Missing/corrupt file degrades to env/defaults.
-_RUNTIME_OVERRIDE_INT_FIELDS = ("chat_timeout_seconds", "response_stable_seconds")
+_RUNTIME_OVERRIDE_INT_FIELDS = (
+    "chat_timeout_seconds",
+    "response_stable_seconds",
+    "response_idle_timeout_seconds",
+    "response_hard_timeout_seconds",
+)
 _RUNTIME_OVERRIDE_STR_FIELDS = ("test_media_url", "media_base_url")
 
 

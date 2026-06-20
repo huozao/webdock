@@ -436,6 +436,8 @@ async def wait_for_response_complete(
     *,
     timeout_seconds: int,
     stable_seconds: int,
+    idle_timeout_seconds: int = 15,
+    hard_timeout_seconds: int | None = None,
     previous_count: int = 0,
     previous_text: str = "",
     previous_image_srcs: list[str] | None = None,
@@ -446,10 +448,15 @@ async def wait_for_response_complete(
     on timeout. The "" vs None distinction lets the caller tell a finished
     media-only reply (deliver the screenshot/image) apart from a real timeout."""
     start = time.monotonic()
+    soft_deadline = start + max(0, timeout_seconds)
+    hard_deadline = start + max(0, hard_timeout_seconds if hard_timeout_seconds is not None else timeout_seconds)
+    last_progress_at = start
+    last_progress_signature: tuple[Any, ...] | None = None
     last_text: str | None = None
     stable_for = 0
 
-    while time.monotonic() - start < timeout_seconds:
+    while time.monotonic() < hard_deadline:
+        now = time.monotonic()
         current_count = await assistant_message_count(page)
         current = await rich_assistant_text(page)
         streaming = await any_selector_found(page, selectors.STREAMING_INDICATOR)
@@ -458,6 +465,22 @@ async def wait_for_response_complete(
         has_widget = await latest_message_has_widget(page)
         current_image_srcs = await generated_image_srcs(page)
         has_image = bool(current_image_srcs)
+        image_in_progress = await image_generating(page)
+
+        progress_signature = (
+            current_count,
+            current,
+            streaming,
+            stop_button,
+            image_in_progress,
+            tuple(current_image_srcs),
+            has_widget,
+        )
+        if last_progress_signature is None:
+            last_progress_signature = progress_signature
+        elif progress_signature != last_progress_signature:
+            last_progress_signature = progress_signature
+            last_progress_at = now
 
         # Track stability of the text itself; "" stays stable across iterations too
         # (a widget-only reply keeps yielding "", which is a valid stable state).
@@ -485,7 +508,7 @@ async def wait_for_response_complete(
         # an image-gen placeholder meanwhile. While either is present the reply
         # isn't done — keep waiting (ignore the interim text) until it clears (and,
         # for images, a NEW src appears). A refusal / plain reply has neither.
-        in_progress = (await image_generating(page) or bool(_INTERIM_RE.search(current or ""))) and not new_image
+        in_progress = (image_in_progress or bool(_INTERIM_RE.search(current or ""))) and not new_image
         if has_new and content_ready and not in_progress and stable_for >= stable_seconds:
             if not generating:
                 return current
@@ -498,7 +521,12 @@ async def wait_for_response_complete(
             if not stop_button and stable_for >= stable_seconds + STUCK_GRACE_SECONDS:
                 return current
 
-        if int(time.monotonic() - start) > 0 and int(time.monotonic() - start) % 10 == 0:
+        if now >= soft_deadline:
+            idle_window_started = max(last_progress_at, soft_deadline)
+            if now - idle_window_started >= max(0, idle_timeout_seconds):
+                return None
+
+        if int(now - start) > 0 and int(now - start) % 10 == 0:
             await idle_mouse_movement(page)
 
         await asyncio.sleep(1)

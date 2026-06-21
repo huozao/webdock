@@ -15,13 +15,16 @@ def test_feishu_safe_markdown_preserves_unordered_list_text():
 
 
 def test_feishu_safe_markdown_preserves_ordered_list_text_without_post_md_list_syntax():
+    # Fullwidth period (．) instead of escaped \\. — Feishu Android renders the
+    # backslash literally (you see "1\\."), while a fullwidth period is plain
+    # text on every client and still not list syntax (post md cannot fold it).
     markdown = "你要做：\n\n1. 注册/了解 Temu 卖家后台\n2. 选 20 个候选品\n8. 预算控制在 **5-15 万人民币以内**"
 
     assert feishu_safe_markdown(markdown) == (
         "你要做：\n\n"
-        "1\\. 注册/了解 Temu 卖家后台\n"
-        "2\\. 选 20 个候选品\n"
-        "8\\. 预算控制在 **5-15 万人民币以内**"
+        "1． 注册/了解 Temu 卖家后台\n"
+        "2． 选 20 个候选品\n"
+        "8． 预算控制在 **5-15 万人民币以内**"
     )
 
 

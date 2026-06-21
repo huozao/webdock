@@ -44,12 +44,18 @@ _GENERATED_IMG_SRCS_JS = """
   const out = [];
   const seen = new Set();
   for (const im of document.querySelectorAll('img')) {
-    if (im.clientWidth < minPx || im.clientHeight < minPx) continue;
     const turn = im.closest("[data-testid^='conversation-turn']");
     if (turn && turn.querySelector("[data-message-author-role='user']")) continue;
     const src = im.currentSrc || im.src || '';
     if (!src || seen.has(src)) continue;
     if (!/backend-api\\/(estuary|files)\\/|oaiusercontent/.test(src)) continue;
+    // Two acceptance rules — multi-image replies render extra candidates as 48x48
+    // side-rail thumbnails (user must click one to swap it into the main view);
+    // a size-only filter delivers just the currently-selected main image to the
+    // chat. Recognize the thumbnails via alt="已生成图片"/"Generated image".
+    const largeEnough = im.clientWidth >= minPx && im.clientHeight >= minPx;
+    const generatedAlt = im.alt === '已生成图片' || im.alt === 'Generated image';
+    if (!largeEnough && !generatedAlt) continue;
     seen.add(src);
     out.push(src);
   }

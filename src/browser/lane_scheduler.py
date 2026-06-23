@@ -18,7 +18,7 @@ from src.browser.lane_routing import (
     parse_new_conversation_trigger,
 )
 from src.browser.message_archive import archive_exchange
-from src.utils.errors import RelayError
+from src.utils.errors import ErrorCode, RelayError
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +37,17 @@ DEFAULT_PEER = "default"
 # long after a configured lane was last seen, a metadata-less request inherits it
 # so those images land in the same conversation instead of a stray default chat.
 LANE_FALLBACK_WINDOW_SECONDS = 120.0
+
+# Extra wall-clock allowed beyond the chat soft-timeout before a request is force-
+# released. Keeps a stuck browser/CDP op from outliving the bridge (320s) and
+# wedging the worker. Hard cap = chosen soft timeout + this margin.
+DEFAULT_REQUEST_HARD_MARGIN_SECONDS = 15.0
+
+
+def select_chat_timeout(base_seconds: int, with_images_seconds: int, *, has_images: bool) -> int:
+    """Image-bearing turns (reference images / image generation) get the longer
+    ceiling; text-only turns keep the short one."""
+    return with_images_seconds if has_images else base_seconds
 
 
 @dataclass(frozen=True)
@@ -113,8 +124,14 @@ class ChatLaneScheduler:
         lane_fallback_window_seconds: float = LANE_FALLBACK_WINDOW_SECONDS,
         image_uploader: Callable[[Any, list[str]], Awaitable[int]] | None = None,
         archiver: Callable[..., Awaitable[None]] | None = None,
+        chat_timeout_seconds: int = 120,
+        chat_timeout_seconds_with_images: int = 300,
+        request_hard_margin_seconds: float = DEFAULT_REQUEST_HARD_MARGIN_SECONDS,
     ) -> None:
         self.max_concurrent_chats = max(1, max_concurrent_chats)
+        self._chat_timeout_seconds = chat_timeout_seconds
+        self._chat_timeout_seconds_with_images = chat_timeout_seconds_with_images
+        self._request_hard_margin_seconds = request_hard_margin_seconds
         self._account_semaphore = asyncio.Semaphore(self.max_concurrent_chats)
         self._lane_locks: dict[str, asyncio.Lock] = {}
         self._lane_locks_guard = asyncio.Lock()
@@ -130,8 +147,18 @@ class ChatLaneScheduler:
         self._last_active_lane: LaneContext | None = None
         self._last_active_at = 0.0
 
-    async def _default_ask(self, page: object, message: str, channel: str = "wechat") -> tuple[str, float]:
-        return await ChatGPTPage(page, media_store=self._media_store, channel=channel).ask(message)
+    async def _default_ask(
+        self,
+        page: object,
+        message: str,
+        channel: str = "wechat",
+        *,
+        timeout_seconds: int | None = None,
+        hard_timeout_seconds: float | None = None,
+    ) -> tuple[str, float]:
+        return await ChatGPTPage(page, media_store=self._media_store, channel=channel).ask(
+            message, timeout_seconds=timeout_seconds, hard_timeout_seconds=hard_timeout_seconds
+        )
 
     async def ask(
         self, browser: Any, lane: LaneContext, message: str, images: list[str] | None = None
@@ -162,12 +189,38 @@ class ChatLaneScheduler:
                     # Attach the inbound image(s) to this lane's composer so the
                     # text that follows edits/answers about them in one turn.
                     await self._image_uploader(page, images)
+                effective_timeout = select_chat_timeout(
+                    self._chat_timeout_seconds,
+                    self._chat_timeout_seconds_with_images,
+                    has_images=bool(images),
+                )
+                hard_cap = effective_timeout + self._request_hard_margin_seconds
                 try:
                     if self._ask_func_takes_channel:
-                        answer, duration = await self._ask_func(page, clean_message, lane.channel)
+                        coro = self._ask_func(
+                            page,
+                            clean_message,
+                            lane.channel,
+                            timeout_seconds=effective_timeout,
+                            hard_timeout_seconds=hard_cap,
+                        )
                     else:
                         # Injected ask_func uses the legacy (page, message) signature.
-                        answer, duration = await self._ask_func(page, clean_message)
+                        coro = self._ask_func(page, clean_message)
+                    # Hard ceiling on the whole interaction. A stuck browser/CDP op
+                    # must release the slot + lane lock (and never outlive the
+                    # bridge's 320s timeout) rather than wedge the worker or block
+                    # other users' lanes.
+                    answer, duration = await asyncio.wait_for(coro, timeout=hard_cap)
+                except asyncio.TimeoutError:
+                    # Rebuild this lane's tab so the next request starts clean.
+                    await _reset_lane_page(browser, lane)
+                    exc = RelayError(
+                        ErrorCode.RESPONSE_TIMEOUT,
+                        f"webdock request exceeded hard cap of {hard_cap:.0f}s; lane reset.",
+                    )
+                    await self._archiver(lane, clean_message, images, error=exc)
+                    raise exc
                 except RelayError as exc:
                     # Archive the failed exchange too (with the DOM-snapshot dir
                     # save_debug_dump attached), then let the caller handle it.

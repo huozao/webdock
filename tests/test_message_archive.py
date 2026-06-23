@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 
 import src.browser.message_archive as message_archive
+
+_ISO_Z_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 from src.browser.lane_scheduler import ChatLaneScheduler, LaneContext
 from src.config import Settings
 from src.utils.errors import ErrorCode, RelayError
@@ -56,6 +59,16 @@ def test_archive_writes_error_record_with_debug_dir(tmp_path, monkeypatch):
     assert rec["error"]["message"] == "did not finish"
     assert rec["error"]["debug_dir"] == "logs/debug/2026-06-08_120000"
     assert "outbound" not in rec
+
+
+def test_archive_ts_is_utc_iso8601_with_z(tmp_path, monkeypatch):
+    monkeypatch.setattr(message_archive, "get_settings", lambda: _settings(tmp_path))
+    lane = LaneContext.from_metadata(None)
+
+    asyncio.run(message_archive.archive_exchange(lane, "hi", None, answer="ok", duration=1.0))
+
+    rec = _read_records(tmp_path)[0]
+    assert _ISO_Z_RE.match(rec["ts"]), rec["ts"]
 
 
 def test_archive_disabled_writes_nothing(tmp_path, monkeypatch):

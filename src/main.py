@@ -33,6 +33,8 @@ def create_app(*, start_browser: bool = True) -> FastAPI:
         app.state.chat_scheduler = ChatLaneScheduler(
             max_concurrent_chats=settings.max_concurrent_chats,
             media_store=app.state.media_store,
+            chat_timeout_seconds=settings.chat_timeout_seconds,
+            chat_timeout_seconds_with_images=settings.chat_timeout_seconds_with_images,
         )
         if start_browser and settings.attach_on_start:
             try:

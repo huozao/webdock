@@ -22,6 +22,10 @@ class Settings:
     archive_enabled: bool = True
     chatgpt_url: str = "https://chatgpt.com/"
     chat_timeout_seconds: int = 120
+    # Image-bearing turns (reference images and/or image generation) legitimately
+    # run far longer than text — image rendering has >idle_timeout quiet gaps that
+    # would trip the text timeout. Kept under the bridge's WEB_DOCK_TIMEOUT (320s).
+    chat_timeout_seconds_with_images: int = 300
     response_stable_seconds: int = 5
     response_idle_timeout_seconds: int = 15
     response_hard_timeout_seconds: int = 1200
@@ -71,6 +75,7 @@ def get_settings() -> Settings:
         archive_enabled=_get("ARCHIVE_ENABLED", "true", env).lower() == "true",
         chatgpt_url=_get("CHATGPT_URL", "https://chatgpt.com/", env),
         chat_timeout_seconds=int(_get("CHAT_TIMEOUT_SECONDS", "120", env)),
+        chat_timeout_seconds_with_images=int(_get("CHAT_TIMEOUT_SECONDS_WITH_IMAGES", "300", env)),
         response_stable_seconds=int(_get("RESPONSE_STABLE_SECONDS", "5", env)),
         response_idle_timeout_seconds=int(_get("RESPONSE_IDLE_TIMEOUT_SECONDS", "15", env)),
         response_hard_timeout_seconds=int(_get("RESPONSE_HARD_TIMEOUT_SECONDS", "1200", env)),
@@ -133,6 +138,7 @@ def _path_from_env(value: str) -> Path:
 # session (project red line). Missing/corrupt file degrades to env/defaults.
 _RUNTIME_OVERRIDE_INT_FIELDS = (
     "chat_timeout_seconds",
+    "chat_timeout_seconds_with_images",
     "response_stable_seconds",
     "response_idle_timeout_seconds",
     "response_hard_timeout_seconds",

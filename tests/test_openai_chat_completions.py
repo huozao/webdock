@@ -56,15 +56,15 @@ class FakeBrowserWithPage(FakeBrowser):
         return self.lane_page
 
 
-async def fake_ask(self, message: str) -> tuple[str, float]:
+async def fake_ask(self, message: str, **_kwargs) -> tuple[str, float]:
     return f"answer for: {message}", 0.1
 
 
-async def fake_ask_with_page(self, message: str) -> tuple[str, float]:
+async def fake_ask_with_page(self, message: str, **_kwargs) -> tuple[str, float]:
     return f"answer from {self.page}: {message}", 0.1
 
 
-async def fake_ask_sets_conversation_url(self, message: str) -> tuple[str, float]:
+async def fake_ask_sets_conversation_url(self, message: str, **_kwargs) -> tuple[str, float]:
     self.page._url = "https://chatgpt.com/g/g-p-lark/c/conv-feishu-1"
     return f"answer from {self.page.url}: {message}", 0.1
 

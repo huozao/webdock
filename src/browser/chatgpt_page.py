@@ -107,8 +107,22 @@ class ChatGPTPage:
         self._media_store = media_store
         self._channel = channel
 
-    async def ask(self, message: str) -> tuple[str, float]:
+    async def ask(
+        self,
+        message: str,
+        *,
+        timeout_seconds: int | None = None,
+        hard_timeout_seconds: float | None = None,
+    ) -> tuple[str, float]:
         settings = get_settings()
+        # Soft timeout is image-aware (passed by the scheduler); the hard timeout is
+        # bounded below the bridge's 320s so a slow turn frees the slot in time.
+        soft_timeout = timeout_seconds if timeout_seconds is not None else settings.chat_timeout_seconds
+        hard_timeout = (
+            hard_timeout_seconds
+            if hard_timeout_seconds is not None
+            else settings.response_hard_timeout_seconds
+        )
         started = time.monotonic()
         try:
             if await any_selector_found(self.page, selectors.LOGIN_INDICATORS):
@@ -148,10 +162,10 @@ class ChatGPTPage:
 
             answer = await wait_for_response_complete(
                 self.page,
-                timeout_seconds=settings.chat_timeout_seconds,
+                timeout_seconds=soft_timeout,
                 stable_seconds=settings.response_stable_seconds,
                 idle_timeout_seconds=settings.response_idle_timeout_seconds,
-                hard_timeout_seconds=settings.response_hard_timeout_seconds,
+                hard_timeout_seconds=hard_timeout,
                 previous_count=previous_assistant_count,
                 previous_text=previous_assistant_text,
                 previous_image_srcs=previous_image_srcs,

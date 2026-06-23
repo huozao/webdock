@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import json
@@ -43,7 +43,7 @@ async def archive_exchange(
         line = json.dumps(record, ensure_ascii=False)
         archive_dir = settings.archive_dir
         archive_dir.mkdir(parents=True, exist_ok=True)
-        path = archive_dir / f"{datetime.now().strftime('%Y-%m-%d')}.jsonl"
+        path = archive_dir / f"{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.jsonl"
         with path.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
     except Exception as exc:  # never let archiving break the chat
@@ -61,7 +61,7 @@ def _build_record(
 ) -> dict[str, Any]:
     inbound = inbound_text or ""
     record: dict[str, Any] = {
-        "ts": datetime.now().isoformat(timespec="milliseconds"),
+        "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
         "kind": kind,
         "lane": {
             "key": getattr(lane, "key", ""),

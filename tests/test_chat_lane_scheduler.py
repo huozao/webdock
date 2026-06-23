@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import asyncio
 
-from src.browser.lane_scheduler import ChatLaneScheduler, LaneContext, build_lane_key
+from src.browser.lane_scheduler import (
+    ChatLaneScheduler,
+    LaneContext,
+    build_lane_key,
+    select_chat_timeout,
+)
+from src.config import Settings
+from src.utils.errors import ErrorCode, RelayError
 
 
 class FakeBrowser:
@@ -212,3 +219,61 @@ def test_lane_key_falls_back_to_default_values_for_legacy_requests():
 
     assert lane.key == "wechat:default:private:default"
     assert lane.project == "WeChat-default"
+
+
+def test_select_chat_timeout_uses_larger_value_for_image_requests():
+    # Image-bearing turns (e.g. 图片生成) legitimately run longer than text.
+    assert select_chat_timeout(120, 300, has_images=False) == 120
+    assert select_chat_timeout(120, 300, has_images=True) == 300
+
+
+def test_settings_has_image_timeout_default():
+    assert Settings().chat_timeout_seconds_with_images == 300
+
+
+def test_scheduler_recovers_lane_and_raises_when_a_request_hangs():
+    asyncio.run(_run_hang_recovery_case())
+
+
+async def _run_hang_recovery_case():
+    reset_calls: list[str] = []
+    archived_errors: list[object] = []
+
+    class HangBrowser:
+        async def page_for_lane(self, lane: LaneContext):
+            return f"page:{lane.key}"
+
+        async def reset_lane_page(self, lane: LaneContext):
+            reset_calls.append(lane.key)
+            return f"page:{lane.key}"
+
+    async def archiver(lane, inbound, images, *, answer=None, duration=None, error=None, kind="ask"):
+        if error is not None:
+            archived_errors.append(error)
+
+    async def hanging_ask(page: object, message: str) -> tuple[str, float]:
+        await asyncio.sleep(10)
+        return "never", 0.0
+
+    scheduler = ChatLaneScheduler(
+        max_concurrent_chats=1,
+        ask_func=hanging_ask,
+        archiver=archiver,
+        chat_timeout_seconds=0.05,
+        chat_timeout_seconds_with_images=0.05,
+        request_hard_margin_seconds=0.02,
+    )
+    lane = LaneContext.from_metadata({"wechat_account": "A", "chat_type": "private", "peer_id": "u1"})
+
+    raised: RelayError | None = None
+    try:
+        await scheduler.ask(HangBrowser(), lane, "hi")
+    except RelayError as exc:
+        raised = exc
+
+    # A hung request must NOT hang forever holding the slot: it times out, the
+    # lane tab is rebuilt (so the next request is clean), and the failure is
+    # archived — never wedging the whole process / other users.
+    assert raised is not None and raised.code == ErrorCode.RESPONSE_TIMEOUT
+    assert reset_calls == ["wechat:A:private:u1"]
+    assert archived_errors and archived_errors[0] is not None

@@ -221,6 +221,70 @@ def test_lane_key_falls_back_to_default_values_for_legacy_requests():
     assert lane.project == "WeChat-default"
 
 
+def test_close_idle_lanes_closes_only_idle_and_unlocked_tabs():
+    asyncio.run(_run_idle_reaper_case())
+
+
+async def _run_idle_reaper_case():
+    import time as _time
+
+    closed_keys: list[str] = []
+
+    class ClosingBrowser(FakeBrowser):
+        async def close_lane_page(self, lane_key: str) -> bool:
+            closed_keys.append(lane_key)
+            return True
+
+    scheduler = ChatLaneScheduler(max_concurrent_chats=3, ask_func=fake_ask)
+    browser = ClosingBrowser()
+    lane_a = LaneContext.from_metadata({"wechat_account": "A", "chat_type": "private", "peer_id": "u1"})
+    lane_b = LaneContext.from_metadata({"wechat_account": "B", "chat_type": "private", "peer_id": "u2"})
+    await scheduler.ask(browser, lane_a, "hi")
+    await scheduler.ask(browser, lane_b, "hi")
+
+    now = _time.monotonic()
+    scheduler._lane_last_active[lane_a.key] = now - 10_000  # idle
+    scheduler._lane_last_active[lane_b.key] = now           # just active
+
+    closed = await scheduler.close_idle_lanes(browser, idle_seconds=1000, now=now)
+
+    assert closed == [lane_a.key]
+    assert closed_keys == [lane_a.key]
+    assert lane_b.key not in closed  # recently active -> kept
+
+
+def test_close_idle_lanes_skips_a_lane_currently_in_use():
+    asyncio.run(_run_idle_reaper_locked_case())
+
+
+async def _run_idle_reaper_locked_case():
+    import time as _time
+
+    closed_keys: list[str] = []
+
+    class ClosingBrowser(FakeBrowser):
+        async def close_lane_page(self, lane_key: str) -> bool:
+            closed_keys.append(lane_key)
+            return True
+
+    scheduler = ChatLaneScheduler(max_concurrent_chats=3, ask_func=fake_ask)
+    browser = ClosingBrowser()
+    lane = LaneContext.from_metadata({"wechat_account": "A", "chat_type": "private", "peer_id": "u1"})
+    await scheduler.ask(browser, lane, "hi")
+
+    now = _time.monotonic()
+    scheduler._lane_last_active[lane.key] = now - 10_000  # idle by clock
+    lock = await scheduler._get_lane_lock(lane.key)
+    await lock.acquire()  # simulate an in-flight request holding the lane
+    try:
+        closed = await scheduler.close_idle_lanes(browser, idle_seconds=1000, now=now)
+    finally:
+        lock.release()
+
+    assert closed == []  # in-use lane is never closed mid-request
+    assert closed_keys == []
+
+
 def test_select_chat_timeout_uses_larger_value_for_image_requests():
     # Image-bearing turns (e.g. 图片生成) legitimately run longer than text.
     assert select_chat_timeout(120, 300, has_images=False) == 120

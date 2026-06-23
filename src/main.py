@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import threading
 from contextlib import asynccontextmanager
@@ -56,7 +58,25 @@ def create_app(*, start_browser: bool = True) -> FastAPI:
             )
             thread.start()
             app.state.routing_threads.append(thread)
+
+        # Idle-tab GC: periodically close lane tabs unused for a while so many
+        # distinct peers don't pile up tabs and exhaust Chrome memory.
+        async def _idle_lane_reaper() -> None:
+            idle = settings.lane_tab_idle_seconds
+            interval = max(30, idle // 10)
+            while True:
+                await asyncio.sleep(interval)
+                try:
+                    await app.state.chat_scheduler.close_idle_lanes(app.state.browser, idle)
+                except Exception as exc:
+                    logging.getLogger(__name__).warning("idle lane reaper error: %s", exc)
+
+        app.state.idle_reaper_task = (
+            asyncio.create_task(_idle_lane_reaper()) if settings.lane_tab_idle_seconds > 0 else None
+        )
         yield
+        if app.state.idle_reaper_task is not None:
+            app.state.idle_reaper_task.cancel()
         app.state.routing_stop.set()
         await app.state.browser.stop()
 

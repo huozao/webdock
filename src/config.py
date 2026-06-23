@@ -47,6 +47,9 @@ class Settings:
     cdp_connect_timeout_seconds: int = 60
     attach_on_start: bool = False
     max_concurrent_chats: int = 3
+    # Close a lane's browser tab after this many idle seconds (idle-tab GC) so many
+    # distinct peers don't accumulate tabs and exhaust Chrome memory. 0 disables.
+    lane_tab_idle_seconds: int = 1200
     test_media_url: str = ""
     media_base_url: str = ""
 
@@ -97,6 +100,7 @@ def get_settings() -> Settings:
         cdp_connect_timeout_seconds=int(_get("CDP_CONNECT_TIMEOUT_SECONDS", "60", env)),
         attach_on_start=_get("ATTACH_ON_START", "false", env).lower() == "true",
         max_concurrent_chats=int(_get("MAX_CONCURRENT_CHATS", "3", env)),
+        lane_tab_idle_seconds=int(_get("LANE_TAB_IDLE_SECONDS", "1200", env)),
         media_base_url=_get("MEDIA_BASE_URL", "", env),
     )
     settings.ensure_dirs()
@@ -139,6 +143,7 @@ def _path_from_env(value: str) -> Path:
 _RUNTIME_OVERRIDE_INT_FIELDS = (
     "chat_timeout_seconds",
     "chat_timeout_seconds_with_images",
+    "lane_tab_idle_seconds",
     "response_stable_seconds",
     "response_idle_timeout_seconds",
     "response_hard_timeout_seconds",

@@ -392,17 +392,24 @@ async def rich_assistant_text(page: Any) -> str:
     return _clean_assistant_text(text)
 
 
-async def rich_assistant_markdown(page: Any) -> str:
+async def rich_assistant_markdown(page: Any, *, attempts: int = 3, settle_seconds: float = 0.4) -> str:
     """Markdown of the latest assistant message (tables/code/links/emphasis kept),
-    for channels that render markdown (Feishu). Falls back to the plain WeChat-style
-    text if the markdown walk yields nothing."""
-    try:
-        text = await page.evaluate(_RICH_MARKDOWN_JS)
-    except Exception:
-        text = ""
-    if not text or not text.strip():
-        return await rich_assistant_text(page)
-    return text.strip()
+    for channels that render markdown (Feishu).
+
+    The walk can transiently yield nothing right after a reply "completes" while
+    the rich DOM (tables especially) is still finalizing — which used to silently
+    drop the whole reply to flattened WeChat-style text. Retry a few times (short
+    settle) before that fallback so structure is preserved."""
+    for attempt in range(max(1, attempts)):
+        try:
+            text = await page.evaluate(_RICH_MARKDOWN_JS)
+        except Exception:
+            text = ""
+        if text and text.strip():
+            return text.strip()
+        if attempt < attempts - 1:
+            await asyncio.sleep(settle_seconds)
+    return await rich_assistant_text(page)
 
 
 async def assistant_message_count(page: Any) -> int:

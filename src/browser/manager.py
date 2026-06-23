@@ -59,6 +59,20 @@ class BrowserManager:
         self._lane_contexts[lane.key] = lane
         return page
 
+    async def close_lane_page(self, lane_key: str) -> bool:
+        """Close an idle lane's tab and forget it (idle-tab GC). The next message
+        for that lane reopens the tab via page_for_lane. Never closes the primary
+        page. Best-effort."""
+        page = self._lane_pages.pop(lane_key, None)
+        self._lane_contexts.pop(lane_key, None)
+        if page is None or page is self._page or _is_page_closed(page):
+            return False
+        try:
+            await page.close()
+        except Exception:
+            return False
+        return True
+
     async def reset_lane_page(self, lane: LaneContext) -> Any:
         if self._context is None:
             return self._page

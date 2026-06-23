@@ -146,6 +146,8 @@ class ChatLaneScheduler:
         self._lane_fallback_window_seconds = lane_fallback_window_seconds
         self._last_active_lane: LaneContext | None = None
         self._last_active_at = 0.0
+        # monotonic timestamp of the last request per lane.key, for idle-tab GC.
+        self._lane_last_active: dict[str, float] = {}
 
     async def _default_ask(
         self,
@@ -168,6 +170,7 @@ class ChatLaneScheduler:
 
         lane_lock = await self._get_lane_lock(lane.key)
         async with lane_lock:
+            self._lane_last_active[lane.key] = time.monotonic()
             async with self._account_semaphore:
                 # "/新对话" with no payload: just drop the saved conversation so the
                 # next real message opens a fresh chat in the project. No round-trip.
@@ -292,6 +295,30 @@ class ChatLaneScheduler:
             "known_lanes": sorted(self._lane_locks.keys()),
         }
 
+    async def close_idle_lanes(self, browser: Any, idle_seconds: float, *, now: float | None = None) -> list[str]:
+        """Close lane tabs idle longer than idle_seconds to bound Chrome memory.
+
+        Skips any lane whose lock is currently held (a request is in flight). For
+        the rest we acquire the lock before closing so a tab is never torn down
+        mid-request; the next message for that lane just reopens its tab (the
+        conversation URL is recorded, login persists). Best-effort per lane."""
+        now = time.monotonic() if now is None else now
+        closed: list[str] = []
+        for key in list(self._lane_locks.keys()):
+            lock = self._lane_locks.get(key)
+            if lock is None or lock.locked():
+                continue
+            if now - self._lane_last_active.get(key, 0.0) < idle_seconds:
+                continue
+            async with lock:
+                try:
+                    if await _close_lane_page(browser, key):
+                        closed.append(key)
+                except Exception as exc:  # GC must never break the scheduler
+                    log.warning("close idle lane %s failed: %s", key, exc)
+                self._lane_last_active.pop(key, None)
+        return closed
+
     async def _get_lane_lock(self, lane_key: str) -> asyncio.Lock:
         async with self._lane_locks_guard:
             lock = self._lane_locks.get(lane_key)
@@ -321,6 +348,13 @@ async def _reset_lane_page(browser: Any, lane: LaneContext) -> object | None:
     if hasattr(browser, "reset_lane_page"):
         return await browser.reset_lane_page(lane)
     return None
+
+
+async def _close_lane_page(browser: Any, lane_key: str) -> bool:
+    closer = getattr(browser, "close_lane_page", None)
+    if closer is None:
+        return False
+    return bool(await closer(lane_key))
 
 
 async def _ask_chatgpt_page(page: object, message: str) -> tuple[str, float]:

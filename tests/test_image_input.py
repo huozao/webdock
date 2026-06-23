@@ -36,6 +36,10 @@ def test_extract_image_urls_accepts_direct_string_image_url():
     ]
 
 
+def test_max_input_images_default_is_20():
+    assert MAX_INPUT_IMAGES == 20
+
+
 def test_extract_image_urls_caps_count():
     many = [{"type": "image_url", "image_url": {"url": PNG_DATA_URL}} for _ in range(MAX_INPUT_IMAGES + 3)]
 

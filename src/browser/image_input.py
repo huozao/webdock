@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 import re
 import urllib.parse
 import urllib.request
@@ -9,9 +10,13 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-# Cap inbound images per turn (mirrors the output cap in chatgpt_page) and the
-# size of each, so a malformed/huge data URL can't exhaust memory.
-MAX_INPUT_IMAGES = 4
+# Cap inbound images per turn (mirrors the bridge's MAX_BRIDGE_IMAGES) and the size
+# of each, so a malformed/huge data URL can't exhaust memory. Env-tunable (default
+# 20) so the cap can track what ChatGPT's composer actually accepts.
+try:
+    MAX_INPUT_IMAGES = max(1, int(os.getenv("MAX_INPUT_IMAGES", "20")))
+except ValueError:
+    MAX_INPUT_IMAGES = 20
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 _DOWNLOAD_TIMEOUT_SECONDS = 20
 

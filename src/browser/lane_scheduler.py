@@ -38,10 +38,11 @@ DEFAULT_PEER = "default"
 # so those images land in the same conversation instead of a stray default chat.
 LANE_FALLBACK_WINDOW_SECONDS = 120.0
 
-# Extra wall-clock allowed beyond the chat soft-timeout before a request is force-
-# released. Keeps a stuck browser/CDP op from outliving the bridge (320s) and
-# wedging the worker. Hard cap = chosen soft timeout + this margin.
-DEFAULT_REQUEST_HARD_MARGIN_SECONDS = 15.0
+# Absolute wall-clock ceiling for a single request (kept just under the bridge's
+# 320s so WebDock returns first and frees the slot). This is NOT the soft timeout:
+# the soft timeout is an *idle* deadline (give up only if a reply stops
+# progressing), so a long but actively-streaming reply keeps going until this cap.
+DEFAULT_REQUEST_HARD_CAP_SECONDS = 310.0
 
 
 def select_chat_timeout(base_seconds: int, with_images_seconds: int, *, has_images: bool) -> int:
@@ -126,12 +127,12 @@ class ChatLaneScheduler:
         archiver: Callable[..., Awaitable[None]] | None = None,
         chat_timeout_seconds: int = 120,
         chat_timeout_seconds_with_images: int = 300,
-        request_hard_margin_seconds: float = DEFAULT_REQUEST_HARD_MARGIN_SECONDS,
+        request_hard_cap_seconds: float = DEFAULT_REQUEST_HARD_CAP_SECONDS,
     ) -> None:
         self.max_concurrent_chats = max(1, max_concurrent_chats)
         self._chat_timeout_seconds = chat_timeout_seconds
         self._chat_timeout_seconds_with_images = chat_timeout_seconds_with_images
-        self._request_hard_margin_seconds = request_hard_margin_seconds
+        self._request_hard_cap_seconds = request_hard_cap_seconds
         self._account_semaphore = asyncio.Semaphore(self.max_concurrent_chats)
         self._lane_locks: dict[str, asyncio.Lock] = {}
         self._lane_locks_guard = asyncio.Lock()
@@ -197,7 +198,11 @@ class ChatLaneScheduler:
                     self._chat_timeout_seconds_with_images,
                     has_images=bool(images),
                 )
-                hard_cap = effective_timeout + self._request_hard_margin_seconds
+                # Soft timeout = idle deadline (handled inside the ask). Hard cap =
+                # absolute ceiling for an actively-streaming reply; never below the
+                # soft timeout. A live reply runs until it finishes or hits this cap
+                # — it is NOT cut off at the soft timeout.
+                hard_cap = max(effective_timeout, self._request_hard_cap_seconds)
                 try:
                     if self._ask_func_takes_channel:
                         coro = self._ask_func(

@@ -285,6 +285,32 @@ async def _run_idle_reaper_locked_case():
     assert closed_keys == []
 
 
+def test_active_reply_past_soft_timeout_is_not_killed_before_hard_cap():
+    asyncio.run(_run_active_reply_case())
+
+
+async def _run_active_reply_case():
+    # An actively-progressing reply that runs LONGER than the soft timeout but
+    # finishes before the hard cap must NOT be cut off (the soft timeout is an
+    # idle deadline, not a wall-clock kill). Regression guard: a previous build set
+    # the hard cap to soft+margin and killed live reasoning replies at ~135s.
+    async def slow_progressing_ask(page: object, message: str) -> tuple[str, float]:
+        await asyncio.sleep(0.3)  # > soft (0.05), < hard cap (2.0)
+        return "done", 0.3
+
+    scheduler = ChatLaneScheduler(
+        max_concurrent_chats=1,
+        ask_func=slow_progressing_ask,
+        chat_timeout_seconds=0.05,
+        chat_timeout_seconds_with_images=0.05,
+        request_hard_cap_seconds=2.0,
+    )
+    lane = LaneContext.from_metadata({"wechat_account": "A", "chat_type": "private", "peer_id": "u1"})
+
+    answer, _ = await scheduler.ask(FakeBrowser(), lane, "hi")
+    assert answer == "done"
+
+
 def test_select_chat_timeout_uses_larger_value_for_image_requests():
     # Image-bearing turns (e.g. 图片生成) legitimately run longer than text.
     assert select_chat_timeout(120, 300, has_images=False) == 120
@@ -325,7 +351,7 @@ async def _run_hang_recovery_case():
         archiver=archiver,
         chat_timeout_seconds=0.05,
         chat_timeout_seconds_with_images=0.05,
-        request_hard_margin_seconds=0.02,
+        request_hard_cap_seconds=0.05,
     )
     lane = LaneContext.from_metadata({"wechat_account": "A", "chat_type": "private", "peer_id": "u1"})
 

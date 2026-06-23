@@ -37,6 +37,7 @@ def create_app(*, start_browser: bool = True) -> FastAPI:
             media_store=app.state.media_store,
             chat_timeout_seconds=settings.chat_timeout_seconds,
             chat_timeout_seconds_with_images=settings.chat_timeout_seconds_with_images,
+            request_hard_cap_seconds=settings.request_hard_cap_seconds,
         )
         if start_browser and settings.attach_on_start:
             try:

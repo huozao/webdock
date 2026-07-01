@@ -71,6 +71,9 @@ def test_gokapi_is_managed_as_independent_deployment_unit():
     env_example = (ROOT / "deploy/gokapi/.env.example").read_text(encoding="utf-8")
     deploy_script = (ROOT / "deploy/gokapi/deploy.sh").read_text(encoding="utf-8")
     nginx_template = (ROOT / "deploy/gokapi/nginx/files.hydwang.xyz.conf.template").read_text(encoding="utf-8")
+    tunnel_env = (ROOT / "deploy/gokapi/ecs-tunnel.env.example").read_text(encoding="utf-8")
+    tunnel_service = (ROOT / "deploy/gokapi/gokapi-ecs-tunnel.service").read_text(encoding="utf-8")
+    tunnel_install = (ROOT / "deploy/gokapi/install-ecs-tunnel.sh").read_text(encoding="utf-8")
     docs = (ROOT / "docs/gokapi.md").read_text(encoding="utf-8")
 
     assert "deploy/gokapi/.env" in gitignore
@@ -84,8 +87,12 @@ def test_gokapi_is_managed_as_independent_deployment_unit():
     assert "GOKAPI_BIND=127.0.0.1" in env_example
     assert "docker compose -p gokapi" in deploy_script
     assert "docker compose -p webdock" not in deploy_script
-    assert "proxy_pass http://127.0.0.1:53842;" in nginx_template
+    assert "proxy_pass http://127.0.0.1:15342;" in nginx_template
     assert "files.hydwang.xyz" in nginx_template
+    assert "ECS_REMOTE_PORT=15342" in tunnel_env
+    assert "GOKAPI_LOCAL_PORT=53842" in tunnel_env
+    assert "-R ${ECS_REMOTE_BIND}:${ECS_REMOTE_PORT}:${GOKAPI_LOCAL_BIND}:${GOKAPI_LOCAL_PORT}" in tunnel_service
+    assert "gokapi-ecs-tunnel.service" in tunnel_install
     assert "不要把 Gokapi 合并进 WebDock 主容器" in docs
     assert "https://files.hydwang.xyz" in docs
 

@@ -18,6 +18,9 @@ from src.browser.detector import (
     generated_file_targets,
     generated_image_srcs,
     latest_message_has_widget,
+    ordered_feishu_markdown,
+    SLOT_PLACEHOLDER_RE,
+    _strip_markdown_tables,
     rich_assistant_markdown,
     rich_assistant_text,
     wait_for_response_complete,
@@ -33,7 +36,22 @@ from src.utils.errors import ErrorCode, RelayError
 # whose class contains "WidgetRenderer" (and is marked not-markdown). Their text
 # is noise, so we screenshot them and send as images instead.
 WIDGET_SELECTOR = "[class*='WidgetRenderer']"
+# Feishu's card renderer flattens GFM pipe tables into run-together text, so on the
+# Feishu path we screenshot tables too (and drop their markdown in detector). The
+# :not(...) keeps a widget's own inner table from being captured twice. WeChat is
+# unchanged (plain text keeps the aligned table).
+FEISHU_TABLE_SELECTOR = "table:not([class*='WidgetRenderer'] table)"
 MAX_WIDGETS_PER_REPLY = 4
+
+
+def _media_screenshot_selectors(channel: str) -> list[tuple[str, bool]]:
+    """(selector, prefer_clone) pairs to screenshot-and-forward for a reply, per
+    channel. prefer_clone=True renders a static clone instead of a live element
+    screenshot — needed for tables, whose sticky header/first column render outside
+    the <table> box and get cropped by element.screenshot()."""
+    if channel == "feishu":
+        return [(WIDGET_SELECTOR, False), (FEISHU_TABLE_SELECTOR, True)]
+    return [(WIDGET_SELECTOR, False)]
 # ChatGPT-generated images (e.g. DALL-E) render as <img> with a backend
 # estuary/content src — often OUTSIDE the assistant container, and the src needs
 # the logged-in session to fetch. detector.generated_image_srcs locates them (by
@@ -183,6 +201,7 @@ class ChatGPTPage:
             final_answer = answer.strip()
             prev_srcs = set(previous_image_srcs)
             new_image_srcs = [s for s in await generated_image_srcs(self.page) if s not in prev_srcs]
+            feishu_media_inlined = False
             if new_image_srcs:
                 # An image reply's text is only interim/UI noise, and may still be
                 # the PREVIOUS turn's text (the wait completes on the new image
@@ -190,14 +209,22 @@ class ChatGPTPage:
                 # text that merely repeats the pre-send snapshot.
                 final_answer = _image_reply_text(final_answer, previous_assistant_text)
             elif self._channel == "feishu":
-                # Feishu renders markdown (OpenClaw feishu plugin -> rich card), so
-                # send the structure-preserving markdown instead of the WeChat-style
-                # flattened plain text. No-op fallback if the markdown walk is empty.
-                markdown = await rich_assistant_markdown(self.page)
-                if markdown:
-                    final_answer = feishu_safe_markdown(markdown)
+                # Mixed replies (prose + widgets/tables) are assembled in document
+                # order with inline MEDIA placeholders so the bridge can build ONE
+                # Feishu card with text and images interleaved as on the web. Only
+                # used when the reply actually has screenshot targets; otherwise fall
+                # back to the plain structure-preserving markdown (pipe tables, which
+                # Feishu can't render, are dropped and re-delivered as screenshots).
+                ordered = await self._ordered_feishu_answer(settings.media_base_url)
+                if ordered is not None:
+                    final_answer = ordered
+                    feishu_media_inlined = True
+                else:
+                    markdown = await rich_assistant_markdown(self.page)
+                    if markdown:
+                        final_answer = feishu_safe_markdown(_strip_markdown_tables(markdown))
             final_answer = await self._append_media_images(
-                final_answer, settings.media_base_url, prev_srcs
+                final_answer, settings.media_base_url, prev_srcs, capture_widgets=not feishu_media_inlined
             )
             if self._channel == "feishu":
                 final_answer = await self._append_generated_files(
@@ -216,19 +243,60 @@ class ChatGPTPage:
             debug_dir = await save_debug_dump(self.page, exc)
             raise RelayError(ErrorCode.UNKNOWN_ERROR, str(exc), debug_dir=debug_dir) from exc
 
-    async def _append_media_images(self, answer: str, media_base_url: str, exclude_image_srcs: set[str]) -> str:
+    async def _append_media_images(
+        self, answer: str, media_base_url: str, exclude_image_srcs: set[str], *, capture_widgets: bool = True
+    ) -> str:
         """Screenshot ChatGPT widgets AND download NEW generated images (e.g.
         DALL-E) in the latest reply, store them, and append 'MEDIA: <url>' tokens
-        so OpenClaw forwards them to WeChat. No-op without a media store / base url."""
+        so OpenClaw forwards them. No-op without a media store / base url.
+        capture_widgets=False when widgets/tables were already inlined in document
+        order (Feishu ordered path) — only NEW generated images are appended then."""
         base = (media_base_url or "").rstrip("/")
         if self._media_store is None or not base:
             return answer
         result = answer
-        tokens = await self._capture_widget_tokens()
+        tokens = await self._capture_widget_tokens() if capture_widgets else []
         tokens += await self._capture_image_tokens(exclude_image_srcs)
         for token in tokens:
             result = f"{result}\nMEDIA: {base}/media/{token}".strip()
         return result
+
+    async def _ordered_feishu_answer(self, media_base_url: str) -> str | None:
+        """Assemble a Feishu reply with widgets/tables screenshotted IN PLACE: the
+        walk emits markdown with @@WEBDOCK_SLOT_k@@ placeholders at each target's
+        document position; here we screenshot each tagged target and swap in a
+        'MEDIA: <url>' line. Returns None when there are no targets (caller uses the
+        plain markdown path) or no media store."""
+        base = (media_base_url or "").rstrip("/")
+        if self._media_store is None or not base:
+            return None
+        text = await ordered_feishu_markdown(self.page)
+        if not text or "@@WEBDOCK_SLOT_" not in text:
+            return None
+        text = feishu_safe_markdown(text)
+        try:
+            assistant = self.page.locator("[data-testid^='conversation-turn']").last
+        except Exception:
+            return None
+        captured = 0
+        for slot in dict.fromkeys(SLOT_PLACEHOLDER_RE.findall(text)):  # dedupe, keep order
+            placeholder = f"@@WEBDOCK_SLOT_{slot}@@"
+            token = None
+            if captured < MAX_WIDGETS_PER_REPLY:
+                try:
+                    target = assistant.locator(f"[data-webdock-slot='{slot}']").first
+                    if await target.count() > 0:
+                        prefer_clone = (await target.evaluate("(n) => n.tagName")) == "TABLE"
+                        await _wait_widget_rendered(target)
+                        png = await _screenshot_widget(self.page, target, prefer_clone=prefer_clone)
+                        if png is not None:
+                            token = self._media_store.put(png, "image/png")
+                            captured += 1
+                except Exception:
+                    token = None
+            replacement = f"\nMEDIA: {base}/media/{token}\n" if token else ""
+            text = text.replace(placeholder, replacement)
+        return re.sub(r"\n{3,}", "\n\n", text).strip()
 
     async def _capture_widget_tokens(self) -> list[str]:
         tokens: list[str] = []
@@ -236,20 +304,30 @@ class ChatGPTPage:
             # Anchor on the latest conversation-turn: image/widget replies no longer
             # carry data-message-author-role, so the old selector found nothing.
             assistant = self.page.locator("[data-testid^='conversation-turn']").last
-            widgets = assistant.locator(WIDGET_SELECTOR)
-            count = await widgets.count()
         except Exception:
             return tokens
-        for index in range(min(count, MAX_WIDGETS_PER_REPLY)):
-            widget = widgets.nth(index)
-            await _wait_widget_rendered(widget)
-            png = await _screenshot_widget(self.page, widget)
-            if png is None:
-                continue
+        # WeChat: widgets only. Feishu: widgets + tables (Feishu can't render tables,
+        # so we screenshot them). MAX_WIDGETS_PER_REPLY is a total budget across both.
+        for selector, prefer_clone in _media_screenshot_selectors(self._channel):
+            if len(tokens) >= MAX_WIDGETS_PER_REPLY:
+                break
             try:
-                tokens.append(self._media_store.put(png, "image/png"))
+                elements = assistant.locator(selector)
+                count = await elements.count()
             except Exception:
                 continue
+            for index in range(count):
+                if len(tokens) >= MAX_WIDGETS_PER_REPLY:
+                    break
+                element = elements.nth(index)
+                await _wait_widget_rendered(element)
+                png = await _screenshot_widget(self.page, element, prefer_clone=prefer_clone)
+                if png is None:
+                    continue
+                try:
+                    tokens.append(self._media_store.put(png, "image/png"))
+                except Exception:
+                    continue
         return tokens
 
     async def _capture_image_tokens(self, exclude_srcs: set[str]) -> list[str]:
@@ -313,7 +391,7 @@ class ChatGPTPage:
 # contain ';' (e.g. data: URIs in background-image) survive. Pseudo-elements
 # (::before/::after) and web fonts are not captured — a known, accepted edge.
 _INLINE_STYLES_JS = """
-(root) => {
+async (root) => {
   const inlineOne = (src, dst) => {
     const cs = getComputedStyle(src);
     for (let i = 0; i < cs.length; i++) {
@@ -330,6 +408,28 @@ _INLINE_STYLES_JS = """
   };
   const clone = root.cloneNode(true);
   walk(root, clone);
+  // Icons (e.g. weather condition images) live at authenticated/blob srcs that a
+  // throwaway render page can't load, so they come out broken. Fetch each in THIS
+  // page (cookies/same-origin apply) and inline it as a data URI on the clone.
+  const srcImgs = [...root.querySelectorAll('img')];
+  const dstImgs = [...clone.querySelectorAll('img')];
+  await Promise.all(srcImgs.map(async (img, i) => {
+    const dst = dstImgs[i];
+    if (!dst) return;
+    const u = img.currentSrc || img.src;
+    if (!u || u.startsWith('data:')) return;
+    try {
+      const resp = await fetch(u);
+      const blob = await resp.blob();
+      const dataUrl = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result);
+        r.onerror = rej;
+        r.readAsDataURL(blob);
+      });
+      dst.setAttribute('src', dataUrl);
+    } catch (e) {}
+  }));
   return clone.outerHTML;
 }
 """
@@ -349,20 +449,18 @@ def _build_render_html(widget_html: str) -> str:
     )
 
 
-async def _screenshot_widget(page: Any, widget: Any) -> bytes | None:
-    """Screenshot the live widget first, preserving inherited page/background
-    styles. If that fails, render a static copy in a throwaway page and screenshot
-    that as a fallback. Returns None on total failure."""
-    try:
-        await widget.scroll_into_view_if_needed(timeout=3000)
-    except Exception:
-        pass
+async def _live_widget_screenshot(widget: Any) -> bytes | None:
     try:
         live = await widget.screenshot(timeout=8000)
-        if live:
-            return live
+        return live or None
     except Exception:
-        pass
+        return None
+
+
+async def _clone_render_screenshot(page: Any, widget: Any) -> bytes | None:
+    """Render a style-inlined static clone of the element in a throwaway page and
+    screenshot that. Captures the full element even when the live layout crops it
+    (ChatGPT tables freeze the header/first column outside the <table> box)."""
     try:
         inlined = await widget.evaluate(_INLINE_STYLES_JS)
     except Exception:
@@ -383,6 +481,20 @@ async def _screenshot_widget(page: Any, widget: Any) -> bytes | None:
                 await render_page.close()
             except Exception:
                 pass
+
+
+async def _screenshot_widget(page: Any, widget: Any, *, prefer_clone: bool = False) -> bytes | None:
+    """Screenshot an element. Widgets capture best live (inherited page styles), so
+    that is tried first with a clone-render fallback. Tables (prefer_clone=True) must
+    go clone-first: element.screenshot() crops their frozen header/first column.
+    Returns None on total failure."""
+    try:
+        await widget.scroll_into_view_if_needed(timeout=3000)
+    except Exception:
+        pass
+    if prefer_clone:
+        return await _clone_render_screenshot(page, widget) or await _live_widget_screenshot(widget)
+    return await _live_widget_screenshot(widget) or await _clone_render_screenshot(page, widget)
 
 
 async def _wait_widget_rendered(widget: Any, timeout_seconds: float = 8.0) -> None:

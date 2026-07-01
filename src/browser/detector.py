@@ -392,6 +392,163 @@ async def rich_assistant_text(page: Any) -> str:
     return _clean_assistant_text(text)
 
 
+# Ordered feishu content: emit the reply as markdown text with @@WEBDOCK_SLOT_k@@
+# placeholders at the DOCUMENT POSITION of each screenshot target (widget / table),
+# and tag each target with data-webdock-slot=k so the caller can screenshot it and
+# swap in a MEDIA: url. Units are sorted by on-screen position so text and images
+# interleave the way the user sees them on the web (ChatGPT sometimes reorders the
+# DOM vs the visual layout). Reuses the inline/list logic of the rich-markdown walk.
+SLOT_PLACEHOLDER_RE = re.compile(r"@@WEBDOCK_SLOT_(\d+)@@")
+_ORDERED_MARKDOWN_JS = r"""
+() => {
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn']");
+  const el = turns[turns.length - 1];
+  if (!el) return "";
+  if (el.querySelector("[data-message-author-role='user']")) return "";
+  const SKIP = new Set(["BUTTON","SVG","PATH","USE","SCRIPT","STYLE"]);
+  const skip = (n) => {
+    if (SKIP.has(n.tagName)) return true;
+    if (n.getAttribute && n.getAttribute("role") === "button") return true;
+    if (n.classList && (n.classList.contains("katex-mathml") || n.classList.contains("katex-html"))) return true;
+    return false;
+  };
+  const BLOCK = new Set(["P","H1","H2","H3","H4","H5","H6","UL","OL","PRE","BLOCKQUOTE","TABLE","HR","DIV","SECTION","ARTICLE"]);
+  const inline = (node) => {
+    let out = "";
+    for (const c of node.childNodes) {
+      if (c.nodeType === 3) { out += c.nodeValue; continue; }
+      if (c.nodeType === 1 && c.classList && c.classList.contains("katex")) {
+        const tex = c.querySelector('annotation[encoding="application/x-tex"]');
+        if (tex) { out += "$" + (tex.textContent || "").trim() + "$"; continue; }
+      }
+      if (c.nodeType !== 1 || skip(c)) continue;
+      const tag = c.tagName;
+      if (BLOCK.has(tag)) continue;
+      if (tag === "BR") { out += "  \n"; continue; }
+      if (tag === "STRONG" || tag === "B") { out += "**" + inline(c).trim() + "**"; continue; }
+      if (tag === "EM" || tag === "I") { out += "*" + inline(c).trim() + "*"; continue; }
+      if (tag === "DEL" || tag === "S") { out += "~~" + inline(c).trim() + "~~"; continue; }
+      if (tag === "CODE") { out += "`" + (c.innerText || c.textContent || "") + "`"; continue; }
+      if (tag === "A") {
+        const href = c.getAttribute("href") || "";
+        const txt = inline(c).trim() || href;
+        out += href ? "[" + txt + "](" + href + ")" : txt;
+        continue;
+      }
+      out += inline(c);
+    }
+    return out;
+  };
+  const list = (node, ordered, depth) => {
+    let out = "";
+    let i = ordered ? (parseInt(node.getAttribute("start") || "1", 10) || 1) : 1;
+    for (const li of node.children) {
+      if (li.tagName !== "LI") continue;
+      const cb = li.querySelector('input[type="checkbox"]');
+      let marker = ordered ? (i++ + ". ") : "- ";
+      if (cb) marker = "- [" + (cb.checked ? "x" : " ") + "] ";
+      let text = inline(li).trim();
+      out += "  ".repeat(depth) + marker + text + "\n";
+      for (const ch of li.children) {
+        if (ch.tagName === "UL") out += list(ch, false, depth + 1);
+        else if (ch.tagName === "OL") out += list(ch, true, depth + 1);
+      }
+    }
+    return out;
+  };
+  const emitBlock = (c) => {
+    const tag = c.tagName;
+    if (/^H[1-6]$/.test(tag)) return "#".repeat(+tag[1]) + " " + inline(c).trim();
+    if (tag === "P") return inline(c).trim();
+    if (tag === "UL") return list(c, false, 0).replace(/\n+$/, "");
+    if (tag === "OL") return list(c, true, 0).replace(/\n+$/, "");
+    if (tag === "PRE") {
+      const code = c.querySelector("code");
+      const cls = code && typeof code.className === "string" ? code.className : "";
+      const m = cls.match(/language-([\w+#.-]+)/);
+      const txt = ((code || c).innerText || "").replace(/\n+$/, "");
+      return "```" + (m ? m[1] : "") + "\n" + txt + "\n```";
+    }
+    if (tag === "BLOCKQUOTE") return inline(c).trim().split("\n").map((l) => "> " + l).join("\n");
+    if (tag === "HR") return "---";
+    return inline(c).trim();
+  };
+  const isTargetTable = (n) => n.tagName === "TABLE" && !n.closest("[class*='WidgetRenderer']");
+  const isWidget = (n) => {
+    const cls = typeof n.className === "string" ? n.className : "";
+    return cls.indexOf("WidgetRenderer") >= 0;
+  };
+  const allTargets = [...el.querySelectorAll("[class*='WidgetRenderer'], table")].filter((n) => isWidget(n) || isTargetTable(n));
+  const targets = allTargets.filter((t) => !allTargets.some((o) => o !== t && o.contains(t)));
+  targets.forEach((t, k) => t.setAttribute("data-webdock-slot", String(k)));
+  const units = [];
+  targets.forEach((t) => units.push({ type: "img", el: t }));
+  el.querySelectorAll(".markdown").forEach((root) => {
+    for (const c of root.children) {
+      if (c.nodeType !== 1 || skip(c)) continue;
+      if (c.hasAttribute("data-webdock-slot")) continue;       // a target table itself
+      if (c.querySelector("[data-webdock-slot]")) continue;    // wraps a target -> the target unit covers it
+      units.push({ type: "md", el: c });
+    }
+  });
+  const key = (u) => { const r = u.el.getBoundingClientRect(); return [Math.round(r.top), Math.round(r.left)]; };
+  units.sort((a, b) => { const A = key(a), B = key(b); return (A[0] - B[0]) || (A[1] - B[1]); });
+  const parts = [];
+  for (const u of units) {
+    if (u.type === "img") parts.push("@@WEBDOCK_SLOT_" + u.el.getAttribute("data-webdock-slot") + "@@");
+    else { const t = emitBlock(u.el); if (t && t.trim()) parts.push(t); }
+  }
+  return parts.join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+"""
+
+
+async def ordered_feishu_markdown(page: Any, *, attempts: int = 3, settle_seconds: float = 0.4) -> str:
+    """Markdown with @@WEBDOCK_SLOT_k@@ placeholders at each screenshot target's
+    position (targets tagged data-webdock-slot=k). Empty -> "" so the caller can
+    fall back to the plain rich-markdown path."""
+    for attempt in range(max(1, attempts)):
+        try:
+            text = await page.evaluate(_ORDERED_MARKDOWN_JS)
+        except Exception:
+            text = ""
+        if text and text.strip():
+            return text.strip()
+        if attempt < attempts - 1:
+            await asyncio.sleep(settle_seconds)
+    return ""
+
+
+def _is_table_delimiter(line: str) -> bool:
+    """A GFM table delimiter row, e.g. ``| --- | :--: |`` — only dashes, colons,
+    pipes and spaces, with at least one dash and one pipe."""
+    s = line.strip()
+    if "-" not in s or "|" not in s:
+        return False
+    return all(ch in "-:| \t" for ch in s)
+
+
+def _strip_markdown_tables(markdown: str) -> str:
+    """Drop GFM pipe-table blocks (header + delimiter + body rows) from markdown.
+
+    Feishu's card renderer flattens pipe tables into run-together text, so on the
+    Feishu path the table is delivered as a screenshot instead and its markdown is
+    removed here to avoid a duplicated, mangled copy. A line that merely contains a
+    stray ``|`` (no delimiter row beneath it) is not a table and is kept."""
+    lines = markdown.split("\n")
+    out: list[str] = []
+    i, n = 0, len(lines)
+    while i < n:
+        if "|" in lines[i] and i + 1 < n and _is_table_delimiter(lines[i + 1]):
+            i += 2  # skip header + delimiter
+            while i < n and lines[i].strip() and "|" in lines[i]:
+                i += 1  # skip body rows
+            continue
+        out.append(lines[i])
+        i += 1
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+
+
 async def rich_assistant_markdown(page: Any, *, attempts: int = 3, settle_seconds: float = 0.4) -> str:
     """Markdown of the latest assistant message (tables/code/links/emphasis kept),
     for channels that render markdown (Feishu).

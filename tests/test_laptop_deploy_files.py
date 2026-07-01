@@ -77,6 +77,7 @@ def test_gokapi_is_managed_as_independent_deployment_unit():
     docs = (ROOT / "docs/gokapi.md").read_text(encoding="utf-8")
 
     assert "deploy/gokapi/.env" in gitignore
+    assert "deploy/gokapi/ecs-tunnel.env" in gitignore
     assert "deploy/gokapi/data/" in gitignore
     assert "deploy/gokapi/config/" in gitignore
     assert "image: ${GOKAPI_IMAGE:-f0rc3/gokapi:latest}" in compose

@@ -18,6 +18,7 @@ runtime/*
 deploy/laptop/mihomo.env
 
 deploy/gokapi/.env
+deploy/gokapi/ecs-tunnel.env
 deploy/gokapi/data/
 deploy/gokapi/config/
 

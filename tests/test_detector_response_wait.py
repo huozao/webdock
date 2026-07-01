@@ -368,3 +368,13 @@ def test_wait_holds_for_various_interim_status():
         page = FakePage([status], streaming=False)
         answer = asyncio.run(wait_for_response_complete(page, timeout_seconds=1, stable_seconds=0, previous_count=0))
         assert answer is None, status
+
+
+def test_wait_holds_for_stopped_thinking_ui_state():
+    # ChatGPT can leave a stopped/aborted assistant turn showing only UI text.
+    # That is not a real assistant answer and must not be returned as content.
+    page = FakePage(["Stopped thinking\nEdit"], streaming=False)
+
+    answer = asyncio.run(wait_for_response_complete(page, timeout_seconds=1, stable_seconds=0, previous_count=0))
+
+    assert answer is None

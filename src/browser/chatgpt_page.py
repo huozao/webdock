@@ -119,6 +119,11 @@ def _image_reply_text(answer: str, previous_text: str) -> str:
     return cleaned
 
 
+def _is_terminal_ui_reply(text: str) -> bool:
+    lines = [ln.strip().lower() for ln in (text or "").splitlines() if ln.strip()]
+    return lines in (["stopped thinking"], ["stopped thinking", "edit"])
+
+
 class ChatGPTPage:
     def __init__(self, page: Any, media_store: Any | None = None, channel: str = "wechat") -> None:
         self.page = page
@@ -233,6 +238,11 @@ class ChatGPTPage:
             if settings.test_media_url:
                 # Manual link-check switch (browser_data/runtime.json).
                 final_answer = f"{final_answer}\nMEDIA: {settings.test_media_url}".strip()
+            if _is_terminal_ui_reply(final_answer):
+                raise RelayError(
+                    ErrorCode.RESPONSE_TIMEOUT,
+                    "ChatGPT response stopped before producing content.",
+                )
             if not final_answer.strip():
                 raise RelayError(ErrorCode.RESPONSE_EMPTY, "ChatGPT response is empty.")
             return final_answer, round(time.monotonic() - started, 3)

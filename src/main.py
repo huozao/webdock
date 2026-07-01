@@ -69,6 +69,9 @@ def create_app(*, start_browser: bool = True) -> FastAPI:
                 await asyncio.sleep(interval)
                 try:
                     await app.state.chat_scheduler.close_idle_lanes(app.state.browser, idle)
+                    # Safety net: close stray tabs that belong to no lane (idle GC
+                    # only tracks registered lanes). Same window as the grace period.
+                    await app.state.browser.close_orphan_pages(idle)
                 except Exception as exc:
                     logging.getLogger(__name__).warning("idle lane reaper error: %s", exc)
 

@@ -29,6 +29,7 @@ class BrowserManager:
         self._page: Any | None = None
         self._lane_pages: dict[str, Any] = {}
         self._lane_contexts: dict[str, LaneContext] = {}
+        self._orphan_seen: dict[Any, float] = {}
         self.last_error: str | None = None
 
     @property
@@ -72,6 +73,49 @@ class BrowserManager:
         except Exception:
             return False
         return True
+
+    async def close_orphan_pages(self, grace_seconds: float, *, now: float | None = None) -> list[str]:
+        """Close stray tabs that belong to no known lane and aren't the primary page
+        (e.g. left by diagnostics or a failed lane setup) — a safety net beyond the
+        lane idle-GC, which only tracks registered lanes. A tab must be seen as an
+        orphan across a full grace window before it is closed, so a tab that was just
+        created and not yet registered to a lane is never torn down mid-setup. Never
+        closes the primary page. Best-effort."""
+        if self._context is None:
+            return []
+        now = time.monotonic() if now is None else now
+        known = {self._page, *self._lane_pages.values()}
+        try:
+            pages = list(self._context.pages)
+        except Exception:
+            return []
+        closed: list[str] = []
+        for page in pages:
+            if page in known or _is_page_closed(page):
+                continue
+            first_seen = self._orphan_seen.get(page)
+            if first_seen is None:
+                self._orphan_seen[page] = now
+                continue
+            if now - first_seen < grace_seconds:
+                continue
+            try:
+                url = page.url
+            except Exception:
+                url = ""
+            try:
+                await page.close()
+                closed.append(url)
+            except Exception:
+                pass
+            self._orphan_seen.pop(page, None)
+        # Forget pages that are no longer orphans (adopted into a lane, or closed).
+        current = set(pages)
+        self._orphan_seen = {
+            p: t for p, t in self._orphan_seen.items()
+            if p in current and p not in known and not _is_page_closed(p)
+        }
+        return closed
 
     async def reset_lane_page(self, lane: LaneContext) -> Any:
         if self._context is None:

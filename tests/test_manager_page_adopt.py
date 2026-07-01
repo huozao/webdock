@@ -128,3 +128,51 @@ def test_reset_lane_page_closes_untracked_previous_conversation_after_restart():
     assert not other_page.closed_called
     assert new_page is context.created_pages[0]
     assert new_page.goto_calls == ["https://chatgpt.com/g/g-p-x/project"]
+
+
+def _mgr_with(primary, lane_pages, orphans):
+    mgr = BrowserManager()
+    mgr._page = primary
+    mgr._lane_pages = dict(lane_pages)
+    mgr._context = FakeContext([primary, *lane_pages.values(), *orphans])
+    return mgr
+
+
+def test_close_orphan_pages_closes_stray_after_grace():
+    primary = FakePage("https://chatgpt.com/")
+    lane = FakePage("https://chatgpt.com/g/g-p-x/c/lane1")
+    orphan = FakePage("https://chatgpt.com/c/stray")
+    mgr = _mgr_with(primary, {"feishu:u1": lane}, [orphan])
+
+    # First sweep: orphan seen for the first time -> recorded, within grace, not closed.
+    assert asyncio.run(mgr.close_orphan_pages(100, now=0)) == []
+    assert not orphan.closed_called
+
+    # Second sweep past the grace window -> the stray tab is closed.
+    closed = asyncio.run(mgr.close_orphan_pages(100, now=200))
+    assert orphan.closed_called
+    assert closed == ["https://chatgpt.com/c/stray"]
+
+
+def test_close_orphan_pages_never_closes_primary_or_lane():
+    primary = FakePage("https://chatgpt.com/")
+    lane = FakePage("https://chatgpt.com/g/g-p-x/c/lane1")
+    orphan = FakePage("https://chatgpt.com/c/stray")
+    mgr = _mgr_with(primary, {"feishu:u1": lane}, [orphan])
+
+    asyncio.run(mgr.close_orphan_pages(0, now=0))
+    asyncio.run(mgr.close_orphan_pages(0, now=1))
+    assert not primary.closed_called
+    assert not lane.closed_called
+    assert orphan.closed_called
+
+
+def test_close_orphan_pages_grace_protects_freshly_created_tab():
+    primary = FakePage("https://chatgpt.com/")
+    fresh = FakePage("https://chatgpt.com/c/just-made")
+    mgr = _mgr_with(primary, {}, [fresh])
+
+    # Seen once then swept again still inside the grace window -> spared.
+    assert asyncio.run(mgr.close_orphan_pages(100, now=0)) == []
+    assert asyncio.run(mgr.close_orphan_pages(100, now=50)) == []
+    assert not fresh.closed_called

@@ -17,6 +17,10 @@ runtime/*
 
 deploy/laptop/mihomo.env
 
+deploy/gokapi/.env
+deploy/gokapi/data/
+deploy/gokapi/config/
+
 deploy/ecs/release-meta.env
 deploy/ecs/runtime.env
 deploy/ecs/.release/

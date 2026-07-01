@@ -65,6 +65,31 @@ def test_mihomo_proxy_files_use_local_secret_env():
     assert "-t -d" in install_script
 
 
+def test_gokapi_is_managed_as_independent_deployment_unit():
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+    compose = (ROOT / "deploy/gokapi/compose.yml").read_text(encoding="utf-8")
+    env_example = (ROOT / "deploy/gokapi/.env.example").read_text(encoding="utf-8")
+    deploy_script = (ROOT / "deploy/gokapi/deploy.sh").read_text(encoding="utf-8")
+    nginx_template = (ROOT / "deploy/gokapi/nginx/files.hydwang.xyz.conf.template").read_text(encoding="utf-8")
+    docs = (ROOT / "docs/gokapi.md").read_text(encoding="utf-8")
+
+    assert "deploy/gokapi/.env" in gitignore
+    assert "deploy/gokapi/data/" in gitignore
+    assert "deploy/gokapi/config/" in gitignore
+    assert "image: ${GOKAPI_IMAGE:-f0rc3/gokapi:latest}" in compose
+    assert "${GOKAPI_BIND:-127.0.0.1}:${GOKAPI_HOST_PORT:-53842}:53842" in compose
+    assert "${GOKAPI_DATA_DIR:-/var/lib/gokapi/data}:/app/data" in compose
+    assert "${GOKAPI_CONFIG_DIR:-/var/lib/gokapi/config}:/app/config" in compose
+    assert "GOKAPI_IMAGE=f0rc3/gokapi:latest" in env_example
+    assert "GOKAPI_BIND=127.0.0.1" in env_example
+    assert "docker compose -p gokapi" in deploy_script
+    assert "docker compose -p webdock" not in deploy_script
+    assert "proxy_pass http://127.0.0.1:53842;" in nginx_template
+    assert "files.hydwang.xyz" in nginx_template
+    assert "不要把 Gokapi 合并进 WebDock 主容器" in docs
+    assert "https://files.hydwang.xyz" in docs
+
+
 def test_entrypoint_warns_about_vnc_password_truncation():
     entrypoint = (ROOT / "docker/entrypoint.sh").read_text(encoding="utf-8")
 

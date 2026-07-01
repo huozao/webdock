@@ -1,0 +1,14 @@
+name: gokapi
+
+services:
+  gokapi:
+    image: ${GOKAPI_IMAGE:-f0rc3/gokapi:latest}
+    container_name: gokapi
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "${GOKAPI_BIND:-127.0.0.1}:${GOKAPI_HOST_PORT:-53842}:53842"
+    volumes:
+      - ${GOKAPI_DATA_DIR:-/var/lib/gokapi/data}:/app/data
+      - ${GOKAPI_CONFIG_DIR:-/var/lib/gokapi/config}:/app/config

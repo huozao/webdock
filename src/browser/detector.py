@@ -448,8 +448,24 @@ _ORDERED_MARKDOWN_JS = r"""
       let marker = ordered ? (i++ + ". ") : "- ";
       if (cb) marker = "- [" + (cb.checked ? "x" : " ") + "] ";
       let text = inline(li).trim();
+      if (!text) {
+        // Loose GFM lists render as <li><p>…</p></li>; inline() skips block
+        // children, so pull the text out of each non-list child block instead.
+        const chunks = [];
+        for (const ch of li.children) {
+          if (ch.tagName === "UL" || ch.tagName === "OL") continue;
+          const t = inline(ch).trim();
+          if (t) chunks.push(t);
+        }
+        text = chunks.join(" ");
+      }
       out += "  ".repeat(depth) + marker + text + "\n";
+      const nested = [];
       for (const ch of li.children) {
+        if (ch.tagName === "UL" || ch.tagName === "OL") nested.push(ch);
+        else nested.push(...ch.querySelectorAll(":scope > ul, :scope > ol"));
+      }
+      for (const ch of nested) {
         if (ch.tagName === "UL") out += list(ch, false, depth + 1);
         else if (ch.tagName === "OL") out += list(ch, true, depth + 1);
       }

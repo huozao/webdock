@@ -89,6 +89,8 @@ def test_gokapi_is_managed_as_independent_deployment_unit():
     assert "docker compose -p gokapi" in deploy_script
     assert "docker compose -p webdock" not in deploy_script
     assert "proxy_pass http://127.0.0.1:15342;" in nginx_template
+    assert "location = /login" in nginx_template
+    assert "return 302 /login?consent=true;" in nginx_template
     assert "files.hydwang.xyz" in nginx_template
     assert "ECS_REMOTE_PORT=15342" in tunnel_env
     assert "GOKAPI_LOCAL_PORT=53842" in tunnel_env

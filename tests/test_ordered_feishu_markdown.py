@@ -50,3 +50,27 @@ def test_loose_nested_list(rich_markdown_page) -> None:
         "<ul><li><p>外层</p><ul><li><p>内层</p></li></ul></li></ul>",
     )
     assert out == "- 外层\n  - 内层"
+
+
+def test_blockquote_keeps_block_wrapped_text(rich_markdown_page) -> None:
+    # ChatGPT renders quotes as <blockquote><p>…</p></blockquote>; emitBlock must
+    # recurse into child blocks (2026-07-02 推荐主文案 empty-quote regression).
+    out = _evaluate(
+        rich_markdown_page,
+        "<p>推荐主文案：</p>"
+        "<blockquote><p>阿宽魔芋面<br>0脂低卡 | 6味组合 | 开袋即食</p></blockquote>",
+    )
+    assert out == "推荐主文案：\n\n> 阿宽魔芋面  \n> 0脂低卡 | 6味组合 | 开袋即食"
+
+
+def test_blockquote_with_multiple_paragraphs(rich_markdown_page) -> None:
+    out = _evaluate(
+        rich_markdown_page,
+        "<blockquote><p>第一段</p><p>第二段</p></blockquote>",
+    )
+    assert out == "> 第一段\n> \n> 第二段"
+
+
+def test_blockquote_bare_text_still_works(rich_markdown_page) -> None:
+    out = _evaluate(rich_markdown_page, "<blockquote>裸文本引用</blockquote>")
+    assert out == "> 裸文本引用"

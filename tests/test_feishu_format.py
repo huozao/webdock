@@ -61,3 +61,26 @@ def test_feishu_safe_markdown_preserves_task_lists_and_skips_code_fences():
         "☐ 未完成\n\n"
         "```text\n- keep code\n1. keep code\n```"
     )
+
+
+def test_feishu_safe_markdown_converts_blockquotes_to_visible_bars():
+    # lark_md / Feishu post md do not render "> " quotes (they show literally),
+    # so quote lines become a literal quote bar character.
+    markdown = "推荐主文案：\n\n> 阿宽魔芋面  \n> 0脂低卡 | 6味组合 | 开袋即食\n\n或者：\n\n> 超值6味 低卡热销"
+
+    assert feishu_safe_markdown(markdown) == (
+        "推荐主文案：\n\n"
+        "▎ 阿宽魔芋面\n"
+        "▎ 0脂低卡 | 6味组合 | 开袋即食\n\n"
+        "或者：\n\n"
+        "▎ 超值6味 低卡热销"
+    )
+
+
+def test_feishu_safe_markdown_quoted_list_and_code_fence_untouched():
+    markdown = "> - 项目一\n\n```text\n> keep quote in code\n```"
+
+    assert feishu_safe_markdown(markdown) == (
+        "▎ • 项目一\n\n"
+        "```text\n> keep quote in code\n```"
+    )

@@ -485,7 +485,18 @@ _ORDERED_MARKDOWN_JS = r"""
       const txt = ((code || c).innerText || "").replace(/\n+$/, "");
       return "```" + (m ? m[1] : "") + "\n" + txt + "\n```";
     }
-    if (tag === "BLOCKQUOTE") return inline(c).trim().split("\n").map((l) => "> " + l).join("\n");
+    if (tag === "BLOCKQUOTE") {
+      // Quotes render as <blockquote><p>…</p></blockquote>; inline() skips block
+      // children, so recurse into child blocks (same family as the loose-list fix).
+      const chunks = [];
+      for (const ch of c.children) {
+        if (skip(ch)) continue;
+        const t = emitBlock(ch);
+        if (t && t.trim()) chunks.push(t);
+      }
+      const inner = chunks.length ? chunks.join("\n\n") : inline(c).trim();
+      return inner.split("\n").map((l) => "> " + l).join("\n");
+    }
     if (tag === "HR") return "---";
     return inline(c).trim();
   };

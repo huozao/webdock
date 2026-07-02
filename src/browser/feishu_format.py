@@ -7,6 +7,7 @@ import unicodedata
 _TASK_RE = re.compile(r"^(?P<indent>\s*)[-*+]\s+\[(?P<checked>[ xX])\]\s+(?P<body>.*)$")
 _UNORDERED_RE = re.compile(r"^(?P<indent>\s*)[-*+]\s+(?P<body>.*)$")
 _ORDERED_RE = re.compile(r"^(?P<indent>\s*)(?P<num>\d+)\.\s+(?P<body>.*)$")
+_QUOTE_RE = re.compile(r"^(?P<indent>\s*)(?:>\s?)+(?P<body>.*)$")
 
 
 def feishu_safe_markdown(markdown: str) -> str:
@@ -116,6 +117,12 @@ def _tables_to_code_blocks(text: str) -> str:
 
 
 def _safe_list_line(line: str) -> str:
+    quote = _QUOTE_RE.match(line)
+    if quote:
+        # lark_md / post md show "> " literally, so use a literal quote bar.
+        body = _safe_list_line(quote.group("body"))
+        return f"{quote.group('indent')}▎ {body}".rstrip()
+
     task = _TASK_RE.match(line)
     if task:
         box = "☑" if task.group("checked").lower() == "x" else "☐"

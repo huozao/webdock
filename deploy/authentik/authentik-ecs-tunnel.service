@@ -1,0 +1,15 @@
+[Unit]
+Description=authentik reverse tunnel to ECS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/opt/webdock/deploy/authentik/ecs-tunnel.env
+ExecStart=/usr/bin/ssh -NT -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=yes -i ${ECS_SSH_KEY} -R ${ECS_REMOTE_BIND}:${ECS_REMOTE_PORT}:${AUTHENTIK_LOCAL_BIND}:${AUTHENTIK_LOCAL_PORT} ${ECS_SSH_HOST}
+Restart=always
+RestartSec=5
+User=webdock
+
+[Install]
+WantedBy=multi-user.target

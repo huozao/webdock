@@ -98,6 +98,42 @@ def test_gokapi_is_managed_as_independent_deployment_unit():
     assert "https://files.hydwang.xyz" in docs
 
 
+def test_authentik_is_managed_as_independent_deployment_unit():
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+    compose = (ROOT / "deploy/authentik/compose.yml").read_text(encoding="utf-8")
+    env_example = (ROOT / "deploy/authentik/.env.example").read_text(encoding="utf-8")
+    deploy_script = (ROOT / "deploy/authentik/deploy.sh").read_text(encoding="utf-8")
+    nginx_template = (ROOT / "deploy/authentik/nginx/auth.hydwang.xyz.conf.template").read_text(encoding="utf-8")
+    tunnel_env = (ROOT / "deploy/authentik/ecs-tunnel.env.example").read_text(encoding="utf-8")
+    tunnel_service = (ROOT / "deploy/authentik/authentik-ecs-tunnel.service").read_text(encoding="utf-8")
+    tunnel_install = (ROOT / "deploy/authentik/install-ecs-tunnel.sh").read_text(encoding="utf-8")
+    docs = (ROOT / "docs/authentik.md").read_text(encoding="utf-8")
+
+    assert "deploy/authentik/.env" in gitignore
+    assert "deploy/authentik/ecs-tunnel.env" in gitignore
+    assert "deploy/authentik/postgresql/" in gitignore
+    assert "deploy/authentik/data/" in gitignore
+    assert "image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server}:${AUTHENTIK_TAG:-2026.5.3}" in compose
+    assert "${AUTHENTIK_BIND:-127.0.0.1}:${COMPOSE_PORT_HTTP:-9000}:9000" in compose
+    assert "${AUTHENTIK_POSTGRESQL_DIR:-/var/lib/authentik/postgresql}:/var/lib/postgresql/data" in compose
+    assert "${AUTHENTIK_DATA_DIR:-/var/lib/authentik/data}:/data" in compose
+    assert "PG_PASS=replace_with_long_random_postgres_password" in env_example
+    assert "AUTHENTIK_SECRET_KEY=replace_with_long_random_secret_key" in env_example
+    assert "AUTHENTIK_BOOTSTRAP_PASSWORD=replace_with_initial_admin_password" in env_example
+    assert "docker compose -p authentik" in deploy_script
+    assert "docker compose -p webdock" not in deploy_script
+    assert "proxy_pass http://127.0.0.1:19000;" in nginx_template
+    assert "auth.hydwang.xyz" in nginx_template
+    assert "ECS_REMOTE_PORT=19000" in tunnel_env
+    assert "AUTHENTIK_LOCAL_PORT=9000" in tunnel_env
+    assert "-R ${ECS_REMOTE_BIND}:${ECS_REMOTE_PORT}:${AUTHENTIK_LOCAL_BIND}:${AUTHENTIK_LOCAL_PORT}" in tunnel_service
+    assert "authentik-ecs-tunnel.service" in tunnel_install
+    assert "https://auth.hydwang.xyz" in docs
+    assert "Gokapi" in docs
+    assert "Google" in docs
+    assert "微信" in docs
+
+
 def test_entrypoint_warns_about_vnc_password_truncation():
     entrypoint = (ROOT / "docker/entrypoint.sh").read_text(encoding="utf-8")
 

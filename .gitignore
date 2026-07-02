@@ -22,6 +22,13 @@ deploy/gokapi/ecs-tunnel.env
 deploy/gokapi/data/
 deploy/gokapi/config/
 
+deploy/authentik/.env
+deploy/authentik/ecs-tunnel.env
+deploy/authentik/postgresql/
+deploy/authentik/data/
+deploy/authentik/certs/
+deploy/authentik/custom-templates/
+
 deploy/ecs/release-meta.env
 deploy/ecs/runtime.env
 deploy/ecs/.release/

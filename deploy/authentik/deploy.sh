@@ -30,5 +30,5 @@ if [[ "${HEALTH_HOST}" == "0.0.0.0" || "${HEALTH_HOST}" == "::" ]]; then
   HEALTH_HOST="127.0.0.1"
 fi
 
-curl -fsS --max-time 30 "http://${HEALTH_HOST}:${COMPOSE_PORT_HTTP:-9000}/-/health/ready/" >/dev/null
+curl -fsS --max-time 30 "http://${HEALTH_HOST}:${COMPOSE_PORT_HTTP:-9000}/-/health/live/" >/dev/null
 echo "authentik is reachable at http://${HEALTH_HOST}:${COMPOSE_PORT_HTTP:-9000}/"

@@ -122,6 +122,7 @@ def test_authentik_is_managed_as_independent_deployment_unit():
     assert "AUTHENTIK_BOOTSTRAP_PASSWORD=replace_with_initial_admin_password" in env_example
     assert "docker compose -p authentik" in deploy_script
     assert "docker compose -p webdock" not in deploy_script
+    assert "/-/health/live/" in deploy_script
     assert "proxy_pass http://127.0.0.1:19000;" in nginx_template
     assert "auth.hydwang.xyz" in nginx_template
     assert "ECS_REMOTE_PORT=19000" in tunnel_env

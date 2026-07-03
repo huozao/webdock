@@ -1,3 +1,7 @@
+> **DEPRECATED (2026-07):** Authentik 由 aliecs 上的 Authelia+lldap 统一登录替代
+> （见 AliECS `docs/superpowers/specs/2026-07-03-unified-account-system-design.md`）。
+> 本部署单元待 SSO 收口后删除；退役步骤见 AliECS `docs/sso-cutover-runbook.md`。
+
 # Authentik deployment
 
 Authentik is managed as an independent deployment unit under `deploy/authentik`.

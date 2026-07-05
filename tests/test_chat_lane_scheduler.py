@@ -386,3 +386,23 @@ def test_lane_context_rejects_unknown_chatgpt_mode():
 def test_lane_context_chatgpt_mode_defaults_none():
     lane = LaneContext.from_metadata({"channel": "feishu", "peer_id": "user:ou_x"})
     assert lane.chatgpt_mode is None
+
+
+def test_default_ask_forwards_mode(monkeypatch):
+    captured = {}
+
+    class FakeChatPage:
+        def __init__(self, page, media_store=None, channel="wechat"):
+            captured["channel"] = channel
+
+        async def ask(self, message, *, timeout_seconds=None, hard_timeout_seconds=None, mode=None):
+            captured["mode"] = mode
+            return "ok", 0.1
+
+    import src.browser.lane_scheduler as lane_scheduler_module
+
+    monkeypatch.setattr(lane_scheduler_module, "ChatGPTPage", FakeChatPage)
+    scheduler = ChatLaneScheduler(max_concurrent_chats=1)
+    asyncio.run(scheduler._default_ask(object(), "hi", "feishu", mode="fast"))
+    assert captured["mode"] == "fast"
+    assert captured["channel"] == "feishu"

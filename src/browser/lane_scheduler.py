@@ -166,9 +166,13 @@ class ChatLaneScheduler:
         *,
         timeout_seconds: int | None = None,
         hard_timeout_seconds: float | None = None,
+        mode: str | None = None,
     ) -> tuple[str, float]:
         return await ChatGPTPage(page, media_store=self._media_store, channel=channel).ask(
-            message, timeout_seconds=timeout_seconds, hard_timeout_seconds=hard_timeout_seconds
+            message,
+            timeout_seconds=timeout_seconds,
+            hard_timeout_seconds=hard_timeout_seconds,
+            mode=mode,
         )
 
     async def ask(
@@ -219,6 +223,7 @@ class ChatLaneScheduler:
                             lane.channel,
                             timeout_seconds=effective_timeout,
                             hard_timeout_seconds=hard_cap,
+                            mode=lane.chatgpt_mode,
                         )
                     else:
                         # Injected ask_func uses the legacy (page, message) signature.

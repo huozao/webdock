@@ -32,6 +32,8 @@ ROUTE_INPUT_TIMEOUT_MS = 10000
 # Sentinel peer_id produced by LaneContext.from_metadata when a request carries
 # no OpenClaw routing metadata (see _safe_part).
 DEFAULT_PEER = "default"
+# Canonical ChatGPT web mode values the bridge may request via metadata.
+CHATGPT_MODES = {"fast", "balanced", "advanced"}
 # A WeChat "text + images" send arrives as several separate requests and only the
 # text one carries metadata; the image requests reach us metadata-less. For this
 # long after a configured lane was last seen, a metadata-less request inherits it
@@ -60,6 +62,9 @@ class LaneContext:
     project: str
     target_url: str | None = None
     previous_target_url: str | None = None
+    # ChatGPT web mode requested by the bridge ("fast"/"balanced"/"advanced");
+    # None = don't touch the mode picker (legacy behavior, WeChat unaffected).
+    chatgpt_mode: str | None = None
 
     @property
     def key(self) -> str:
@@ -76,6 +81,8 @@ class LaneContext:
         project = _safe_project(data.get("chatgpt_project") or data.get("project") or default_project)
         target_url = data.get("chatgpt_conversation_url") or data.get("chatgpt_project_url") or data.get("chatgpt_url")
         previous_target_url = data.get("previous_chatgpt_conversation_url") or data.get("previous_chatgpt_url")
+        mode = str(data.get("chatgpt_mode") or "").strip().lower()
+        chatgpt_mode = mode if mode in CHATGPT_MODES else None
         return cls(
             channel=channel,
             wechat_account=wechat_account,
@@ -84,6 +91,7 @@ class LaneContext:
             project=project,
             target_url=str(target_url).strip() if target_url else None,
             previous_target_url=str(previous_target_url).strip() if previous_target_url else None,
+            chatgpt_mode=chatgpt_mode,
         )
 
 

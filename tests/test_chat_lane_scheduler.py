@@ -367,3 +367,22 @@ async def _run_hang_recovery_case():
     assert raised is not None and raised.code == ErrorCode.RESPONSE_TIMEOUT
     assert reset_calls == ["wechat:A:private:u1"]
     assert archived_errors and archived_errors[0] is not None
+
+
+def test_lane_context_parses_chatgpt_mode():
+    lane = LaneContext.from_metadata(
+        {"channel": "feishu", "peer_id": "user:ou_x", "chatgpt_mode": "fast"}
+    )
+    assert lane.chatgpt_mode == "fast"
+
+
+def test_lane_context_rejects_unknown_chatgpt_mode():
+    lane = LaneContext.from_metadata(
+        {"channel": "feishu", "peer_id": "user:ou_x", "chatgpt_mode": "turbo"}
+    )
+    assert lane.chatgpt_mode is None
+
+
+def test_lane_context_chatgpt_mode_defaults_none():
+    lane = LaneContext.from_metadata({"channel": "feishu", "peer_id": "user:ou_x"})
+    assert lane.chatgpt_mode is None

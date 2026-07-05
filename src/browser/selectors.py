@@ -77,13 +77,21 @@ LOGIN_INDICATORS = [
 # 显示当前模式；菜单项在运行时按文本匹配（见 chatgpt_page.ensure_mode）。
 # 候选列表按真机 DOM 校准后排序；ensure_mode 对全部不命中容错（模式切换是
 # best-effort，绝不阻断发送）。
+# 真机(2026-07-06, Chrome 149/中文界面)：composer 右下的"模式胶囊"按钮，无
+# data-testid/aria-label，靠 __composer-pill 类 + aria-haspopup + 当前模式文本
+# 锚定；按钮文本 = 当前模式。前三个候选同时确认了"这就是模式胶囊"；最后一个
+# 是 UI 文案变动时的宽松兜底。
 MODE_PICKER_BUTTON = [
-    "button[data-testid='model-switcher-dropdown-button']",
-    "button[aria-label*='模型选择器']",
-    "button[aria-label*='Model selector']",
+    "button[aria-haspopup='menu'][class*='__composer-pill']:has-text('极速')",
+    "button[aria-haspopup='menu'][class*='__composer-pill']:has-text('均衡')",
+    "button[aria-haspopup='menu'][class*='__composer-pill']:has-text('高级')",
+    "button[aria-haspopup='menu'][class*='__composer-pill']",
 ]
 
+# 真机菜单项是 menuitemradio(极速/均衡/高级, aria-checked 标当前)；GPT-5.5
+# 子菜单是 menuitem，被更靠前的 menuitemradio 命中规则天然避开。
 MODE_MENU_ITEM = [
+    "[role='menuitemradio']",
     "[role='menuitem']",
     "[role='option']",
 ]

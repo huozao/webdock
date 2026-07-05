@@ -73,6 +73,21 @@ LOGIN_INDICATORS = [
     "a[href*='auth.openai.com']",
 ]
 
+# ChatGPT 输入区的对话模式选择器（当前中文界面：极速/均衡/高级）。按钮文本
+# 显示当前模式；菜单项在运行时按文本匹配（见 chatgpt_page.ensure_mode）。
+# 候选列表按真机 DOM 校准后排序；ensure_mode 对全部不命中容错（模式切换是
+# best-effort，绝不阻断发送）。
+MODE_PICKER_BUTTON = [
+    "button[data-testid='model-switcher-dropdown-button']",
+    "button[aria-label*='模型选择器']",
+    "button[aria-label*='Model selector']",
+]
+
+MODE_MENU_ITEM = [
+    "[role='menuitem']",
+    "[role='option']",
+]
+
 
 SELECTOR_GROUPS = {
     "CHAT_INPUT": CHAT_INPUT,
@@ -84,4 +99,6 @@ SELECTOR_GROUPS = {
     "STOP_BUTTON": STOP_BUTTON,
     "STREAMING_INDICATOR": STREAMING_INDICATOR,
     "LOGIN_INDICATORS": LOGIN_INDICATORS,
+    "MODE_PICKER_BUTTON": MODE_PICKER_BUTTON,
+    "MODE_MENU_ITEM": MODE_MENU_ITEM,
 }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import os
 import re
 import tempfile
@@ -31,6 +32,16 @@ from src.browser.human import hover_and_click, paste_text, random_delay
 from src.browser.image_input import resolve_image_inputs
 from src.config import get_settings
 from src.utils.errors import ErrorCode, RelayError
+
+log = logging.getLogger(__name__)
+
+# 规范模式值 -> 选择器按文本匹配用的标签（中文界面 + 英文界面兜底；实际文案
+# 按真机校准，错配只会走 mode_switch_failed 日志路径，不影响发送）。
+MODE_TARGET_LABELS: dict[str, tuple[str, ...]] = {
+    "fast": ("极速", "Instant"),
+    "balanced": ("均衡", "Auto", "Balanced"),
+    "advanced": ("高级", "Thinking", "Advanced"),
+}
 
 # ChatGPT renders rich widgets (clock / weather / stock cards) in a container
 # whose class contains "WidgetRenderer" (and is marked not-markdown). Their text
@@ -130,12 +141,56 @@ class ChatGPTPage:
         self._media_store = media_store
         self._channel = channel
 
+    async def ensure_mode(self, target: str) -> None:
+        """发送前把页面的对话模式选择器校准到 target（fast/balanced/advanced）。
+
+        多个飞书会话串行共享同一浏览器，模式是页面级状态，所以每次发送前
+        都要校准而不是切换时点一次。Best-effort：任何一步失败都只打
+        mode_switch_failed 日志并返回，绝不阻断这条消息的发送。
+        """
+        labels = MODE_TARGET_LABELS.get((target or "").strip().lower())
+        if not labels:
+            return
+        try:
+            button = await find_first(
+                self.page, selectors.MODE_PICKER_BUTTON, visible=True, timeout_ms=2000
+            )
+            if not button:
+                log.warning("mode_switch_failed stage=button target=%s", target)
+                return
+            current = await self.page.locator(button).first.inner_text(timeout=1500)
+            if any(label in (current or "") for label in labels):
+                return
+            await hover_and_click(self.page, button)
+            item = None
+            for label in labels:
+                for base in selectors.MODE_MENU_ITEM:
+                    candidate = f"{base}:has-text('{label}')"
+                    if await find_first(self.page, [candidate], visible=True, timeout_ms=1200):
+                        item = candidate
+                        break
+                if item:
+                    break
+            if not item:
+                await self.page.keyboard.press("Escape")
+                log.warning("mode_switch_failed stage=menu target=%s", target)
+                return
+            await hover_and_click(self.page, item)
+            confirmed = await self.page.locator(button).first.inner_text(timeout=1500)
+            if not any(label in (confirmed or "") for label in labels):
+                log.warning(
+                    "mode_switch_failed stage=verify target=%s shows=%r", target, confirmed
+                )
+        except Exception as exc:
+            log.warning("mode_switch_failed stage=exception target=%s error=%s", target, exc)
+
     async def ask(
         self,
         message: str,
         *,
         timeout_seconds: int | None = None,
         hard_timeout_seconds: float | None = None,
+        mode: str | None = None,
     ) -> tuple[str, float]:
         settings = get_settings()
         # Soft timeout is image-aware (passed by the scheduler); the hard timeout is
@@ -160,6 +215,8 @@ class ChatGPTPage:
                     ErrorCode.CHAT_INPUT_NOT_FOUND,
                     "Cannot find ChatGPT input box. Open noVNC to inspect the page.",
                 )
+            if mode:
+                await self.ensure_mode(mode)
             previous_assistant_count = await assistant_message_count(self.page)
             previous_assistant_text = await rich_assistant_text(self.page)
             previous_image_srcs = await generated_image_srcs(self.page)

@@ -8,7 +8,12 @@ Wants=network-online.target
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/opt/webdock
-ExecStart=/usr/bin/docker compose -p webdock --env-file /opt/webdock/deploy/laptop/.env -f /opt/webdock/deploy/laptop/compose.yml up -d --build
+# Pull the pinned WEBDOCK_IMAGE first so a tag change or a fresh host self-heals
+# instead of failing with "No such image"; the leading `-` makes a failed pull
+# non-fatal, so an offline host that already has the image still starts. ExecStart
+# then runs the pulled image (--no-build) per compose.yml's "laptop just pulls it".
+ExecStartPre=-/usr/bin/docker compose -p webdock --env-file /opt/webdock/deploy/laptop/.env -f /opt/webdock/deploy/laptop/compose.yml pull webdock
+ExecStart=/usr/bin/docker compose -p webdock --env-file /opt/webdock/deploy/laptop/.env -f /opt/webdock/deploy/laptop/compose.yml up -d --no-build webdock
 ExecStop=/usr/bin/docker compose -p webdock --env-file /opt/webdock/deploy/laptop/.env -f /opt/webdock/deploy/laptop/compose.yml down
 TimeoutStartSec=0
 

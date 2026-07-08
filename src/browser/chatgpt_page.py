@@ -39,8 +39,8 @@ log = logging.getLogger(__name__)
 # 按真机校准，错配只会走 mode_switch_failed 日志路径，不影响发送）。
 MODE_TARGET_LABELS: dict[str, tuple[str, ...]] = {
     "fast": ("极速", "Instant"),
-    "balanced": ("均衡", "Auto", "Balanced"),
-    "advanced": ("高级", "Thinking", "Advanced"),
+    "balanced": ("均衡", "Auto", "Balanced", "Medium"),
+    "advanced": ("高级", "Thinking", "Advanced", "High"),
 }
 
 # ChatGPT renders rich widgets (clock / weather / stock cards) in a container

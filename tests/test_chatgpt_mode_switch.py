@@ -77,6 +77,30 @@ def test_ensure_mode_clicks_target_menu_item():
     assert page.clicks == [BUTTON, item]
 
 
+def test_ensure_mode_clicks_english_balanced_medium_item():
+    item = f"{selectors.MODE_MENU_ITEM[0]}:has-text('Medium')"
+
+    def on_click(selector):
+        if selector == item:
+            page.texts[BUTTON] = "Medium"
+
+    page = FakePage(present={BUTTON, item}, texts={BUTTON: "Instant"}, on_click=on_click)
+    asyncio.run(ChatGPTPage(page).ensure_mode("balanced"))
+    assert page.clicks == [BUTTON, item]
+
+
+def test_ensure_mode_clicks_english_advanced_high_item():
+    item = f"{selectors.MODE_MENU_ITEM[0]}:has-text('High')"
+
+    def on_click(selector):
+        if selector == item:
+            page.texts[BUTTON] = "High"
+
+    page = FakePage(present={BUTTON, item}, texts={BUTTON: "Instant"}, on_click=on_click)
+    asyncio.run(ChatGPTPage(page).ensure_mode("advanced"))
+    assert page.clicks == [BUTTON, item]
+
+
 def test_ensure_mode_missing_button_is_noop():
     page = FakePage(present=set(), texts={})
     asyncio.run(ChatGPTPage(page).ensure_mode("fast"))

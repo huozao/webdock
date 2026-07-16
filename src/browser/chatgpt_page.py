@@ -47,8 +47,8 @@ MODE_TARGET_LABELS: dict[str, tuple[str, ...]] = {
 # whose class contains "WidgetRenderer" (and is marked not-markdown). Their text
 # is noise, so we screenshot them and send as images instead.
 WIDGET_SELECTOR = "[class*='WidgetRenderer']"
-# Feishu's card renderer flattens GFM pipe tables into run-together text, so on the
-# Feishu path we screenshot tables too (and drop their markdown in detector). The
+# Rich card renderers flatten GFM pipe tables into run-together text, so on the
+# Feishu/WeCom paths we screenshot tables too (and drop their markdown in detector). The
 # :not(...) keeps a widget's own inner table from being captured twice. WeChat is
 # unchanged (plain text keeps the aligned table).
 FEISHU_TABLE_SELECTOR = "table:not([class*='WidgetRenderer'] table)"
@@ -60,7 +60,7 @@ def _media_screenshot_selectors(channel: str) -> list[tuple[str, bool]]:
     channel. prefer_clone=True renders a static clone instead of a live element
     screenshot — needed for tables, whose sticky header/first column render outside
     the <table> box and get cropped by element.screenshot()."""
-    if channel == "feishu":
+    if channel in {"feishu", "wecom"}:
         return [(WIDGET_SELECTOR, False), (FEISHU_TABLE_SELECTOR, True)]
     return [(WIDGET_SELECTOR, False)]
 # ChatGPT-generated images (e.g. DALL-E) render as <img> with a backend
@@ -99,7 +99,7 @@ async (src) => {
 # UI/interim noise lines on an image reply (status text, reasoning title, card
 # buttons) — dropped so an image reply delivers the picture, not the chrome.
 _MEDIA_NOISE_RE = re.compile(
-    r"^(正在思考|正在生成.*|.*请稍候。?|Thought for .*|预览|编辑|分享|重试|下载|复制.*|Copy.*)$",
+    r"^(正在思考|正在生成.*|.*请稍候。?|Thought for .*|预览|编辑|Edit|分享|重试|下载|复制.*|Copy.*)$",
     re.IGNORECASE,
 )
 
@@ -270,10 +270,10 @@ class ChatGPTPage:
                 # src, not on the text changing) — deliver the picture, dropping
                 # text that merely repeats the pre-send snapshot.
                 final_answer = _image_reply_text(final_answer, previous_assistant_text)
-            elif self._channel == "feishu":
+            elif self._channel in {"feishu", "wecom"}:
                 # Mixed replies (prose + widgets/tables) are assembled in document
-                # order with inline MEDIA placeholders so the bridge can build ONE
-                # Feishu card with text and images interleaved as on the web. Only
+                # order with inline MEDIA placeholders so the bridge can build the
+                # channel's richest available card response. Only
                 # used when the reply actually has screenshot targets; otherwise fall
                 # back to the plain structure-preserving markdown (pipe tables, which
                 # Feishu can't render, are dropped and re-delivered as screenshots).
@@ -373,8 +373,8 @@ class ChatGPTPage:
             assistant = self.page.locator("[data-testid^='conversation-turn']").last
         except Exception:
             return tokens
-        # WeChat: widgets only. Feishu: widgets + tables (Feishu can't render tables,
-        # so we screenshot them). MAX_WIDGETS_PER_REPLY is a total budget across both.
+        # WeChat: widgets only. Feishu/WeCom: widgets + tables (their rich cards can't
+        # render tables reliably, so we screenshot them). The limit is shared.
         for selector, prefer_clone in _media_screenshot_selectors(self._channel):
             if len(tokens) >= MAX_WIDGETS_PER_REPLY:
                 break

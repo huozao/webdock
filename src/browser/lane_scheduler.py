@@ -77,7 +77,12 @@ class LaneContext:
         wechat_account = _safe_part(data.get("wechat_account") or data.get("account") or "default")
         chat_type = _safe_part(data.get("chat_type") or "private")
         peer_id = _safe_part(data.get("peer_id") or data.get("open_id") or data.get("chat_id") or data.get("user_id") or "default")
-        default_project = "Feishu" if channel == "feishu" else f"WeChat-{wechat_account}"
+        if channel == "feishu":
+            default_project = "Feishu"
+        elif channel == "wecom":
+            default_project = "WeCom"
+        else:
+            default_project = f"WeChat-{wechat_account}"
         project = _safe_project(data.get("chatgpt_project") or data.get("project") or default_project)
         target_url = data.get("chatgpt_conversation_url") or data.get("chatgpt_project_url") or data.get("chatgpt_url")
         previous_target_url = data.get("previous_chatgpt_conversation_url") or data.get("previous_chatgpt_url")
@@ -351,8 +356,14 @@ def build_lane_key(wechat_account: str, chat_type: str, peer_id: str) -> str:
 
 
 def build_channel_lane_key(channel: str, wechat_account: str, chat_type: str, peer_id: str) -> str:
-    if _safe_channel(channel) == "feishu":
+    normalized = _safe_channel(channel)
+    if normalized == "feishu":
         return f"feishu:{_safe_part(peer_id)}"
+    if normalized == "wecom":
+        return (
+            f"wecom:{_safe_part(wechat_account)}:"
+            f"{_safe_part(chat_type)}:{_safe_part(peer_id)}"
+        )
     return build_lane_key(wechat_account, chat_type, peer_id)
 
 
@@ -396,6 +407,8 @@ def _safe_channel(value: Any) -> str:
     text = str(value or "").strip().lower()
     if text in {"feishu", "lark"}:
         return "feishu"
+    if text in {"wecom", "qywx", "wework", "enterprise-wechat"}:
+        return "wecom"
     return "wechat"
 
 

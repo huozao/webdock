@@ -9,7 +9,7 @@ from threading import Event
 from typing import Any, Callable
 from urllib.request import urlopen
 
-from src.browser.lane_routing import CONFIG_FILENAME, FEISHU_CONFIG_FILENAME
+from src.browser.lane_routing import CONFIG_FILENAME, FEISHU_CONFIG_FILENAME, WECOM_CONFIG_FILENAME
 from src.config import get_settings
 
 log = logging.getLogger(__name__)
@@ -87,6 +87,10 @@ def build_pullers(
         RoutingConfigPuller(
             backend_base_url, profile_dir / FEISHU_CONFIG_FILENAME,
             channel="feishu", interval_seconds=interval_seconds,
+        ),
+        RoutingConfigPuller(
+            backend_base_url, profile_dir / WECOM_CONFIG_FILENAME,
+            channel="wecom", interval_seconds=interval_seconds,
         ),
     ]
 

@@ -17,6 +17,7 @@ NEW_CONVERSATION_ACK = "✅ 已为你开启新对话，请发送你的问题。"
 
 CONFIG_FILENAME = "wechat_projects.json"
 FEISHU_CONFIG_FILENAME = "feishu_projects.json"
+WECOM_CONFIG_FILENAME = "wecom_projects.json"
 STATE_FILENAME = "lane_state.json"
 
 
@@ -63,6 +64,7 @@ class LaneRouter:
         config_path: Path | None = None,
         state_path: Path | None = None,
         feishu_config_path: Path | None = None,
+        wecom_config_path: Path | None = None,
     ) -> None:
         if config_path is None or state_path is None:
             base = get_settings().browser_profile_dir
@@ -70,12 +72,18 @@ class LaneRouter:
             base = Path(config_path).parent
         self._config_path = Path(config_path) if config_path else base / CONFIG_FILENAME
         self._feishu_config_path = Path(feishu_config_path) if feishu_config_path else base / FEISHU_CONFIG_FILENAME
+        self._wecom_config_path = Path(wecom_config_path) if wecom_config_path else base / WECOM_CONFIG_FILENAME
         self._state_path = Path(state_path) if state_path else base / STATE_FILENAME
         self._lock = Lock()
-        self._config_paths = {"wechat": self._config_path, "feishu": self._feishu_config_path}
+        self._config_paths = {
+            "wechat": self._config_path,
+            "feishu": self._feishu_config_path,
+            "wecom": self._wecom_config_path,
+        }
         self._configs = {
             "wechat": self._load_config(self._config_path),
             "feishu": self._load_config(self._feishu_config_path),
+            "wecom": self._load_config(self._wecom_config_path),
         }
         self._config_mtimes = {ch: _mtime(p) for ch, p in self._config_paths.items()}
         self._config = self._configs["wechat"]
@@ -86,21 +94,26 @@ class LaneRouter:
         """The URL this lane should be on. None => not configured => fallback."""
         if not peer_id:
             return None
-        entry = self._config_for(channel).get(peer_id)
-        if not entry:
-            return None
+        normalized = _normalize_channel(channel)
+        entry = self._config_for(normalized).get(peer_id) or {}
         project_url = entry.get("project_url")
+        conversation_url = (self._state.get(_state_key(normalized, peer_id)) or {}).get("conversation_url")
         if force_new:
             return project_url
-        conversation_url = (self._state.get(_state_key(channel, peer_id)) or {}).get("conversation_url")
         return conversation_url or project_url
 
     def record_conversation_url(self, peer_id: str | None, url: str | None, *, channel: str = "wechat") -> None:
         """Remember the live conversation URL for a configured peer."""
-        if not peer_id or not url or peer_id not in self._config_for(channel):
+        normalized = _normalize_channel(channel)
+        if not peer_id or not url:
+            return
+        # WeCom peers are discovered dynamically from the official channel
+        # plugin. Persist their conversation URLs even before the control-plane
+        # has a managed_contacts row for the user/group.
+        if normalized != "wecom" and peer_id not in self._config_for(normalized):
             return
         with self._lock:
-            entry = self._state.setdefault(_state_key(channel, peer_id), {})
+            entry = self._state.setdefault(_state_key(normalized, peer_id), {})
             if entry.get("conversation_url") == url:
                 return
             entry["conversation_url"] = url
@@ -117,7 +130,10 @@ class LaneRouter:
                 self._save_state_locked()
 
     def is_configured(self, peer_id: str | None, *, channel: str = "wechat") -> bool:
-        return bool(peer_id) and peer_id in self._config_for(channel)
+        if not peer_id:
+            return False
+        normalized = _normalize_channel(channel)
+        return normalized == "wecom" or peer_id in self._config_for(normalized)
 
     def lane_name(self, peer_id: str | None, *, channel: str = "wechat") -> str:
         entry = self._config_for(channel).get(peer_id or "")
@@ -191,7 +207,12 @@ def _read_json(path: Path) -> Any:
 
 
 def _normalize_channel(channel: str | None) -> str:
-    return "feishu" if str(channel or "").strip().lower() in {"feishu", "lark"} else "wechat"
+    text = str(channel or "").strip().lower()
+    if text in {"feishu", "lark"}:
+        return "feishu"
+    if text in {"wecom", "qywx", "wework", "enterprise-wechat"}:
+        return "wecom"
+    return "wechat"
 
 
 def _state_key(channel: str, peer_id: str) -> str:

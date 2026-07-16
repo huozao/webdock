@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from threading import Event
 from typing import Any, Callable
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from src.browser.lane_routing import CONFIG_FILENAME, FEISHU_CONFIG_FILENAME, WECOM_CONFIG_FILENAME
 from src.config import get_settings
@@ -23,7 +23,8 @@ def pull_routing_config(url: str, target_path: Path, *, timeout: float = 5.0, op
         # Pass timeout as a keyword: the real urllib.request.urlopen takes
         # (url, data=None, timeout=...), so a positional second arg would be sent
         # as the request BODY (data) and raise TypeError, silently never updating.
-        with open_url(url, timeout=timeout) as response:
+        request = Request(url, headers={"User-Agent": "WebDock-Routing-Puller/1.0"})
+        with open_url(request, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
         if not _is_valid_config(data):
             raise ValueError("routing config must be an object with lanes")

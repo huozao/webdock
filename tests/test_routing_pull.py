@@ -26,7 +26,7 @@ def test_pull_routing_config_success_overwrites_local_file(tmp_path):
     ok = pull_routing_config(
         "https://aliecs.example/v1/routing/wechat-projects.json",
         target,
-        opener=lambda url, timeout: FakeResponse({"lanes": {"wxid_a": {"name": "张三", "project_url": "p1"}}}),
+        opener=lambda request, timeout: FakeResponse({"lanes": {"wxid_a": {"name": "张三", "project_url": "p1"}}}),
     )
 
     assert ok is True
@@ -42,10 +42,11 @@ def test_pull_routing_config_calls_opener_like_urlopen(tmp_path):
     target.write_text(json.dumps({"lanes": {"old": {"project_url": "old"}}}), encoding="utf-8")
     captured: dict = {}
 
-    def urlopen_like(url, data=None, timeout=None):  # mirrors urllib.request.urlopen
+    def urlopen_like(request, data=None, timeout=None):  # mirrors urllib.request.urlopen
         if data is not None:
             raise TypeError("message_body should be a bytes-like object or an iterable")
         captured["timeout"] = timeout
+        captured["user_agent"] = request.get_header("User-agent")
         return FakeResponse({"lanes": {"wxid_a": {"project_url": "p1"}}})
 
     ok = pull_routing_config(
@@ -57,6 +58,7 @@ def test_pull_routing_config_calls_opener_like_urlopen(tmp_path):
 
     assert ok is True
     assert captured["timeout"] == 7.0
+    assert captured["user_agent"] == "WebDock-Routing-Puller/1.0"
     assert json.loads(target.read_text(encoding="utf-8")) == {"lanes": {"wxid_a": {"project_url": "p1"}}}
 
 
@@ -65,7 +67,7 @@ def test_pull_routing_config_failure_keeps_old_file(tmp_path):
     original = {"lanes": {"old": {"project_url": "old"}}}
     target.write_text(json.dumps(original), encoding="utf-8")
 
-    def boom(url, timeout):
+    def boom(request, timeout):
         raise TimeoutError("backend down")
 
     ok = pull_routing_config("https://aliecs.example/v1/routing/wechat-projects.json", target, opener=boom)

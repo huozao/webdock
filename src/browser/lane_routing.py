@@ -95,7 +95,8 @@ class LaneRouter:
         if not peer_id:
             return None
         normalized = _normalize_channel(channel)
-        entry = self._config_for(normalized).get(peer_id) or {}
+        config = self._config_for(normalized)
+        entry = config.get(peer_id) or config.get("*") or {}
         project_url = entry.get("project_url")
         conversation_url = (self._state.get(_state_key(normalized, peer_id)) or {}).get("conversation_url")
         if force_new:
@@ -136,7 +137,8 @@ class LaneRouter:
         return normalized == "wecom" or peer_id in self._config_for(normalized)
 
     def lane_name(self, peer_id: str | None, *, channel: str = "wechat") -> str:
-        entry = self._config_for(channel).get(peer_id or "")
+        config = self._config_for(channel)
+        entry = config.get(peer_id or "") or config.get("*")
         return (entry or {}).get("name") or (peer_id or "")
 
     # ---- internal ----

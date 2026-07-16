@@ -46,6 +46,8 @@ COPY docker/ docker/
 COPY deploy/laptop/.env.example .env.example
 
 RUN mkdir -p /app/browser_data /app/logs/debug /app/.vnc \
+    /etc/opt/chrome/policies/managed \
+    && install -m 644 /app/docker/chrome-managed-policy.json /etc/opt/chrome/policies/managed/webdock.json \
     && chmod +x /app/docker/entrypoint.sh
 
 EXPOSE 8000 6080

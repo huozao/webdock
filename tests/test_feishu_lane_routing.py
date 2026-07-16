@@ -62,3 +62,28 @@ def test_wecom_lane_isolated_and_dynamic_conversation_is_persisted(tmp_path):
     router.record_conversation_url("wr_group", conversation, channel="wecom")
     assert router.resolve_target_url("wr_group", channel="wecom") == conversation
     assert json.loads(state.read_text(encoding="utf-8"))["wecom:wr_group"]["conversation_url"] == conversation
+
+
+def test_wecom_unknown_peer_uses_global_project_route(tmp_path):
+    wechat_config = tmp_path / "wechat_projects.json"
+    feishu_config = tmp_path / "feishu_projects.json"
+    wecom_config = tmp_path / "wecom_projects.json"
+    state = tmp_path / "lane_state.json"
+    _write_config(wechat_config, {})
+    _write_config(feishu_config, {})
+    _write_config(
+        wecom_config,
+        {"*": {"name": "qwecom0", "project_url": "https://chatgpt.com/g/g-p-qwecom0/project"}},
+    )
+
+    router = LaneRouter(
+        config_path=wechat_config,
+        state_path=state,
+        feishu_config_path=feishu_config,
+        wecom_config_path=wecom_config,
+    )
+
+    assert router.resolve_target_url("group:new-group", channel="wecom") == (
+        "https://chatgpt.com/g/g-p-qwecom0/project"
+    )
+    assert router.lane_name("group:new-group", channel="wecom") == "qwecom0"

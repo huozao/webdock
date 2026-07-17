@@ -388,6 +388,82 @@ def test_wait_holds_for_various_interim_status():
         assert answer is None, status
 
 
+def test_wait_holds_while_imagegen_scaffold_incomplete(monkeypatch):
+    # New imagegen UI (image-edit flow, 2026-07-17): the assistant turn renders the
+    # imagegen scaffold whose only text is the "Edit" overlay, with NO stop button
+    # and NO image-gen-loading-state testid, while the estuary <img> is still
+    # rendering. Returning here delivers "Edit" and loses the picture — must wait.
+    page = FakePage(["Edit"], streaming=False)
+
+    async def pending(_page):
+        return True
+
+    monkeypatch.setattr(detector, "imagegen_pending", pending)
+
+    answer = asyncio.run(wait_for_response_complete(page, timeout_seconds=2, stable_seconds=0, previous_count=0))
+
+    assert answer is None
+
+
+def test_wait_returns_when_image_completes_despite_pending_scaffold(monkeypatch):
+    # Once a NEW image src is up, the reply is complete even if the scaffold
+    # check lags a beat — the new image wins over the pending signal.
+    page = FakePage(["Edit"], streaming=False)
+
+    async def pending(_page):
+        return True
+
+    async def srcs(_page, min_px=200):
+        return ["url_NEW"]
+
+    monkeypatch.setattr(detector, "imagegen_pending", pending)
+    monkeypatch.setattr(detector, "generated_image_srcs", srcs)
+
+    answer = asyncio.run(
+        wait_for_response_complete(
+            page, timeout_seconds=2, stable_seconds=0, previous_count=0, previous_image_srcs=[]
+        )
+    )
+
+    assert answer == "Edit"
+
+
+def test_imagegen_pending_js_scopes_to_last_assistant_turn():
+    class InspectPage:
+        script = ""
+
+        async def evaluate(self, script):
+            self.script = script
+            return False
+
+    page = InspectPage()
+
+    asyncio.run(detector.imagegen_pending(page))
+
+    assert "imagegen-image" in page.script
+    assert "[data-testid^='conversation-turn']" in page.script
+    assert "[data-message-author-role='user']" in page.script
+    assert "estuary" in page.script
+
+
+def test_generated_image_srcs_accepts_descriptive_generated_alt():
+    # Thumbnail alt is now "Generated image: <description>" — the acceptance
+    # check must be a prefix match, not exact equality.
+    class InspectPage:
+        script = ""
+
+        async def evaluate(self, script, min_px=200):
+            self.script = script
+            return []
+
+    page = InspectPage()
+
+    asyncio.run(detector.generated_image_srcs(page))
+
+    assert "startsWith('已生成图片')" in page.script
+    assert "startsWith('Generated image')" in page.script
+
+
 def test_wait_holds_for_stopped_thinking_ui_state():
     # ChatGPT can leave a stopped/aborted assistant turn showing only UI text.
     # That is not a real assistant answer and must not be returned as content.

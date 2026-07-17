@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.browser.detector import _GENERATED_IMG_SRCS_JS
+from src.browser.detector import _GENERATED_IMG_SRCS_JS, _IMAGEGEN_PENDING_JS
 
 
 # Real ChatGPT multi-image-reply DOM, mirrored from the 2026-06-21 CDP probe on
@@ -63,6 +63,74 @@ def test_ignores_small_unmarked_backend_images(rich_markdown_page):
     srcs = rich_markdown_page.evaluate(_GENERATED_IMG_SRCS_JS, 200)
 
     assert srcs == [], srcs
+
+
+# Image-EDIT flow mid-render (2026-07-17 CDP probe): the assistant turn has NO
+# data-message-author-role, its only text is the "Edit" overlay, the imagegen
+# scaffold (`group/imagegen-image`) is up but the estuary <img> hasn't rendered.
+_EDIT_SCAFFOLD_PENDING_HTML = """
+<div data-testid="conversation-turn-1">
+  <div data-message-author-role="user">6口味改成4口味</div>
+</div>
+<div data-testid="conversation-turn-2">
+  <div class="group/imagegen-image relative w-full overflow-hidden">
+    <button>Edit</button>
+  </div>
+</div>
+"""
+
+_EDIT_SCAFFOLD_DONE_HTML = """
+<div data-testid="conversation-turn-1">
+  <div data-message-author-role="user">6口味改成4口味</div>
+</div>
+<div data-testid="conversation-turn-2">
+  <div class="group/imagegen-image relative w-full overflow-hidden">
+    <img src="https://chatgpt.com/backend-api/estuary/content?id=file_EDITED"
+         alt="Generated image: noodles" width="480" height="480"
+         style="width:480px;height:480px;">
+    <button>Edit</button>
+  </div>
+</div>
+"""
+
+
+def test_imagegen_pending_true_while_scaffold_has_no_image(rich_markdown_page):
+    rich_markdown_page.set_content(_EDIT_SCAFFOLD_PENDING_HTML)
+
+    assert rich_markdown_page.evaluate(_IMAGEGEN_PENDING_JS) is True
+
+
+def test_imagegen_pending_false_once_image_rendered(rich_markdown_page):
+    rich_markdown_page.set_content(_EDIT_SCAFFOLD_DONE_HTML)
+
+    assert rich_markdown_page.evaluate(_IMAGEGEN_PENDING_JS) is False
+
+
+def test_imagegen_pending_false_for_plain_text_reply(rich_markdown_page):
+    rich_markdown_page.set_content(
+        """
+        <div data-testid="conversation-turn-1">
+          <div class="markdown"><p>a_bright_warm_glossy_food_advertisement_scene_o.png</p></div>
+        </div>
+        """
+    )
+
+    assert rich_markdown_page.evaluate(_IMAGEGEN_PENDING_JS) is False
+
+
+def test_imagegen_pending_false_when_last_turn_is_user(rich_markdown_page):
+    rich_markdown_page.set_content(
+        """
+        <div data-testid="conversation-turn-1">
+          <div class="group/imagegen-image"><img src="https://chatgpt.com/backend-api/estuary/content?id=f" width="480" height="480" style="width:480px;height:480px;"></div>
+        </div>
+        <div data-testid="conversation-turn-2">
+          <div data-message-author-role="user">再发一遍</div>
+        </div>
+        """
+    )
+
+    assert rich_markdown_page.evaluate(_IMAGEGEN_PENDING_JS) is False
 
 
 def test_keeps_large_main_image_without_alt(rich_markdown_page):

@@ -59,12 +59,35 @@ _GENERATED_IMG_SRCS_JS = """
     // a size-only filter delivers just the currently-selected main image to the
     // chat. Recognize the thumbnails via alt="已生成图片"/"Generated image".
     const largeEnough = im.clientWidth >= minPx && im.clientHeight >= minPx;
-    const generatedAlt = im.alt === '已生成图片' || im.alt === 'Generated image';
+    const alt = im.alt || '';
+    const generatedAlt = alt.startsWith('已生成图片') || alt.startsWith('Generated image');
     if (!largeEnough && !generatedAlt) continue;
     seen.add(src);
     out.push(src);
   }
   return out;
+}
+"""
+# The imagegen scaffold (image generation AND image-edit replies) renders in the
+# last turn as a `group/imagegen-image` container. In the image-EDIT flow the
+# stop button and the image-gen-loading-state placeholder can BOTH be absent
+# while the picture is still rendering, and the turn's only text is the "Edit"
+# overlay — so a scaffold without a completed backend image is its own
+# "still generating" signal (the 2026-07-17 "Edit"-only reply bug).
+_IMAGEGEN_PENDING_JS = """
+() => {
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn']");
+  const turn = turns[turns.length - 1];
+  if (!turn) return false;
+  if (turn.querySelector("[data-message-author-role='user']")) return false;
+  const scaffold = turn.querySelector("[class*='imagegen-image'], [data-testid^='image-gen']");
+  if (!scaffold) return false;
+  for (const im of turn.querySelectorAll("img")) {
+    const src = im.currentSrc || im.src || "";
+    if (!/backend-api\\/(estuary|files)\\/|oaiusercontent/.test(src)) continue;
+    if (im.clientWidth >= 200 && im.clientHeight >= 200) return false;
+  }
+  return true;
 }
 """
 _MARK_EXISTING_REPLY_MEDIA_JS = """
@@ -154,6 +177,16 @@ async def image_generating(page: Any) -> bool:
     Distinguishes an in-progress image reply from a refusal / plain-text reply."""
     try:
         return await page.evaluate(_IMAGE_GENERATING_JS)
+    except Exception:
+        return False
+
+
+async def imagegen_pending(page: Any) -> bool:
+    """True while the last assistant turn shows an imagegen scaffold that has no
+    completed backend image yet. Covers the image-edit flow, where the stop
+    button and the loading-state placeholder can both be absent mid-render."""
+    try:
+        return bool(await page.evaluate(_IMAGEGEN_PENDING_JS))
     except Exception:
         return False
 
@@ -700,6 +733,7 @@ async def wait_for_response_complete(
         current_image_srcs = await generated_image_srcs(page)
         has_image = bool(current_image_srcs)
         image_in_progress = await image_generating(page)
+        scaffold_pending = await imagegen_pending(page)
 
         progress_signature = (
             current_count,
@@ -707,6 +741,7 @@ async def wait_for_response_complete(
             streaming,
             stop_button,
             image_in_progress,
+            scaffold_pending,
             tuple(current_image_srcs),
             has_widget,
         )
@@ -742,7 +777,9 @@ async def wait_for_response_complete(
         # an image-gen placeholder meanwhile. While either is present the reply
         # isn't done — keep waiting (ignore the interim text) until it clears (and,
         # for images, a NEW src appears). A refusal / plain reply has neither.
-        in_progress = (image_in_progress or bool(_INTERIM_RE.search(current or ""))) and not new_image
+        in_progress = (
+            image_in_progress or scaffold_pending or bool(_INTERIM_RE.search(current or ""))
+        ) and not new_image
         if has_new and content_ready and not in_progress and stable_for >= stable_seconds:
             if not generating:
                 return current

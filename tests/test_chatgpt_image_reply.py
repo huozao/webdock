@@ -24,6 +24,13 @@ def test_image_reply_empty_previous_keeps_text():
     assert _image_reply_text("一只猫的插画", "") == "一只猫的插画"
 
 
+def test_image_reply_drops_worked_for_and_preview_ui_lines():
+    # The imagegen turn's residual UI text ("Worked for 1m 21s" thinking summary,
+    # Preview/Edit overlay labels) must not ride along with the delivered picture.
+    assert _image_reply_text("Worked for 1m 21s\nEdit", "") == ""
+    assert _image_reply_text("已思考 1m 40s\nPreview", "") == ""
+
+
 def test_image_reply_compares_after_noise_strip():
     # Snapshot and current carry different UI noise lines but the SAME real text;
     # after stripping noise they match, so it's recognized as a repeat and dropped.

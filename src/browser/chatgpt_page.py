@@ -100,7 +100,7 @@ async (src) => {
 # UI/interim noise lines on an image reply (status text, reasoning title, card
 # buttons) — dropped so an image reply delivers the picture, not the chrome.
 _MEDIA_NOISE_RE = re.compile(
-    r"^(正在思考|正在生成.*|.*请稍候。?|Thought for .*|预览|编辑|Edit|分享|重试|下载|复制.*|Copy.*)$",
+    r"^(正在思考|正在生成.*|.*请稍候。?|Thought for .*|Worked for .*|已思考.*|预览|Preview|编辑|Edit|分享|重试|下载|复制.*|Copy.*)$",
     re.IGNORECASE,
 )
 

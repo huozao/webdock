@@ -321,6 +321,24 @@ def test_generated_image_srcs_excludes_user_turn_images():
 
     assert "[data-testid^='conversation-turn']" in page.script
     assert "[data-message-author-role='user']" in page.script
+    assert "data-webdock-existing-turn" in page.script
+    assert "data-webdock-existing-image" in page.script
+
+
+def test_mark_existing_reply_media_marks_turns_and_generated_images():
+    class InspectPage:
+        script = ""
+
+        async def evaluate(self, script):
+            self.script = script
+
+    page = InspectPage()
+
+    asyncio.run(detector.mark_existing_reply_media(page))
+
+    assert "data-webdock-existing-turn" in page.script
+    assert "data-webdock-existing-image" in page.script
+    assert "backend-api\\/(estuary|files)" in page.script
 
 
 def test_wait_holds_while_generating_ignores_reasoning(monkeypatch):

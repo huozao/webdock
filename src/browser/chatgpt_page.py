@@ -18,6 +18,7 @@ from src.browser.detector import (
     find_first,
     generated_file_targets,
     generated_image_srcs,
+    mark_existing_reply_media,
     latest_message_has_widget,
     ordered_feishu_markdown,
     SLOT_PLACEHOLDER_RE,
@@ -221,6 +222,10 @@ class ChatGPTPage:
             previous_assistant_text = await rich_assistant_text(self.page)
             previous_image_srcs = await generated_image_srcs(self.page)
             previous_has_widget = await latest_message_has_widget(self.page)
+            # URL comparison alone is insufficient: ChatGPT can refresh an old
+            # image's signed estuary URL after the next prompt.  Mark the current
+            # DOM so all subsequent image scans are restricted to the new turn.
+            await mark_existing_reply_media(self.page)
 
             await random_delay(settings.before_type_delay_min_ms, settings.before_type_delay_max_ms)
             await paste_text(

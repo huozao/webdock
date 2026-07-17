@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.browser.detector import _ORDERED_MARKDOWN_JS
+from src.browser.detector import _GENERATED_IMG_SRCS_JS, _MARK_EXISTING_REPLY_MEDIA_JS, _ORDERED_MARKDOWN_JS
 
 
 def _turn(inner_html: str) -> str:
@@ -74,3 +74,28 @@ def test_blockquote_with_multiple_paragraphs(rich_markdown_page) -> None:
 def test_blockquote_bare_text_still_works(rich_markdown_page) -> None:
     out = _evaluate(rich_markdown_page, "<blockquote>裸文本引用</blockquote>")
     assert out == "> 裸文本引用"
+
+
+def test_generated_image_scan_is_limited_to_turns_created_after_mark(rich_markdown_page) -> None:
+    old_src = "https://chatgpt.com/backend-api/estuary/content?id=old"
+    new_src = "https://chatgpt.com/backend-api/estuary/content?id=new"
+    rich_markdown_page.set_content(
+        "<div id='thread'>"
+        "<div data-testid='conversation-turn-1'><div data-message-author-role='assistant'>"
+        f"<img alt='Generated image' src='{old_src}'>"
+        "</div></div></div>"
+    )
+    assert rich_markdown_page.evaluate(_GENERATED_IMG_SRCS_JS, 200) == [old_src]
+
+    rich_markdown_page.evaluate(_MARK_EXISTING_REPLY_MEDIA_JS)
+    rich_markdown_page.evaluate(
+        """(src) => {
+          const turn = document.createElement('div');
+          turn.setAttribute('data-testid', 'conversation-turn-2');
+          turn.innerHTML = `<div data-message-author-role="assistant"><img alt="Generated image" src="${src}"></div>`;
+          document.querySelector('#thread').appendChild(turn);
+        }""",
+        new_src,
+    )
+
+    assert rich_markdown_page.evaluate(_GENERATED_IMG_SRCS_JS, 200) == [new_src]

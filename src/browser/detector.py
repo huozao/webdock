@@ -46,6 +46,11 @@ _GENERATED_IMG_SRCS_JS = """
   for (const im of document.querySelectorAll('img')) {
     const turn = im.closest("[data-testid^='conversation-turn']");
     if (turn && turn.querySelector("[data-message-author-role='user']")) continue;
+    // ask() marks every pre-send assistant turn.  Excluding by the turn marker,
+    // rather than only by URL, keeps an old generated image out even when
+    // ChatGPT refreshes its signed estuary URL after the next prompt.
+    if (turn && turn.hasAttribute("data-webdock-existing-turn")) continue;
+    if (im.hasAttribute("data-webdock-existing-image")) continue;
     const src = im.currentSrc || im.src || '';
     if (!src || seen.has(src)) continue;
     if (!/backend-api\\/(estuary|files)\\/|oaiusercontent/.test(src)) continue;
@@ -60,6 +65,22 @@ _GENERATED_IMG_SRCS_JS = """
     out.push(src);
   }
   return out;
+}
+"""
+_MARK_EXISTING_REPLY_MEDIA_JS = """
+() => {
+  for (const turn of document.querySelectorAll("[data-testid^='conversation-turn']")) {
+    if (turn.querySelector("[data-message-author-role='user']")) continue;
+    turn.setAttribute("data-webdock-existing-turn", "1");
+  }
+  // Generated images normally live inside a conversation turn.  Keep an image
+  // marker as a fallback for transient overlays/lightboxes outside that tree.
+  for (const im of document.querySelectorAll("img")) {
+    const src = im.currentSrc || im.src || "";
+    if (/backend-api\/(estuary|files)\/|oaiusercontent/.test(src)) {
+      im.setAttribute("data-webdock-existing-image", "1");
+    }
+  }
 }
 """
 _DOWNLOAD_SCAN_JS = """
@@ -98,6 +119,19 @@ async def generated_image_srcs(page: Any, min_px: int = 200) -> list[str]:
         return list(srcs) if srcs else []
     except Exception:
         return []
+
+
+async def mark_existing_reply_media(page: Any) -> None:
+    """Mark every pre-send assistant turn/image so later scans are turn-local.
+
+    ChatGPT image URLs are signed and may change without a new image being
+    generated.  A URL-only before/after comparison therefore cannot reliably
+    distinguish a new reply from an old image whose URL was refreshed.
+    """
+    try:
+        await page.evaluate(_MARK_EXISTING_REPLY_MEDIA_JS)
+    except Exception:
+        pass
 
 
 async def generated_file_targets(page: Any) -> list[DownloadTarget]:

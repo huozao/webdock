@@ -44,6 +44,7 @@ def test_feishu_ask_rejects_stopped_thinking_markdown(monkeypatch):
     monkeypatch.setattr(chatgpt_page, "assistant_message_count", zero)
     monkeypatch.setattr(chatgpt_page, "rich_assistant_text", empty_text)
     monkeypatch.setattr(chatgpt_page, "generated_image_srcs", empty_list)
+    monkeypatch.setattr(chatgpt_page, "mark_existing_reply_media", noop)
     monkeypatch.setattr(chatgpt_page, "latest_message_has_widget", false_any)
     monkeypatch.setattr(chatgpt_page, "wait_for_response_complete", wait_done)
     monkeypatch.setattr(chatgpt_page, "rich_assistant_markdown", stopped_markdown)

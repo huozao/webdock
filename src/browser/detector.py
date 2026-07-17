@@ -443,6 +443,9 @@ _ORDERED_MARKDOWN_JS = r"""
   const skip = (n) => {
     if (SKIP.has(n.tagName)) return true;
     if (n.getAttribute && n.getAttribute("role") === "button") return true;
+    const cls = typeof n.className === "string" ? n.className : "";
+    if (cls.indexOf("WidgetRenderer") >= 0 || cls.indexOf("not-markdown") >= 0) return true;
+    if (n.getAttribute && n.getAttribute("data-w-component")) return true;
     if (n.classList && (n.classList.contains("katex-mathml") || n.classList.contains("katex-html"))) return true;
     return false;
   };

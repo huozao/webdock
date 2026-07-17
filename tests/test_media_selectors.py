@@ -1,4 +1,5 @@
 from src.browser.chatgpt_page import WIDGET_SELECTOR, _media_screenshot_selectors
+from src.browser.detector import _ORDERED_MARKDOWN_JS
 
 
 def test_wechat_screenshots_widgets_only():
@@ -27,3 +28,11 @@ def test_feishu_table_selector_excludes_tables_inside_widgets():
     sels = _media_screenshot_selectors("feishu")
     table_selector = next(s for s, _prefer_clone in sels if "table" in s)
     assert ":not(" in table_selector and "WidgetRenderer" in table_selector
+
+
+def test_ordered_rich_reply_drops_widget_text_source():
+    # Widget text (hourly weather rows, clock digits, etc.) is represented by the
+    # screenshot slot and must not also leak into the response_url text stream.
+    assert 'cls.indexOf("WidgetRenderer") >= 0' in _ORDERED_MARKDOWN_JS
+    assert 'cls.indexOf("not-markdown") >= 0' in _ORDERED_MARKDOWN_JS
+    assert 'getAttribute("data-w-component")' in _ORDERED_MARKDOWN_JS

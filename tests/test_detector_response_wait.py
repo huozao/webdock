@@ -464,6 +464,54 @@ def test_generated_image_srcs_accepts_descriptive_generated_alt():
     assert "startsWith('Generated image')" in page.script
 
 
+def test_wait_defers_completion_until_copy_button(monkeypatch):
+    # Text is stable and every "generating" signal is off — but the turn's action
+    # row (copy button) hasn't rendered, so this may be a flap window mid-render.
+    # With the 8s grace exceeding the timeout, must NOT return the text.
+    page = FakePage(["Edit"], streaming=False)
+
+    async def not_ready(_page):
+        return False
+
+    monkeypatch.setattr(detector, "turn_actions_ready", not_ready)
+
+    answer = asyncio.run(wait_for_response_complete(page, timeout_seconds=2, stable_seconds=0, previous_count=0))
+
+    assert answer is None
+
+
+def test_wait_returns_after_actions_grace_without_copy_button(monkeypatch):
+    # Terminal states that never render the action row (aborted turn, banner)
+    # still complete after the bounded grace instead of hanging to timeout.
+    monkeypatch.setattr(detector, "TURN_ACTIONS_GRACE_SECONDS", 1)
+    page = FakePage(["final answer"], streaming=False)
+
+    async def not_ready(_page):
+        return False
+
+    monkeypatch.setattr(detector, "turn_actions_ready", not_ready)
+
+    answer = asyncio.run(wait_for_response_complete(page, timeout_seconds=10, stable_seconds=1, previous_count=0))
+
+    assert answer == "final answer"
+
+
+def test_turn_actions_ready_js_targets_copy_button():
+    class InspectPage:
+        script = ""
+
+        async def evaluate(self, script):
+            self.script = script
+            return True
+
+    page = InspectPage()
+
+    asyncio.run(detector.turn_actions_ready(page))
+
+    assert "copy-turn-action-button" in page.script
+    assert "[data-testid^='conversation-turn']" in page.script
+
+
 def test_wait_holds_for_stopped_thinking_ui_state():
     # ChatGPT can leave a stopped/aborted assistant turn showing only UI text.
     # That is not a real assistant answer and must not be returned as content.

@@ -437,6 +437,7 @@ class ChatGPTPage:
             return answer
         result = answer
         emitted: set[str] = set()
+        delivered_image_names: set[str] = set()
         for target in await generated_file_targets(self.page):
             if target.key in exclude_file_keys or target.key in emitted:
                 continue
@@ -447,12 +448,24 @@ class ChatGPTPage:
                 token = self._media_store.put(file.data, file.content_type, filename=file.filename)
             except Exception:
                 continue
-            marker_name = quote(file.filename, safe="._-()")
-            marker_mime = quote(file.content_type, safe="/.+-")
-            result = f"{result}\nFILE: {base}/media/{token} name={marker_name} mime={marker_mime}".strip()
+            if file.content_type.startswith("image/"):
+                # An image referenced as a file pill is still a picture — deliver
+                # it as MEDIA so the channel renders it inline, not as a file card.
+                result = f"{result}\nMEDIA: {base}/media/{token}".strip()
+                delivered_image_names.add(file.filename)
+            else:
+                marker_name = quote(file.filename, safe="._-()")
+                marker_mime = quote(file.content_type, safe="/.+-")
+                result = f"{result}\nFILE: {base}/media/{token} name={marker_name} mime={marker_mime}".strip()
             emitted.add(target.key)
             if len(emitted) >= MAX_FILES_PER_REPLY:
                 break
+        if delivered_image_names:
+            # The pill's filename also leaks into the reply text (the turn has no
+            # .markdown body, so inner_text picks up the button label) — drop the
+            # bare-filename lines once the picture itself is delivered.
+            kept = [ln for ln in result.split("\n") if ln.strip() not in delivered_image_names]
+            result = "\n".join(kept).strip()
         return result
 
 

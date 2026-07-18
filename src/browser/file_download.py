@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import mimetypes
 import re
@@ -8,6 +9,16 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 
+# Generated images can arrive as a filename pill ("重新发我" replies reference the
+# earlier picture as a file instead of re-rendering an <img>), so image extensions
+# are first-class download targets too — they're delivered as MEDIA, not FILE.
+IMAGE_FILE_EXTENSIONS = frozenset({
+    ".gif",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".webp",
+})
 ALLOWED_GENERATED_FILE_EXTENSIONS = frozenset({
     ".csv",
     ".doc",
@@ -18,7 +29,7 @@ ALLOWED_GENERATED_FILE_EXTENSIONS = frozenset({
     ".txt",
     ".xls",
     ".xlsx",
-})
+}) | IMAGE_FILE_EXTENSIONS
 MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
 
 
@@ -101,12 +112,19 @@ async def _download_link(page: object, target: DownloadTarget) -> DownloadedFile
 
 
 async def _download_button(page: object, target: DownloadTarget) -> DownloadedFile | None:
+    # Image pills open a preview instead of downloading (fallback below), so
+    # don't pay the full download wait before capturing the preview.
+    is_image = Path(target.filename).suffix.lower() in IMAGE_FILE_EXTENSIONS
     try:
-        async with page.expect_download(timeout=15000) as download_info:
+        async with page.expect_download(timeout=4000 if is_image else 15000) as download_info:
             await page.locator("button").filter(has_text=target.filename).first.click(timeout=5000)
         download = await download_info.value
         path = await download.path()
     except Exception:
+        # An image filename pill opens a preview overlay instead of firing a
+        # download event (observed 2026-07-18) — capture the previewed image.
+        if is_image:
+            return await _capture_preview_image(page, target)
         return None
     if not path:
         return None
@@ -122,6 +140,67 @@ async def _download_button(page: object, target: DownloadTarget) -> DownloadedFi
         # even if the button label looked like a download.
         return None
     return DownloadedFile(filename=filename, content_type=_guess_content_type(filename), data=data)
+
+
+# The preview overlay renders the file's backend image OUTSIDE any conversation
+# turn at a real size — that distinguishes it from the in-chat reply images.
+_PREVIEW_IMAGE_SRC_JS = """
+() => {
+  for (const im of document.querySelectorAll("img")) {
+    if (im.closest("[data-testid^='conversation-turn']")) continue;
+    const src = im.currentSrc || im.src || "";
+    if (!/backend-api\\/(estuary|files)\\/|oaiusercontent/.test(src)) continue;
+    if (im.clientWidth >= 300 && im.clientHeight >= 300) return src;
+  }
+  return null;
+}
+"""
+# In-page fetch so the logged-in session cookies apply (estuary URLs need them).
+_FETCH_PREVIEW_B64_JS = """
+async (src) => {
+  try {
+    const res = await fetch(src, { credentials: "include" });
+    if (!res.ok) return null;
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    let bin = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(bin);
+  } catch (e) {
+    return null;
+  }
+}
+"""
+
+
+async def _capture_preview_image(page: object, target: DownloadTarget) -> DownloadedFile | None:
+    """Grab the image shown by the file pill's preview overlay, then close it."""
+    src = None
+    for _ in range(10):  # the overlay renders async after the click
+        try:
+            src = await page.evaluate(_PREVIEW_IMAGE_SRC_JS)
+        except Exception:
+            src = None
+        if src:
+            break
+        await asyncio.sleep(0.5)
+    data = None
+    if src:
+        try:
+            b64 = await page.evaluate(_FETCH_PREVIEW_B64_JS, src)
+            data = base64.b64decode(b64) if b64 else None
+        except Exception:
+            data = None
+    try:
+        await page.keyboard.press("Escape")
+    except Exception:
+        pass
+    if not data or len(data) < 1024 or len(data) > MAX_DOWNLOAD_BYTES:
+        return None
+    return DownloadedFile(
+        filename=target.filename, content_type=_guess_content_type(target.filename), data=data
+    )
 
 
 def _target_filename(raw: dict[str, object]) -> str | None:

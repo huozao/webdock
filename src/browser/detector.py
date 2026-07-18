@@ -15,6 +15,12 @@ from src.browser.human import idle_mouse_movement
 # stop button is treated as the authoritative "still generating" signal and is NOT
 # bypassed by this grace — while it's present we keep waiting.
 STUCK_GRACE_SECONDS = 8
+# A finished assistant turn renders its action row (copy button). While the last
+# turn lacks it, the reply may still be mid-render even when the stop button and
+# other "generating" signals have flapped off — hold up to this grace before
+# accepting completion on text stability alone. Terminal states that never render
+# the action row (aborted turns, account banners) still return after the grace.
+TURN_ACTIONS_GRACE_SECONDS = 8
 
 # While ChatGPT generates an image it shows a loading placeholder whose
 # data-testid starts with 'image-gen-loading-state'; it disappears once the <img>
@@ -179,6 +185,27 @@ async def image_generating(page: Any) -> bool:
         return await page.evaluate(_IMAGE_GENERATING_JS)
     except Exception:
         return False
+
+
+_TURN_ACTIONS_READY_JS = """
+() => {
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn']");
+  const turn = turns[turns.length - 1];
+  if (!turn) return true;
+  if (turn.querySelector("[data-message-author-role='user']")) return true;
+  return !!turn.querySelector("[data-testid='copy-turn-action-button']");
+}
+"""
+
+
+async def turn_actions_ready(page: Any) -> bool:
+    """True once the last assistant turn shows its action row (copy button) — the
+    positive "finished rendering" signal, complementing the stop button's negative
+    one. Defaults to True on error so a JS-less page keeps legacy behavior."""
+    try:
+        return bool(await page.evaluate(_TURN_ACTIONS_READY_JS))
+    except Exception:
+        return True
 
 
 async def imagegen_pending(page: Any) -> bool:
@@ -734,6 +761,7 @@ async def wait_for_response_complete(
         has_image = bool(current_image_srcs)
         image_in_progress = await image_generating(page)
         scaffold_pending = await imagegen_pending(page)
+        actions_ready = await turn_actions_ready(page)
 
         progress_signature = (
             current_count,
@@ -742,6 +770,7 @@ async def wait_for_response_complete(
             stop_button,
             image_in_progress,
             scaffold_pending,
+            actions_ready,
             tuple(current_image_srcs),
             has_widget,
         )
@@ -782,7 +811,13 @@ async def wait_for_response_complete(
         ) and not new_image
         if has_new and content_ready and not in_progress and stable_for >= stable_seconds:
             if not generating:
-                return current
+                # The action row (copy button) is the positive completion signal:
+                # accepting stable text without it risks grabbing a flap window
+                # where every "generating" signal blinked off mid-render. Hold a
+                # bounded grace, then accept anyway (some terminal states never
+                # render the action row).
+                if actions_ready or stable_for >= stable_seconds + TURN_ACTIONS_GRACE_SECONDS:
+                    return current
             # The stop button is the authoritative "still generating" signal: it
             # stays present continuously through a preamble→已思考→answer reply
             # (observed), so while it's there we keep waiting — that is what stops us

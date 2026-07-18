@@ -19,17 +19,24 @@ IMAGE_FILE_EXTENSIONS = frozenset({
     ".png",
     ".webp",
 })
-ALLOWED_GENERATED_FILE_EXTENSIONS = frozenset({
-    ".csv",
-    ".doc",
-    ".docx",
-    ".pdf",
-    ".ppt",
-    ".pptx",
-    ".txt",
-    ".xls",
-    ".xlsx",
-}) | IMAGE_FILE_EXTENSIONS
+# Everything ChatGPT generates (sandbox / backend-api files — the origin gate in
+# _is_chatgpt_generated_href) is downloadable by default. Only formats that
+# execute on double-click are refused, so a forwarded file can't become a
+# ready-to-run payload in the chat. External third-party links are still never
+# auto-downloaded — that boundary is the origin gate, not this list.
+BLOCKED_FILE_EXTENSIONS = frozenset({
+    ".apk",
+    ".bat",
+    ".cmd",
+    ".com",
+    ".dmg",
+    ".exe",
+    ".jar",
+    ".msi",
+    ".pif",
+    ".scr",
+    ".vbs",
+})
 MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
 
 
@@ -65,16 +72,20 @@ def parse_download_targets(raw_targets: object) -> list[DownloadTarget]:
         if not filename:
             continue
         if href:
-            # Link targets carry a real filename in the URL/label.
-            if not _is_chatgpt_generated_href(href) or not _has_allowed_extension(filename):
+            # Link targets: anything ChatGPT generated (origin gate) except
+            # executable formats.
+            if not _is_chatgpt_generated_href(href) or _is_blocked_extension(filename):
                 continue
         else:
-            # Button targets are labelled with a localized action ("下载 PDF 扫描件"),
-            # not a filename. Accept on download intent; the authoritative filename
-            # and extension come from the download event (see _download_button).
+            # Button targets are labelled with either a filename pill or a
+            # localized action ("下载 PDF 扫描件"). Accept on either signal — a
+            # bare UI label (copy, reasoning toggle) matches neither, so it's
+            # never clicked. The authoritative filename and extension come from
+            # the download event (see _download_button).
             if kind != "button":
                 continue
-            if not (_has_allowed_extension(filename) or _is_download_intent(filename)):
+            looks_like_file = _has_file_extension(filename) and not _is_blocked_extension(filename)
+            if not (looks_like_file or _is_download_intent(filename)):
                 continue
         target = DownloadTarget(kind=kind or ("link" if href else "button"), filename=filename, href=href)
         if target.key in seen:
@@ -135,9 +146,9 @@ async def _download_button(page: object, target: DownloadTarget) -> DownloadedFi
     if not data or len(data) > MAX_DOWNLOAD_BYTES:
         return None
     filename = _safe_filename(getattr(download, "suggested_filename", "") or target.filename) or target.filename
-    if not _has_allowed_extension(filename):
-        # The real download decides the type; never forward a non-whitelisted file
-        # even if the button label looked like a download.
+    if _is_blocked_extension(filename):
+        # The real download decides the type; never forward an executable format
+        # even if the button label looked like a harmless download.
         return None
     return DownloadedFile(filename=filename, content_type=_guess_content_type(filename), data=data)
 
@@ -227,8 +238,17 @@ def _is_chatgpt_generated_href(href: str) -> bool:
     return "/backend-api/files/" in path and path.rstrip("/").endswith("/download")
 
 
-def _has_allowed_extension(filename: str) -> bool:
-    return Path(filename).suffix.lower() in ALLOWED_GENERATED_FILE_EXTENSIONS
+# A real filename suffix (".pdf", ".json") — not a stray dot inside a sentence
+# label ("v2.0 说明" must not read as a file).
+_FILE_EXTENSION_RE = re.compile(r"\.[A-Za-z0-9]{1,8}$")
+
+
+def _has_file_extension(filename: str) -> bool:
+    return bool(_FILE_EXTENSION_RE.search(filename.strip()))
+
+
+def _is_blocked_extension(filename: str) -> bool:
+    return Path(filename).suffix.lower() in BLOCKED_FILE_EXTENSIONS
 
 
 # ChatGPT labels a generated-file button with a localized action, not a filename

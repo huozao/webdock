@@ -149,6 +149,36 @@ def test_download_button_no_preview_fallback_for_documents():
     assert page.pressed == []
 
 
+def test_parse_accepts_any_generated_format():
+    # Whatever ChatGPT generates (origin-gated) is downloadable — .json/.zip/.py
+    # are normal deliverables and must not be dropped by a format whitelist.
+    raw = [
+        {"kind": "link", "href": "sandbox:/mnt/data/data.json", "text": "data.json"},
+        {"kind": "link", "href": "sandbox:/mnt/data/bundle.zip", "text": "bundle.zip"},
+        {"kind": "button", "href": "", "text": "analysis.py", "download": ""},
+    ]
+
+    targets = parse_download_targets(raw)
+
+    assert [t.filename for t in targets] == ["data.json", "bundle.zip", "analysis.py"]
+
+
+def test_parse_rejects_executable_formats():
+    raw = [
+        {"kind": "link", "href": "sandbox:/mnt/data/tool.exe", "text": "tool.exe"},
+        {"kind": "button", "href": "", "text": "setup.msi", "download": ""},
+    ]
+
+    assert parse_download_targets(raw) == []
+
+
+def test_parse_rejects_sentence_label_with_stray_dot():
+    # "v2.0 说明" has a dot but is not a filename — must not be clicked.
+    raw = [{"kind": "button", "href": "", "text": "v2.0 说明", "download": ""}]
+
+    assert parse_download_targets(raw) == []
+
+
 def test_parse_rejects_non_download_button():
     # Buttons that are not download affordances (reasoning toggle, copy, …) must
     # never be clicked — otherwise every reply pays a download timeout.

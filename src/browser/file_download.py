@@ -228,14 +228,25 @@ def _target_filename(raw: dict[str, object]) -> str | None:
 
 
 def _is_chatgpt_generated_href(href: str) -> bool:
+    """ChatGPT-generated file URLs come in three known shapes:
+    - legacy code-interpreter links: sandbox:/mnt/data/... (or bare /mnt/data/)
+    - legacy file downloads: chatgpt.com/backend-api/files/<id>/download
+    - the current file service (images AND documents, observed 2026-07-18):
+      chatgpt.com/backend-api/estuary/content?id=file_...&ts=...&sig=...
+    oaiusercontent.com is OpenAI's signed user-content CDN (same trust class).
+    Anything else is a third-party link and is never auto-downloaded."""
     if href.startswith("sandbox:/mnt/data/") or href.startswith("/mnt/data/"):
         return True
     parsed = urlparse(href)
     path = parsed.path or href
     host = (parsed.netloc or "").lower()
+    if host.endswith("oaiusercontent.com"):
+        return True
     if host and not host.endswith("chatgpt.com"):
         return False
-    return "/backend-api/files/" in path and path.rstrip("/").endswith("/download")
+    if "/backend-api/files/" in path and path.rstrip("/").endswith("/download"):
+        return True
+    return "/backend-api/estuary/content" in path and "id=file" in (parsed.query or "")
 
 
 # A real filename suffix (".pdf", ".json") — not a stray dot inside a sentence

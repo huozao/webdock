@@ -163,6 +163,30 @@ def test_parse_accepts_any_generated_format():
     assert [t.filename for t in targets] == ["data.json", "bundle.zip", "analysis.py"]
 
 
+def test_parse_accepts_estuary_file_service_links():
+    # The current ChatGPT file service serves images AND documents from
+    # /backend-api/estuary/content?id=file_...&sig=... (real URLs, 2026-07-18).
+    raw = [
+        {
+            "kind": "link",
+            "href": "https://chatgpt.com/backend-api/estuary/content?id=file_000000000e5471f5ba998ee401832701&ts=495649&p=fs&cid=1&sig=51c9612d&v=0",
+            "text": "scene.png",
+        },
+        {
+            "kind": "link",
+            "href": "https://chatgpt.com/backend-api/estuary/content?id=file_00000000698071fd9b303bea145afabf&ts=495649&p=fs&cid=1&sig=94ba301e&v=0",
+            "text": "report.pdf",
+        },
+        {"kind": "link", "href": "https://files.oaiusercontent.com/file-abc?sig=x", "text": "notes.docx"},
+        # estuary path on a foreign host is NOT ChatGPT's file service
+        {"kind": "link", "href": "https://evil.example/backend-api/estuary/content?id=file_x", "text": "trap.pdf"},
+    ]
+
+    targets = parse_download_targets(raw)
+
+    assert [t.filename for t in targets] == ["scene.png", "report.pdf", "notes.docx"]
+
+
 def test_parse_rejects_executable_formats():
     raw = [
         {"kind": "link", "href": "sandbox:/mnt/data/tool.exe", "text": "tool.exe"},

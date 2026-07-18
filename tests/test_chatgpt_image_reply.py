@@ -29,6 +29,7 @@ def test_image_reply_drops_worked_for_and_preview_ui_lines():
     # Preview/Edit overlay labels) must not ride along with the delivered picture.
     assert _image_reply_text("Worked for 1m 21s\nEdit", "") == ""
     assert _image_reply_text("已思考 1m 40s\nPreview", "") == ""
+    assert _image_reply_text("Share\nDownload\nSave", "") == ""
 
 
 def test_image_reply_compares_after_noise_strip():

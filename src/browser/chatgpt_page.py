@@ -568,11 +568,36 @@ async def _clone_render_screenshot(page: Any, widget: Any) -> bytes | None:
                 pass
 
 
+# element.screenshot() crops the LIVE page by pixel coordinates, so ChatGPT's own
+# floating "jump to latest message" pill (visible whenever the conversation isn't
+# scrolled to the bottom) bleeds into the crop if it happens to overlap the widget's
+# bounding box. That pill is hidden natively once truly at the bottom, so scrolling
+# there beforehand avoids it without depending on its class name/testid (which we
+# don't control and could change).
+_SCROLL_TO_BOTTOM_JS = r"""
+() => {
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn']");
+  let el = turns[turns.length - 1];
+  while (el) {
+    const cs = getComputedStyle(el);
+    if (/(auto|scroll)/.test(cs.overflowY) && el.scrollHeight > el.clientHeight) {
+      el.scrollTop = el.scrollHeight;
+    }
+    el = el.parentElement;
+  }
+}
+"""
+
+
 async def _screenshot_widget(page: Any, widget: Any, *, prefer_clone: bool = False) -> bytes | None:
     """Screenshot an element. Widgets capture best live (inherited page styles), so
     that is tried first with a clone-render fallback. Tables (prefer_clone=True) must
     go clone-first: element.screenshot() crops their frozen header/first column.
     Returns None on total failure."""
+    try:
+        await page.evaluate(_SCROLL_TO_BOTTOM_JS)
+    except Exception:
+        pass
     try:
         await widget.scroll_into_view_if_needed(timeout=3000)
     except Exception:

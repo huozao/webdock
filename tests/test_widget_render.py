@@ -61,3 +61,29 @@ def test_screenshot_widget_prefers_live_widget_screenshot():
             return "<div>fallback</div>"
 
     assert asyncio.run(_screenshot_widget(FakePage(), FakeWidget())) == b"live-png"
+
+
+def test_screenshot_widget_scrolls_to_bottom_before_live_capture():
+    # ChatGPT's floating "jump to latest" pill only hides once the conversation is
+    # scrolled to the bottom; element.screenshot() crops live pixels, so leaving it
+    # unscrolled would bake the pill into the widget image. Verify the scroll call
+    # happens before the screenshot, not after.
+    calls: list[str] = []
+
+    class FakePage:
+        context = None
+
+        async def evaluate(self, js: str):
+            calls.append("scroll")
+
+    class FakeWidget:
+        async def scroll_into_view_if_needed(self, timeout: int):
+            calls.append("scroll_into_view")
+
+        async def screenshot(self, timeout: int):
+            calls.append("screenshot")
+            return b"live-png"
+
+    result = asyncio.run(_screenshot_widget(FakePage(), FakeWidget()))
+    assert result == b"live-png"
+    assert calls == ["scroll", "scroll_into_view", "screenshot"]

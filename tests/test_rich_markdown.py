@@ -1,6 +1,10 @@
 import asyncio
 
-from src.browser.detector import _strip_markdown_tables, rich_assistant_markdown
+from src.browser.detector import (
+    _clean_assistant_text,
+    _strip_markdown_tables,
+    rich_assistant_markdown,
+)
 
 
 class _FakePage:
@@ -57,3 +61,20 @@ def test_strip_markdown_tables_keeps_prose_with_bare_pipe():
 def test_strip_markdown_tables_removes_trailing_table():
     md = "说明\n\n| a | b |\n| --- | --- |\n| 1 | 2 |"
     assert _strip_markdown_tables(md) == "说明"
+
+
+def test_clean_drops_location_footer_only_reply():
+    # Weather widget with no .markdown body: the inner_text fallback captures the
+    # "Use precise location" footer button. It must not become the reply.
+    assert _clean_assistant_text("Use precise location") == ""
+
+
+def test_clean_drops_location_footer_line_keeps_prose():
+    # Mixed content: strip only the footer line, keep the real answer.
+    assert _clean_assistant_text("明天多云，25°C\nUse precise location") == "明天多云，25°C"
+
+
+def test_clean_keeps_prose_containing_footer_phrase_inline():
+    # The phrase inside a sentence is content, not a standalone footer line.
+    md = "你可以点击 Use precise location 来授权。"
+    assert _clean_assistant_text(md) == md

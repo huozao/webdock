@@ -840,10 +840,27 @@ async def wait_for_response_complete(
     return None
 
 
+# ChatGPT renders a location-permission footer (data-testid="conversation-turn-
+# location-footer") under weather/location widgets, whose label lives inside a
+# <button>. The rich DOM walk skips buttons so it returns "" for these widget-only
+# turns, but the inner_text fallback in latest_assistant_text flattens the whole
+# turn and captures the button label — leaking "Use precise location" as the reply.
+# These labels are UI chrome, never content, so drop any standalone footer line.
+_LOCATION_FOOTER_LABELS = frozenset({
+    "Use precise location",
+    "Use approximate location",
+    "使用精确位置",
+    "使用大致位置",
+})
+
+
 def _clean_assistant_text(text: str) -> str:
     cleaned = (text or "").strip()
     prefixes = ("ChatGPT said:", "ChatGPT 说：", "ChatGPT said")
     for prefix in prefixes:
         if cleaned.startswith(prefix):
             cleaned = cleaned[len(prefix):].strip()
+    if cleaned:
+        lines = [ln for ln in cleaned.splitlines() if ln.strip() not in _LOCATION_FOOTER_LABELS]
+        cleaned = "\n".join(lines).strip()
     return cleaned

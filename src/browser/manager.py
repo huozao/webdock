@@ -34,7 +34,20 @@ class BrowserManager:
 
     @property
     def started(self) -> bool:
-        return self._page is not None
+        return self._page is not None and self._cdp_connection_alive()
+
+    def _cdp_connection_alive(self) -> bool:
+        """In CDP mode Chrome can be restarted underneath us (supervisord respawns
+        it on exit), which leaves handles that still look started but raise
+        TargetClosedError on every call. Report those as not started so the next
+        request re-attaches instead of failing forever."""
+        browser = self._browser
+        if browser is None:
+            return True
+        try:
+            return bool(browser.is_connected())
+        except Exception:
+            return False
 
     @property
     def page(self) -> Any | None:
@@ -178,6 +191,11 @@ class BrowserManager:
     async def start(self) -> None:
         if self.started:
             return
+        if self._page is not None:
+            # Handles left over from a Chrome that went away. Drop them first —
+            # stop() never closes Chrome in CDP mode — so the reconnect below
+            # starts from a clean playwright driver instead of leaking one.
+            await self.stop()
         settings = get_settings()
         settings.ensure_dirs()
         from patchright.async_api import async_playwright

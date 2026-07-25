@@ -130,6 +130,53 @@ def test_reset_lane_page_closes_untracked_previous_conversation_after_restart():
     assert new_page.goto_calls == ["https://chatgpt.com/g/g-p-x/project"]
 
 
+def test_reset_lane_page_opens_new_tab_before_closing_the_old_one():
+    """Closing the only tab makes Chrome exit (last window closed), which then
+    fails the new_page that follows. The replacement must exist first."""
+    events: list[str] = []
+
+    class RecordingPage(FakePage):
+        async def close(self) -> None:
+            events.append("close")
+            await super().close()
+
+    class RecordingContext(FakeContext):
+        async def new_page(self):
+            events.append("new_page")
+            return await super().new_page()
+
+    old_page = RecordingPage("https://chatgpt.com/g/g-p-x/c/old")
+    context = RecordingContext([old_page])
+    lane = _lane("https://chatgpt.com/g/g-p-x/project")
+    mgr = BrowserManager()
+    mgr._context = context
+    mgr._lane_pages[lane.key] = old_page
+    mgr._lane_contexts[lane.key] = lane
+
+    asyncio.run(mgr.reset_lane_page(lane))
+
+    assert events == ["new_page", "close"]
+
+
+def test_reset_lane_page_never_closes_its_own_replacement_tab():
+    """The previous-conversation sweep runs after the new tab is open; it must not
+    take that tab down when the lane resets onto the same conversation."""
+    old_page = FakePage("https://chatgpt.com/g/g-p-x/c/same")
+    context = FakeContext([old_page])
+    lane = _lane_with_previous(
+        "https://chatgpt.com/g/g-p-x/c/same",
+        "https://chatgpt.com/g/g-p-x/c/same",
+    )
+    mgr = BrowserManager()
+    mgr._context = context
+
+    new_page = asyncio.run(mgr.reset_lane_page(lane))
+
+    assert old_page.closed_called
+    assert not new_page.closed_called
+    assert new_page.goto_calls == ["https://chatgpt.com/g/g-p-x/c/same"]
+
+
 def _mgr_with(primary, lane_pages, orphans):
     mgr = BrowserManager()
     mgr._page = primary

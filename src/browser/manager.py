@@ -136,14 +136,19 @@ class BrowserManager:
 
         existing = self._lane_pages.pop(lane.key, None)
         self._lane_contexts.pop(lane.key, None)
+
+        # Open the replacement tab BEFORE closing the old one. A lane reset often
+        # runs when this is the only tab, and closing the last one makes Chrome
+        # exit (last window closed) — the new_page would then land on a browser
+        # already shutting down and fail with "Failed to open a new tab".
+        page = await self._context.new_page()
         if existing is not None and not _is_page_closed(existing):
             try:
                 await existing.close()
             except Exception:
                 pass
-        await self._close_previous_lane_pages(lane, skip=existing)
+        await self._close_previous_lane_pages(lane, skip=page)
 
-        page = await self._context.new_page()
         await _navigate_lane_page(page, lane, get_settings())
         self._lane_pages[lane.key] = page
         self._lane_contexts[lane.key] = lane

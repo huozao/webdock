@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import mimetypes
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlparse
+
+log = logging.getLogger(__name__)
 
 
 # Generated images can arrive as a filename pill ("重新发我" replies reference the
@@ -38,6 +41,26 @@ BLOCKED_FILE_EXTENSIONS = frozenset({
     ".vbs",
 })
 MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
+# Clicking a generated-document pill makes ChatGPT's backend materialise the file
+# before the browser sees a download event, which can take far longer than the
+# 15s this used to allow (2026-07-27: docx replies delivered a bare filename
+# because every attempt timed out). Images are unaffected — they keep the short
+# wait because their pill opens a preview instead of downloading at all.
+DOCUMENT_DOWNLOAD_TIMEOUT_MS = 60000
+# The document preview flyout ChatGPT opens when a generated-file pill is clicked.
+# Its own download control is what actually produces the file. Both the container
+# testid and the localized labels are matched — the UI language follows the
+# account, and only the label differs between them.
+_PREVIEW_FLYOUT_CONTAINERS = (
+    "[data-testid='stage-thread-flyout']",
+    "[data-testid='screen-threadFlyOut']",
+)
+_PREVIEW_DOWNLOAD_LABELS = ("Download", "下载")
+PREVIEW_DOWNLOAD_BUTTON = ", ".join(
+    f"{container} button[aria-label='{label}']"
+    for container in _PREVIEW_FLYOUT_CONTAINERS
+    for label in _PREVIEW_DOWNLOAD_LABELS
+)
 
 
 @dataclass(frozen=True)
@@ -122,22 +145,111 @@ async def _download_link(page: object, target: DownloadTarget) -> DownloadedFile
     return DownloadedFile(filename=filename, content_type=content_type, data=data)
 
 
+# Controls that live OUTSIDE any conversation turn — which is exactly where a
+# preview overlay renders. When a file pill opens a preview instead of firing a
+# download, this shows whether the overlay carries its own download control.
+_OVERLAY_CONTROLS_JS = """
+() => {
+  const out = [];
+  for (const node of document.querySelectorAll("button, [role='button'], a[href], [data-testid]")) {
+    if (node.closest("[data-testid^='conversation-turn']")) continue;
+    // The sidebar is always outside the turns and would fill the whole budget.
+    if (node.closest("nav")) continue;
+    if ((node.getAttribute("class") || "").includes("__menu-item")) continue;
+    const text = (node.innerText || node.textContent || "").trim();
+    const label = node.getAttribute("aria-label") || "";
+    if (!text && !label) continue;
+    out.push({
+      tag: node.tagName,
+      cls: (node.getAttribute("class") || "").slice(0, 80),
+      testid: node.getAttribute("data-testid") || "",
+      label: label.slice(0, 60),
+      href: (node.getAttribute("href") || "").slice(0, 100),
+      text: text.slice(0, 60),
+    });
+  }
+  return out.slice(0, 50);
+}
+"""
+
+
+async def _overlay_controls_debug(page: object) -> list[dict[str, str]]:
+    """Diagnostics only — reads the DOM, never clicks."""
+    try:
+        raw = await page.evaluate(_OVERLAY_CONTROLS_JS)
+    except Exception:
+        return []
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
+
+
 async def _download_button(page: object, target: DownloadTarget) -> DownloadedFile | None:
     # Image pills open a preview instead of downloading (fallback below), so
     # don't pay the full download wait before capturing the preview.
     is_image = Path(target.filename).suffix.lower() in IMAGE_FILE_EXTENSIONS
     try:
-        async with page.expect_download(timeout=4000 if is_image else 15000) as download_info:
+        async with page.expect_download(timeout=4000 if is_image else DOCUMENT_DOWNLOAD_TIMEOUT_MS) as download_info:
             await page.locator("button").filter(has_text=target.filename).first.click(timeout=5000)
         download = await download_info.value
-        path = await download.path()
-    except Exception:
+    except Exception as exc:
+        log.warning(
+            "file pill click did not produce a download: %s: %s (file=%r)",
+            type(exc).__name__,
+            str(exc).splitlines()[0][:200] if str(exc) else "",
+            target.filename,
+        )
         # An image filename pill opens a preview overlay instead of firing a
         # download event (observed 2026-07-18) — capture the previewed image.
         if is_image:
             return await _capture_preview_image(page, target)
+        # A document pill opens ChatGPT's preview flyout (observed 2026-07-27) —
+        # the flyout carries its own download control.
+        return await _download_from_preview_flyout(page, target)
+    return await _read_download(download, target)
+
+
+async def _download_from_preview_flyout(
+    page: object, target: DownloadTarget
+) -> DownloadedFile | None:
+    """Use the preview flyout's own Download control, then close the flyout.
+
+    Clicking a generated-document pill opens ChatGPT's document preview instead of
+    downloading, so the click resolves but no download event ever fires. The
+    flyout is left open if we don't dismiss it, which would render the next reply
+    behind it."""
+    try:
+        async with page.expect_download(timeout=DOCUMENT_DOWNLOAD_TIMEOUT_MS) as download_info:
+            await page.locator(PREVIEW_DOWNLOAD_BUTTON).first.click(timeout=5000)
+        download = await download_info.value
+    except Exception as exc:
+        log.warning(
+            "preview flyout download failed: %s: %s (file=%r) overlay=%s",
+            type(exc).__name__,
+            str(exc).splitlines()[0][:200] if str(exc) else "",
+            target.filename,
+            await _overlay_controls_debug(page),
+        )
+        await _close_preview_flyout(page)
+        return None
+    await _close_preview_flyout(page)
+    return await _read_download(download, target)
+
+
+async def _close_preview_flyout(page: object) -> None:
+    try:
+        await page.keyboard.press("Escape")
+    except Exception:
+        pass
+
+
+async def _read_download(download: object, target: DownloadTarget) -> DownloadedFile | None:
+    try:
+        path = await download.path()
+    except Exception:
         return None
     if not path:
+        log.warning("download event fired but produced no path (file=%r)", target.filename)
         return None
     try:
         data = Path(path).read_bytes()

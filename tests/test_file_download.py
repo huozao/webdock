@@ -81,6 +81,8 @@ class _FakePillPage:
         self._b64 = base64.b64encode(payload).decode()
         self.clicked = False
         self.pressed: list[str] = []
+        self.selectors: list[str] = []
+        self.image_preview_scans = 0
         page = self
 
         class _Keyboard:
@@ -101,6 +103,7 @@ class _FakePillPage:
 
     def locator(self, selector: str):
         page = self
+        page.selectors.append(selector)
 
         class _Loc:
             def filter(self, has_text: str | None = None):
@@ -119,6 +122,7 @@ class _FakePillPage:
         if "arrayBuffer" in script:
             return self._b64
         if "clientWidth" in script:
+            self.image_preview_scans += 1
             return "https://chatgpt.com/backend-api/estuary/content?id=file_PREVIEW"
         return None
 
@@ -138,15 +142,75 @@ def test_download_button_falls_back_to_preview_capture_for_images():
     assert "Escape" in page.pressed  # the preview overlay is closed afterwards
 
 
-def test_download_button_no_preview_fallback_for_documents():
-    # A document button with no download event must stay None (no preview scan).
+def test_download_button_document_never_scans_for_a_preview_image():
+    # A document pill opens ChatGPT's preview flyout, so we try the flyout's own
+    # Download control — never the preview-IMAGE scan, which is image-only and
+    # would grab the wrong thing. When that produces no download event either,
+    # the result stays None and the flyout is dismissed rather than left covering
+    # the page for the next reply.
     page = _FakePillPage(b"D" * 2048)
     target = DownloadTarget(kind="button", filename="report.pdf", href=None)
 
     file = asyncio.run(_download_button(page, target))
 
     assert file is None
-    assert page.pressed == []
+    assert page.image_preview_scans == 0
+    assert page.pressed == ["Escape"]
+
+
+class _FakeFlyoutPage(_FakePillPage):
+    """Document pill click opens the preview flyout without firing a download;
+    the flyout's own Download control is what produces the file."""
+
+    def __init__(self, payload: bytes, download_path) -> None:
+        super().__init__(payload)
+        self._download_path = download_path
+        self.download_waits = 0
+
+    def expect_download(self, timeout: int = 0):
+        self.download_waits += 1
+        pill_click = self.download_waits == 1
+        path = self._download_path
+
+        class _Download:
+            suggested_filename = "report.pdf"
+
+            async def path(self):
+                return path
+
+        class _Ctx:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc) -> None:
+                if pill_click:
+                    raise TimeoutError("Timeout waiting for event download")
+
+            @property
+            def value(self):
+                async def _resolve():
+                    return _Download()
+
+                return _resolve()
+
+        return _Ctx()
+
+
+def test_document_pill_downloads_via_preview_flyout(tmp_path):
+    payload = b"D" * 2048
+    downloaded = tmp_path / "report.pdf"
+    downloaded.write_bytes(payload)
+    page = _FakeFlyoutPage(payload, downloaded)
+    target = DownloadTarget(kind="button", filename="report.pdf", href=None)
+
+    file = asyncio.run(_download_button(page, target))
+
+    assert file is not None
+    assert file.data == payload
+    assert file.filename == "report.pdf"
+    # The second click targets the flyout's download control, not the pill again.
+    assert any("aria-label" in selector for selector in page.selectors)
+    assert page.pressed == ["Escape"]  # flyout dismissed after a successful grab
 
 
 def test_parse_accepts_any_generated_format():

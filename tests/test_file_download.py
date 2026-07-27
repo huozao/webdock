@@ -155,7 +155,8 @@ def test_download_button_document_never_scans_for_a_preview_image():
 
     assert file is None
     assert page.image_preview_scans == 0
-    assert page.pressed == ["Escape"]
+    # Dismissed via the flyout's own close control — Escape does not close it.
+    assert any("close-button" in selector for selector in page.selectors)
 
 
 class _FakeFlyoutPage(_FakePillPage):
@@ -210,7 +211,8 @@ def test_document_pill_downloads_via_preview_flyout(tmp_path):
     assert file.filename == "report.pdf"
     # The second click targets the flyout's download control, not the pill again.
     assert any("aria-label" in selector for selector in page.selectors)
-    assert page.pressed == ["Escape"]  # flyout dismissed after a successful grab
+    # …and the flyout is dismissed afterwards via its own close control.
+    assert any("close-button" in selector for selector in page.selectors)
 
 
 def test_parse_accepts_any_generated_format():

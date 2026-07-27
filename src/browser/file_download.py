@@ -61,6 +61,9 @@ PREVIEW_DOWNLOAD_BUTTON = ", ".join(
     for container in _PREVIEW_FLYOUT_CONTAINERS
     for label in _PREVIEW_DOWNLOAD_LABELS
 )
+PREVIEW_CLOSE_BUTTON = ", ".join(
+    f"{container} [data-testid='close-button']" for container in _PREVIEW_FLYOUT_CONTAINERS
+)
 
 
 @dataclass(frozen=True)
@@ -237,10 +240,66 @@ async def _download_from_preview_flyout(
 
 
 async def _close_preview_flyout(page: object) -> None:
+    """Escape does NOT dismiss this flyout (verified 2026-07-27 — the layer stayed
+    at width 751 through repeated Escapes, wedging every following turn with
+    RESPONSE_TIMEOUT). It carries its own close control; the keypress is kept only
+    as a fallback for a reshaped UI."""
+    try:
+        await page.locator(PREVIEW_CLOSE_BUTTON).first.click(timeout=3000)
+        return
+    except Exception:
+        pass
     try:
         await page.keyboard.press("Escape")
     except Exception:
         pass
+
+
+# Presence of the container is not enough — it stays in the DOM after the flyout
+# closes. Only a rendered box (non-zero width) means it is actually covering the
+# thread. Returns the flyout's own controls too, so a close affordance can be
+# found when Escape doesn't dismiss it.
+_FLYOUT_STATE_JS = """
+(selector) => {
+  const el = document.querySelector(selector);
+  if (!el) return null;
+  const rect = el.getBoundingClientRect();
+  if (rect.width < 1 || rect.height < 1) return null;
+  const controls = [];
+  for (const node of el.querySelectorAll("button, [role='button']")) {
+    controls.push({
+      testid: node.getAttribute("data-testid") || "",
+      label: (node.getAttribute("aria-label") || "").slice(0, 40),
+      text: (node.innerText || node.textContent || "").trim().slice(0, 30),
+    });
+  }
+  return {width: Math.round(rect.width), controls: controls.slice(0, 20)};
+}
+"""
+
+
+async def dismiss_stale_preview_flyout(page: object) -> bool:
+    """Close a document preview flyout left open from an earlier turn.
+
+    A flyout that outlives its turn covers the thread and the next reply never
+    reaches a completion signal — the turn dies with RESPONSE_TIMEOUT even though
+    the message sent fine. The download paths dismiss their own flyout, but a turn
+    that fails before reaching them (or anything opened by hand in noVNC) would
+    otherwise wedge every following request, so each turn starts by clearing one.
+    """
+    state = None
+    for container in _PREVIEW_FLYOUT_CONTAINERS:
+        try:
+            state = await page.evaluate(_FLYOUT_STATE_JS, container)
+        except Exception:
+            return False
+        if state:
+            break
+    if not state:
+        return False
+    log.warning("dismissing a stale document preview flyout: %s", state)
+    await _close_preview_flyout(page)
+    return True
 
 
 async def _read_download(download: object, target: DownloadTarget) -> DownloadedFile | None:

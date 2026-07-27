@@ -29,7 +29,7 @@ from src.browser.detector import (
     wait_for_response_complete,
 )
 from src.browser.feishu_format import feishu_safe_markdown
-from src.browser.file_download import download_chatgpt_file
+from src.browser.file_download import dismiss_stale_preview_flyout, download_chatgpt_file
 from src.browser.human import hover_and_click, paste_text, random_delay
 from src.browser.image_input import resolve_image_inputs
 from src.config import get_settings
@@ -219,6 +219,8 @@ class ChatGPTPage:
                     ErrorCode.NOT_LOGGED_IN,
                     "ChatGPT is not logged in. Open noVNC and sign in manually.",
                 )
+
+            await dismiss_stale_preview_flyout(self.page)
 
             input_selector = await find_first(self.page, selectors.CHAT_INPUT, visible=True, timeout_ms=2500)
             if not input_selector:

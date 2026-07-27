@@ -15,6 +15,7 @@ from src.browser.debug_dump import save_debug_dump
 from src.browser.detector import (
     assistant_message_count,
     any_selector_found,
+    download_candidate_debug,
     find_first,
     generated_file_targets,
     generated_image_srcs,
@@ -70,6 +71,15 @@ def _media_screenshot_selectors(channel: str) -> list[tuple[str, bool]]:
 # rendered size); we download in-page (so cookies apply) and serve via /media.
 MAX_IMAGES_PER_REPLY = 4
 MAX_FILES_PER_REPLY = 4
+
+# A reply that is nothing but a filename is the signature of an unrecognised file
+# pill: the turn has no .markdown body, so inner_text picks up the pill's label.
+_BARE_FILENAME_RE = re.compile(r"[^\s/\\]{1,120}\.[A-Za-z0-9]{2,5}")
+
+
+def _looks_like_bare_filename(text: str) -> bool:
+    lines = [line.strip() for line in text.strip().split("\n") if line.strip()]
+    return len(lines) == 1 and _BARE_FILENAME_RE.fullmatch(lines[0]) is not None
 
 # Inbound file upload: how long to look for the hidden file input, and how long
 # to let an attachment finalize on ChatGPT's side before sending the text.
@@ -438,11 +448,23 @@ class ChatGPTPage:
         result = answer
         emitted: set[str] = set()
         delivered_image_names: set[str] = set()
-        for target in await generated_file_targets(self.page):
+        targets = await generated_file_targets(self.page)
+        if not targets and _looks_like_bare_filename(answer):
+            # The reply's whole text is a filename, i.e. ChatGPT rendered a file
+            # pill whose label leaked into inner_text while the download scan
+            # matched nothing — the pill's shape changed. Log what was in the turn
+            # so the selector can be fixed from this line.
+            log.warning(
+                "file pill not recognised (reply=%r); turn candidates=%s",
+                answer.strip()[:80],
+                await download_candidate_debug(self.page),
+            )
+        for target in targets:
             if target.key in exclude_file_keys or target.key in emitted:
                 continue
             file = await download_chatgpt_file(self.page, target)
             if file is None:
+                log.warning("generated file download returned nothing: %s", target)
                 continue
             try:
                 token = self._media_store.put(file.data, file.content_type, filename=file.filename)

@@ -173,6 +173,45 @@ async def generated_file_targets(page: Any) -> list[DownloadTarget]:
     return parse_download_targets(raw)
 
 
+# Every clickable-ish node in the latest turn, with the attributes a selector
+# could key on. _DOWNLOAD_SCAN_JS above matches a fixed set of shapes; when
+# ChatGPT reshapes its file pill the scan silently returns nothing, and the only
+# symptom is a reply whose text is a bare filename. This dumps what was actually
+# there so the selector can be fixed from a log line instead of a live session.
+_DOWNLOAD_CANDIDATES_JS = """
+() => {
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn']");
+  const el = turns.length ? turns[turns.length - 1] : document;
+  if (!el || !el.querySelectorAll) return [];
+  const out = [];
+  for (const node of el.querySelectorAll("a, button, [role='button'], [download], [data-testid]")) {
+    const text = (node.innerText || node.textContent || "").trim();
+    if (!text || text.length > 120) continue;
+    out.push({
+      tag: node.tagName,
+      cls: (node.getAttribute("class") || "").slice(0, 120),
+      testid: node.getAttribute("data-testid") || "",
+      role: node.getAttribute("role") || "",
+      href: (node.getAttribute("href") || "").slice(0, 120),
+      text: text.slice(0, 80),
+    });
+  }
+  return out.slice(0, 40);
+}
+"""
+
+
+async def download_candidate_debug(page: Any) -> list[dict[str, str]]:
+    """Diagnostics only — reads the DOM, never drives a download."""
+    try:
+        raw = await page.evaluate(_DOWNLOAD_CANDIDATES_JS)
+    except Exception:
+        return []
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
+
+
 async def has_generated_image(page: Any, min_px: int = 200) -> bool:
     """True if any ChatGPT-generated image is rendered at a real size."""
     return bool(await generated_image_srcs(page, min_px))

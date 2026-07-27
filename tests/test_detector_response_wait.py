@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 import src.browser.detector as detector
 from src.browser.detector import assistant_message_count, wait_for_response_complete
+from src.utils.errors import ErrorCode, RelayError
 
 
 class FakeLocator:
@@ -60,7 +63,7 @@ class FakePage:
     def locator(self, selector: str) -> FakeLocator:
         return FakeLocator(self, selector)
 
-    async def evaluate(self, script: str):
+    async def evaluate(self, script: str, arg: object | None = None):
         # No JS engine in tests -> force rich_assistant_text to fall back to inner_text.
         raise RuntimeError("no evaluate in fake page")
 
@@ -106,6 +109,33 @@ def test_wait_extends_past_soft_timeout_while_progress_changes(monkeypatch):
 
 
 def test_wait_times_out_after_post_soft_deadline_inactivity(monkeypatch):
+    # Nothing claims the reply is still coming — a silent page really is a dead
+    # turn, so the idle deadline applies.
+    clock = FakeClock()
+    page = FakePage(["正在处理"], stop_button=False)
+    monkeypatch.setattr(detector.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(detector.asyncio, "sleep", clock.sleep)
+
+    answer = asyncio.run(
+        wait_for_response_complete(
+            page,
+            timeout_seconds=2,
+            stable_seconds=0,
+            idle_timeout_seconds=2,
+            hard_timeout_seconds=8,
+        )
+    )
+
+    assert answer is None
+    assert clock.now == 4
+
+
+def test_wait_ignores_the_idle_deadline_while_the_stop_button_is_lit(monkeypatch):
+    # ChatGPT goes completely static while it runs code to build a document: text
+    # frozen, stop button lit. Applying the idle deadline there killed document
+    # requests at ~173s while the page went on to finish at 4m49s (2026-07-27).
+    # The stop button is authoritative for "still generating", so only the hard
+    # deadline may end this.
     clock = FakeClock()
     page = FakePage(["正在处理"], stop_button=True)
     monkeypatch.setattr(detector.time, "monotonic", clock.monotonic)
@@ -122,7 +152,7 @@ def test_wait_times_out_after_post_soft_deadline_inactivity(monkeypatch):
     )
 
     assert answer is None
-    assert clock.now == 4
+    assert clock.now == 8  # rode to the hard cap instead of dying at 4
 
 
 def test_wait_hard_timeout_wins_even_with_continuous_progress(monkeypatch):
@@ -520,3 +550,33 @@ def test_wait_holds_for_stopped_thinking_ui_state():
     answer = asyncio.run(wait_for_response_complete(page, timeout_seconds=1, stable_seconds=0, previous_count=0))
 
     assert answer is None
+
+
+def test_wait_fails_fast_on_chatgpt_generation_error_banner(monkeypatch):
+    # ChatGPT can abandon a turn with its own "Something went wrong" banner.
+    # Nothing else marks the turn as over, so before this the request burned the
+    # whole timeout and then reported RESPONSE_TIMEOUT, pointing the investigation
+    # at the wrong component.
+    clock = FakeClock()
+    page = FakePage(["正在处理"], stop_button=True)
+    monkeypatch.setattr(detector.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(detector.asyncio, "sleep", clock.sleep)
+
+    async def banner(_page):
+        return "Something went wrong while generating the response."
+
+    monkeypatch.setattr(detector, "generation_error_text", banner)
+
+    with pytest.raises(RelayError) as excinfo:
+        asyncio.run(
+            wait_for_response_complete(
+                page,
+                timeout_seconds=2,
+                stable_seconds=0,
+                idle_timeout_seconds=2,
+                hard_timeout_seconds=8,
+            )
+        )
+
+    assert excinfo.value.code is ErrorCode.GENERATION_FAILED
+    assert clock.now == 0  # caught on the first poll, not after the timeout

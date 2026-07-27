@@ -8,6 +8,7 @@ from typing import Any
 from src.browser import selectors
 from src.browser.file_download import DownloadTarget, parse_download_targets
 from src.browser.human import idle_mouse_movement
+from src.utils.errors import ErrorCode, RelayError
 
 # Grace fallback for a residual .result-streaming class that lingers with NO stop
 # button: if the reply text has been stable this many seconds beyond stable_seconds
@@ -161,6 +162,40 @@ async def mark_existing_reply_media(page: Any) -> None:
         await page.evaluate(_MARK_EXISTING_REPLY_MEDIA_JS)
     except Exception:
         pass
+
+
+# Only a banner inside or after the LAST turn belongs to the request in flight —
+# an older failed turn stays in the thread forever and would fail every future
+# request if matched.
+_GENERATION_ERROR_JS = """
+(needles) => {
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn']");
+  const last = turns.length ? turns[turns.length - 1] : null;
+  const nodes = document.querySelectorAll(
+    "[data-testid='regenerate-thread-error-button'], div[class*='text-token-text-error'], div[role='alert']"
+  );
+  for (const node of nodes) {
+    const text = (node.innerText || node.textContent || "").trim();
+    if (!text) continue;
+    const low = text.toLowerCase();
+    if (!needles.some((n) => low.includes(n))) continue;
+    if (last && !last.contains(node)) {
+      const after = last.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING;
+      if (!after) continue;
+    }
+    return text.slice(0, 200);
+  }
+  return null;
+}
+"""
+
+
+async def generation_error_text(page: Any) -> str | None:
+    """ChatGPT's own "generation failed" banner for the current turn, or None."""
+    try:
+        return await page.evaluate(_GENERATION_ERROR_JS, list(selectors.GENERATION_ERROR_TEXTS))
+    except Exception:
+        return None
 
 
 async def generated_file_targets(page: Any) -> list[DownloadTarget]:
@@ -790,6 +825,15 @@ async def wait_for_response_complete(
 
     while time.monotonic() < hard_deadline:
         now = time.monotonic()
+        # ChatGPT can abandon a turn with its own error banner. Nothing else marks
+        # the turn as over, so without this the request waits out the full timeout
+        # and reports a misleading RESPONSE_TIMEOUT.
+        banner = await generation_error_text(page)
+        if banner:
+            raise RelayError(
+                ErrorCode.GENERATION_FAILED,
+                f"ChatGPT failed to generate a response: {banner}",
+            )
         current_count = await assistant_message_count(page)
         current = await rich_assistant_text(page)
         streaming = await any_selector_found(page, selectors.STREAMING_INDICATOR)
@@ -866,7 +910,15 @@ async def wait_for_response_complete(
             if not stop_button and stable_for >= stable_seconds + STUCK_GRACE_SECONDS:
                 return current
 
-        if now >= soft_deadline:
+        # A silent stretch only means a dead turn when nothing claims the reply is
+        # still being produced. ChatGPT goes completely static while it runs code
+        # to build a document — text frozen, stop button lit, signature unchanged —
+        # so a document request reliably died here at soft_deadline + idle_timeout
+        # (~173s observed 2026-07-27) while the page went on to finish at 4m49s.
+        # The completion branch above already treats the stop button as the
+        # authoritative "still generating" signal; honour it here too and leave
+        # hard_deadline as the ceiling for a genuinely wedged turn.
+        if now >= soft_deadline and not generating:
             idle_window_started = max(last_progress_at, soft_deadline)
             if now - idle_window_started >= max(0, idle_timeout_seconds):
                 return None

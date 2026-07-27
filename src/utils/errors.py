@@ -10,6 +10,10 @@ class ErrorCode(str, Enum):
     SEND_BUTTON_NOT_FOUND = "SEND_BUTTON_NOT_FOUND"
     RESPONSE_TIMEOUT = "RESPONSE_TIMEOUT"
     RESPONSE_EMPTY = "RESPONSE_EMPTY"
+    # ChatGPT itself failed to generate ("Something went wrong…" banner + Retry).
+    # Distinct from RESPONSE_TIMEOUT: the turn is over and retrying may work,
+    # whereas a timeout means we stopped watching a reply that was still coming.
+    GENERATION_FAILED = "GENERATION_FAILED"
     SELECTOR_FAILED = "SELECTOR_FAILED"
     BROWSER_NOT_STARTED = "BROWSER_NOT_STARTED"
     BUSY = "BUSY"

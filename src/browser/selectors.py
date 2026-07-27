@@ -97,8 +97,27 @@ MODE_MENU_ITEM = [
 ]
 
 
+# ChatGPT's own "generation failed" banner ("Something went wrong while
+# generating the response…", with a Retry button). Nothing else on the page
+# reports this — the turn simply never completes — so without matching it the
+# request burns the full timeout before failing with a misleading RESPONSE_TIMEOUT.
+GENERATION_ERROR_BANNER = [
+    "[data-testid='regenerate-thread-error-button']",
+    "div[class*='text-token-text-error']",
+    "div[role='alert']",
+]
+# Only text matching this is treated as the banner — the selectors above can also
+# match unrelated inline warnings.
+GENERATION_ERROR_TEXTS = (
+    "something went wrong while generating",
+    "生成回复时出错",
+    "生成响应时出现问题",
+)
+
+
 SELECTOR_GROUPS = {
     "CHAT_INPUT": CHAT_INPUT,
+    "GENERATION_ERROR_BANNER": GENERATION_ERROR_BANNER,
     "SEND_BUTTON": SEND_BUTTON,
     "FILE_INPUT": FILE_INPUT,
     "ATTACHMENT_PREVIEW": ATTACHMENT_PREVIEW,

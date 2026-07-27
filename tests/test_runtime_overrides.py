@@ -51,3 +51,17 @@ def test_runtime_override_corrupt_json_is_safe(tmp_path):
     s = Settings(browser_profile_dir=tmp_path)
     out = _apply_runtime_overrides(s)
     assert out.chat_timeout_seconds == 120
+
+
+def test_runtime_override_routing_backend_url(tmp_path):
+    (tmp_path / "runtime.json").write_text(
+        json.dumps({"routing_backend_url": "http://172.17.0.1:18020"}),
+        encoding="utf-8",
+    )
+    s = Settings(
+        browser_profile_dir=tmp_path,
+        routing_backend_url="https://hydwang.xyz",
+    )
+    out = _apply_runtime_overrides(s)
+    assert out.routing_backend_url == "http://172.17.0.1:18020"
+    assert s.routing_backend_url == "https://hydwang.xyz"

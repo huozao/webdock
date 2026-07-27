@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import threading
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
@@ -49,7 +48,7 @@ def create_app(*, start_browser: bool = True) -> FastAPI:
         # when ALI_ECS_BACKEND_URL/BACKEND_BASE_URL is unset (standalone mode).
         app.state.routing_stop = threading.Event()
         app.state.routing_threads = []
-        backend_url = os.getenv("ALI_ECS_BACKEND_URL") or os.getenv("BACKEND_BASE_URL")
+        backend_url = settings.routing_backend_url
         for puller in build_pullers(backend_url, settings.browser_profile_dir):
             thread = threading.Thread(
                 target=puller.run_forever,

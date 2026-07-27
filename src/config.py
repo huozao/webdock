@@ -55,6 +55,7 @@ class Settings:
     lane_tab_idle_seconds: int = 1200
     test_media_url: str = ""
     media_base_url: str = ""
+    routing_backend_url: str = ""
 
     def ensure_dirs(self) -> None:
         self.browser_profile_dir.mkdir(parents=True, exist_ok=True)
@@ -106,6 +107,11 @@ def get_settings() -> Settings:
         max_concurrent_chats=int(_get("MAX_CONCURRENT_CHATS", "3", env)),
         lane_tab_idle_seconds=int(_get("LANE_TAB_IDLE_SECONDS", "1200", env)),
         media_base_url=_get("MEDIA_BASE_URL", "", env),
+        routing_backend_url=_get(
+            "ALI_ECS_BACKEND_URL",
+            _get("BACKEND_BASE_URL", "", env),
+            env,
+        ),
     )
     settings.ensure_dirs()
     return _apply_runtime_overrides(settings)
@@ -153,7 +159,11 @@ _RUNTIME_OVERRIDE_INT_FIELDS = (
     "response_idle_timeout_seconds",
     "response_hard_timeout_seconds",
 )
-_RUNTIME_OVERRIDE_STR_FIELDS = ("test_media_url", "media_base_url")
+_RUNTIME_OVERRIDE_STR_FIELDS = (
+    "test_media_url",
+    "media_base_url",
+    "routing_backend_url",
+)
 
 
 def _apply_runtime_overrides(settings: Settings) -> Settings:

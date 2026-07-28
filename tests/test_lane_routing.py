@@ -227,6 +227,34 @@ def test_scheduler_force_new_with_payload_navigates_to_project(tmp_path):
     assert router.resolve_target_url("u1") == CONV_A2  # recorded the new conversation
 
 
+def test_force_new_does_not_repeat_the_reset_navigation(tmp_path):
+    """The real reset_lane_page already lands its fresh tab on the project URL, so
+    routing must not goto the same URL again — that second full project-page load
+    was ~13s of the 2026-07-28 '30s before the tab opens' report."""
+    router = _router(tmp_path, {"u1": {"project_url": PROJECT_A}})
+    router.record_conversation_url("u1", CONV_A)
+
+    async def ask_func(page, message):
+        page._url = CONV_A2
+        return f"reply:{message}", 0.1
+
+    page = _FakePage(CONV_A)
+
+    class _NavigatingBrowser(_FakeBrowser):
+        async def reset_lane_page(self, lane):
+            self.reset_calls.append(lane.key)
+            await self._page.goto(lane.target_url)  # what manager.reset_lane_page does
+            return self._page
+
+    browser = _NavigatingBrowser(page)
+    scheduler = ChatLaneScheduler(max_concurrent_chats=1, ask_func=ask_func, router=router)
+    lane = LaneContext.from_metadata({"peer_id": "u1"})
+
+    asyncio.run(scheduler.ask(browser, lane, "/新对话 重新开始"))
+
+    assert page.goto_calls == [PROJECT_A]  # exactly one navigation, not two
+
+
 def test_unconfigured_peer_falls_back_without_navigation(tmp_path):
     router = _router(tmp_path, {"u1": {"project_url": PROJECT_A}})
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 
@@ -12,6 +13,8 @@ from src.browser.lane_scheduler import LaneContext
 from src.models.request_models import ChatRequest, OpenAIChatCompletionRequest
 from src.models.response_models import build_openai_models_response, build_openai_response, build_openai_sse_events
 from src.utils.errors import ErrorCode, RelayError, error_response
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -55,6 +58,15 @@ async def openai_chat_completions(
     messages = [msg.model_dump() for msg in body.messages]
     prompt = build_prompt_from_messages(messages)
     images = extract_images_from_messages(messages)
+    # uvicorn's access line is only emitted once the response is done, so arrival
+    # time was unobservable — that blind spot is what made the bridge-side latency
+    # impossible to split (2026-07-28).
+    log.info(
+        "chat request received: request_id=%s prompt_chars=%d images=%d",
+        request.headers.get("X-Request-ID") or "",
+        len(prompt),
+        len(images),
+    )
     if not prompt.strip() and not images:
         raise HTTPException(
             status_code=400,

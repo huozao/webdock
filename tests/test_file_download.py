@@ -83,6 +83,9 @@ class _FakePillPage:
         self.pressed: list[str] = []
         self.selectors: list[str] = []
         self.image_preview_scans = 0
+        # A document pill click opens the preview flyout — that is what makes the
+        # short first download wait safe to give up on.
+        self.flyout_visible = True
         page = self
 
         class _Keyboard:
@@ -115,6 +118,9 @@ class _FakePillPage:
 
             async def click(self, timeout: int = 0) -> None:
                 page.clicked = True
+
+            async def is_visible(self, timeout: int = 0) -> bool:
+                return page.flyout_visible
 
         return _Loc()
 
@@ -195,6 +201,69 @@ class _FakeFlyoutPage(_FakePillPage):
                 return _resolve()
 
         return _Ctx()
+
+
+class _SlowDirectDownloadPage(_FakePillPage):
+    """Document pill that really does download, just slower than the short first
+    wait — and opens no flyout, so giving up early would drop the file."""
+
+    def __init__(self, payload: bytes, download_path) -> None:
+        super().__init__(payload)
+        self.flyout_visible = False
+        self._download_path = download_path
+        self.late_waits = 0
+
+    async def wait_for_event(self, event: str, timeout: int = 0):
+        self.late_waits += 1
+        path = self._download_path
+
+        class _Download:
+            suggested_filename = "report.pdf"
+
+            async def path(self):
+                return path
+
+        return _Download()
+
+
+def test_document_pill_keeps_waiting_when_no_flyout_opened(tmp_path):
+    """The short first wait only exists to detect the flyout case. With no flyout,
+    the remaining budget is still spent on the download we clicked for."""
+    payload = b"S" * 2048
+    downloaded = tmp_path / "report.pdf"
+    downloaded.write_bytes(payload)
+    page = _SlowDirectDownloadPage(payload, downloaded)
+    target = DownloadTarget(kind="button", filename="report.pdf", href=None)
+
+    file = asyncio.run(_download_button(page, target))
+
+    assert page.late_waits == 1
+    assert file is not None
+    assert file.data == payload
+    # No flyout was open, so its download control is never clicked or dismissed.
+    assert not any("close-button" in selector for selector in page.selectors)
+
+
+def test_document_pill_with_flyout_does_not_burn_the_rest_of_the_budget(tmp_path):
+    """With the flyout up, no download event will ever fire — switch to it at once
+    instead of waiting out the full 60s (2026-07-28: 60 of a 224s turn wasted)."""
+    payload = b"D" * 2048
+    downloaded = tmp_path / "report.pdf"
+    downloaded.write_bytes(payload)
+    page = _FakeFlyoutPage(payload, downloaded)
+    late_waits: list[str] = []
+
+    async def _record_wait(event: str, timeout: int = 0):
+        late_waits.append(event)
+        raise TimeoutError("Timeout waiting for event download")
+
+    page.wait_for_event = _record_wait
+
+    file = asyncio.run(_download_button(page, DownloadTarget(kind="button", filename="report.pdf", href=None)))
+
+    assert late_waits == []  # never fell into the remaining-budget wait
+    assert file is not None
+    assert file.data == payload
 
 
 def test_document_pill_downloads_via_preview_flyout(tmp_path):

@@ -183,13 +183,16 @@ class ChatLaneScheduler:
     async def ask(
         self, browser: Any, lane: LaneContext, message: str, images: list[str] | None = None
     ) -> ChatResult:
+        received_at = time.monotonic()
         force_new, clean_message = parse_new_conversation_trigger(message)
         lane = self._resolve_lane(lane, force_new=force_new)
 
         lane_lock = await self._get_lane_lock(lane.key)
         async with lane_lock:
-            self._lane_last_active[lane.key] = time.monotonic()
+            locked_at = time.monotonic()
+            self._lane_last_active[lane.key] = locked_at
             async with self._account_semaphore:
+                slot_at = time.monotonic()
                 # "/新对话" with no payload: just drop the saved conversation so the
                 # next real message opens a fresh chat in the project. No round-trip.
                 reset_page = None
@@ -204,8 +207,24 @@ class ChatLaneScheduler:
                     )
                     return ChatResult(NEW_CONVERSATION_ACK, 0.0, lane)
 
+                reset_at = time.monotonic()
                 page = reset_page or await _page_for_lane(browser, lane)
+                page_at = time.monotonic()
                 await self._route_page(page, lane.target_url, force_new=force_new)
+                # The gap between "request arrived" and "we can start typing" is
+                # invisible in the access log (uvicorn only logs on response) and
+                # was the bulk of the 2026-07-28 latency report — keep it measured.
+                log.info(
+                    "lane %s ready in %.1fs (lock=%.1f slot=%.1f reset=%.1f page=%.1f route=%.1f force_new=%s)",
+                    lane.key,
+                    time.monotonic() - received_at,
+                    locked_at - received_at,
+                    slot_at - locked_at,
+                    reset_at - slot_at,
+                    page_at - reset_at,
+                    time.monotonic() - page_at,
+                    force_new,
+                )
                 if images:
                     # Attach the inbound image(s) to this lane's composer so the
                     # text that follows edits/answers about them in one turn.
@@ -297,7 +316,13 @@ class ChatLaneScheduler:
         if not (force_new or current != target_url):
             return
         try:
-            await page.goto(target_url, wait_until="domcontentloaded")
+            # A force_new reset already navigated its fresh tab to target_url
+            # (reset_lane_page -> _navigate_lane_page). Re-issuing the same goto
+            # paid a second full project-page load (~13s measured 2026-07-28), so
+            # only navigate when the tab isn't already there; the editor wait
+            # below still gates on the page being usable.
+            if current != target_url:
+                await page.goto(target_url, wait_until="domcontentloaded")
             await find_first(page, selectors.CHAT_INPUT, visible=True, timeout_ms=ROUTE_INPUT_TIMEOUT_MS)
         except Exception as exc:  # navigation failure must not block the chat
             log.warning("Lane routing navigation to %s failed: %s", target_url, exc)

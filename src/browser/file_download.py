@@ -47,6 +47,12 @@ MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
 # because every attempt timed out). Images are unaffected — they keep the short
 # wait because their pill opens a preview instead of downloading at all.
 DOCUMENT_DOWNLOAD_TIMEOUT_MS = 60000
+# ...but the common case is the pill opening the preview flyout, where no download
+# event EVER fires, so waiting the full budget burned 60s of the reply's deadline
+# for nothing (2026-07-28: a docx turn spent 60 of its 224s here). Give the direct
+# download a short first look; if the flyout is up, switch to it immediately, and
+# if it isn't, keep waiting out the rest of the budget for a genuinely slow file.
+DOCUMENT_PILL_DOWNLOAD_TIMEOUT_MS = 10000
 # The document preview flyout ChatGPT opens when a generated-file pill is clicked.
 # Its own download control is what actually produces the file. Both the container
 # testid and the localized labels are matched — the UI language follows the
@@ -192,7 +198,9 @@ async def _download_button(page: object, target: DownloadTarget) -> DownloadedFi
     # don't pay the full download wait before capturing the preview.
     is_image = Path(target.filename).suffix.lower() in IMAGE_FILE_EXTENSIONS
     try:
-        async with page.expect_download(timeout=4000 if is_image else DOCUMENT_DOWNLOAD_TIMEOUT_MS) as download_info:
+        async with page.expect_download(
+            timeout=4000 if is_image else DOCUMENT_PILL_DOWNLOAD_TIMEOUT_MS
+        ) as download_info:
             await page.locator("button").filter(has_text=target.filename).first.click(timeout=5000)
         download = await download_info.value
     except Exception as exc:
@@ -208,8 +216,41 @@ async def _download_button(page: object, target: DownloadTarget) -> DownloadedFi
             return await _capture_preview_image(page, target)
         # A document pill opens ChatGPT's preview flyout (observed 2026-07-27) —
         # the flyout carries its own download control.
+        if await _preview_flyout_visible(page):
+            return await _download_from_preview_flyout(page, target)
+        # No flyout: this pill is a direct download that is merely slow, so spend
+        # the rest of the original budget on the event we already armed the click for.
+        pending = await _await_pending_download(
+            page, DOCUMENT_DOWNLOAD_TIMEOUT_MS - DOCUMENT_PILL_DOWNLOAD_TIMEOUT_MS
+        )
+        if pending is not None:
+            return await _read_download(pending, target)
         return await _download_from_preview_flyout(page, target)
     return await _read_download(download, target)
+
+
+async def _preview_flyout_visible(page: object) -> bool:
+    """Is ChatGPT's document preview flyout on screen? Decides whether a pill click
+    that produced no download opened the preview (use its own control) or is just a
+    slow direct download (keep waiting)."""
+    for container in _PREVIEW_FLYOUT_CONTAINERS:
+        try:
+            if await page.locator(container).first.is_visible(timeout=1000):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _await_pending_download(page: object, timeout_ms: int) -> object | None:
+    """Wait out the remaining download budget after the short first look expired.
+    The click already happened, so a late download event still lands here."""
+    if timeout_ms <= 0:
+        return None
+    try:
+        return await page.wait_for_event("download", timeout=timeout_ms)
+    except Exception:
+        return None
 
 
 async def _download_from_preview_flyout(

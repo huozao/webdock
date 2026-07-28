@@ -30,6 +30,19 @@ ChatGPT 登录与 Cloudflare 验证必须人工在 noVNC 完成，自动化必�
 | 多图请求后全线卡死 | 单 worker 被堵（142-153s/13图）；healthz 假绿 | 等释放或重启容器；车道隔离测试须测对车道 |
 | webdock2 整机失联 | WSL 是否活：容器 Up 时长 < 命令年龄 = 假活 | 保活任务已改开机+S4U+`wsl sleep infinity` 常驻（07-12） |
 
+## 发送前耗时：看 `send_stages`
+
+每次发送后 `api.log` 打一行，把"请求到达 → 文字进输入框"拆开：
+
+```
+send_stages total=2.39s login=0.19 flyout=0.01 input=0.01 mode=0.03 snapshot=0.09 type_delay=0.96 paste=0.20 send_btn=0.01 click=0.90
+```
+
+- 稳态基线（页面已热）：`total≈2.4s`，其中拟人延迟 `type_delay`+`click` 约 1.8s 是有意的反自动化特征，**不要为了提速去压**。
+- 冷页面（`lane ready` 里 `page=` 有秒数，新开会话）：`total≈4.7s`，多出来的主要在 `mode` 和 `input`——composer 比输入框还晚渲染，等它是应该的。
+- ⚠️ `mode` 曾经稳定占 6.02s：`ensure_mode` 把三个带文案的候选逐个探、每个各等满 2s，而多数时候只是确认模式已经对了。现在只问无文案的胶囊本体（`MODE_PICKER_BUTTON_ANY`）一次，命中即返回（07-28，`cdca628`）。
+- ⛔ 那次超时预算不能再往下压：一度压到 2s，新开会话时胶囊来不及渲染 → `mode_switch_failed stage=button`，**模式静默没切成**。这比慢几秒严重得多，6000ms 是"等页面"的余量而不是浪费。
+
 ## 排障工具
 
 - CDP 旁路：patchright `connect_over_cdp` 容器 `:9222` dump DOM。**⚠️ 9222 是 ChatGPT 生产实例别乱动**（webdock2 上 9223 是另一独立 Chrome）。

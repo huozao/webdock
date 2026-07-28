@@ -44,6 +44,11 @@ MODE_TARGET_LABELS: dict[str, tuple[str, ...]] = {
     "balanced": ("均衡", "Auto", "Balanced", "Medium"),
     "advanced": ("高级", "Thinking", "Advanced", "High"),
 }
+# 任一已知模式文案——用来确认无文案选择器拿到的确实是模式胶囊，而不是 composer
+# 上别的 aria-haspopup 按钮。
+ALL_MODE_LABELS: tuple[str, ...] = tuple(
+    label for labels in MODE_TARGET_LABELS.values() for label in labels
+)
 
 # ChatGPT renders rich widgets (clock / weather / stock cards) in a container
 # whose class contains "WidgetRenderer" (and is marked not-markdown). Their text
@@ -152,6 +157,29 @@ class ChatGPTPage:
         self._media_store = media_store
         self._channel = channel
 
+    async def _mode_picker_state(self) -> tuple[str | None, str]:
+        """(选择器, 胶囊当前文本)。
+
+        校准模式真正需要的只是"那颗胶囊现在写着什么"。旧写法把三个带文案的候选
+        交给 find_first 逐个探，每个各等满 2s，落空两次就是 4s 白烧——2026-07-28
+        实测这一步稳定占 6.0s，是发送前最大的一段。改为先用无文案的胶囊本体问一次；
+        只有它落空、或读回的文本不像模式胶囊时，才回退到带文案的候选。
+        """
+        selector = await find_first(
+            self.page, [selectors.MODE_PICKER_BUTTON_ANY], visible=True, timeout_ms=2000
+        )
+        if selector:
+            text = await self.page.locator(selector).first.inner_text(timeout=1500) or ""
+            if any(label in text for label in ALL_MODE_LABELS):
+                return selector, text
+        # 兜底：页面换了文案或胶囊本体选不中，退回逐个候选（此时慢一点无所谓）。
+        selector = await find_first(
+            self.page, selectors.MODE_PICKER_BUTTON[:-1], visible=True, timeout_ms=800
+        )
+        if not selector:
+            return None, ""
+        return selector, await self.page.locator(selector).first.inner_text(timeout=1500) or ""
+
     async def ensure_mode(self, target: str) -> None:
         """发送前把页面的对话模式选择器校准到 target（fast/balanced/advanced）。
 
@@ -163,14 +191,11 @@ class ChatGPTPage:
         if not labels:
             return
         try:
-            button = await find_first(
-                self.page, selectors.MODE_PICKER_BUTTON, visible=True, timeout_ms=2000
-            )
+            button, current = await self._mode_picker_state()
             if not button:
                 log.warning("mode_switch_failed stage=button target=%s", target)
                 return
-            current = await self.page.locator(button).first.inner_text(timeout=1500)
-            if any(label in (current or "") for label in labels):
+            if any(label in current for label in labels):
                 return
             await hover_and_click(self.page, button)
             item = None

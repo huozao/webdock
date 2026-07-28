@@ -81,11 +81,15 @@ LOGIN_INDICATORS = [
 # data-testid/aria-label，靠 __composer-pill 类 + aria-haspopup + 当前模式文本
 # 锚定；按钮文本 = 当前模式。前三个候选同时确认了"这就是模式胶囊"；最后一个
 # 是 UI 文案变动时的宽松兜底。
+# 无文案约束的胶囊本体。ensure_mode 先用它问一次"现在写着什么"，带文案的候选
+# 只在它落空时兜底——逐个候选各等满一轮超时曾是发送前最大的一段固定开销
+# （2026-07-28 实测 6.0s/条，且多数时候只是确认模式已经对了）。
+MODE_PICKER_BUTTON_ANY = "button[aria-haspopup='menu'][class*='__composer-pill']"
 MODE_PICKER_BUTTON = [
     "button[aria-haspopup='menu'][class*='__composer-pill']:has-text('极速')",
     "button[aria-haspopup='menu'][class*='__composer-pill']:has-text('均衡')",
     "button[aria-haspopup='menu'][class*='__composer-pill']:has-text('高级')",
-    "button[aria-haspopup='menu'][class*='__composer-pill']",
+    MODE_PICKER_BUTTON_ANY,
 ]
 
 # 真机菜单项是 menuitemradio(极速/均衡/高级, aria-checked 标当前)；GPT-5.5

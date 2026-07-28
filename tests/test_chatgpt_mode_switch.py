@@ -44,6 +44,7 @@ class FakePage:
         self.texts = dict(texts)
         self.clicks = []
         self.pressed = []
+        self.waits = []
         self.keyboard = FakeKeyboard(self)
         self._on_click = on_click or (lambda selector: None)
 
@@ -51,6 +52,7 @@ class FakePage:
         self._on_click(selector)
 
     async def wait_for_selector(self, selector, state="attached", timeout=None):
+        self.waits.append(selector)
         if selector in self.present:
             return object()
         raise TimeoutError(selector)
@@ -117,4 +119,43 @@ def test_ensure_mode_missing_menu_item_escapes_and_continues():
 def test_ensure_mode_none_target_is_noop():
     page = FakePage(present={BUTTON}, texts={BUTTON: "高级"})
     asyncio.run(ChatGPTPage(page).ensure_mode(""))
+    assert page.clicks == []
+
+
+ANY_BUTTON = selectors.MODE_PICKER_BUTTON_ANY
+
+
+def test_ensure_mode_asks_the_pill_once_when_it_answers():
+    # 每个带文案的候选各等满一轮超时，2026-07-28 实测稳定烧掉 6s；胶囊本体能直接
+    # 回答"现在是什么模式"时，一次探测就该结束。
+    page = FakePage(present={ANY_BUTTON}, texts={ANY_BUTTON: "高级"})
+
+    asyncio.run(ChatGPTPage(page).ensure_mode("advanced"))
+
+    assert page.waits == [ANY_BUTTON]
+    assert page.clicks == []
+
+
+def test_ensure_mode_still_switches_through_the_bare_pill():
+    item = f"{selectors.MODE_MENU_ITEM[0]}:has-text('极速')"
+
+    def on_click(selector):
+        if selector == item:
+            page.texts[ANY_BUTTON] = "极速"
+
+    page = FakePage(present={ANY_BUTTON, item}, texts={ANY_BUTTON: "高级"}, on_click=on_click)
+
+    asyncio.run(ChatGPTPage(page).ensure_mode("fast"))
+
+    assert page.clicks == [ANY_BUTTON, item]
+
+
+def test_ensure_mode_falls_back_when_the_bare_pill_is_not_the_mode_pill():
+    # composer 上还有别的 aria-haspopup 按钮时，文本不像模式文案，必须退回带文案的候选。
+    page = FakePage(present={ANY_BUTTON, BUTTON}, texts={ANY_BUTTON: "工具", BUTTON: "极速"})
+
+    asyncio.run(ChatGPTPage(page).ensure_mode("fast"))
+
+    assert page.waits[0] == ANY_BUTTON
+    assert BUTTON in page.waits
     assert page.clicks == []

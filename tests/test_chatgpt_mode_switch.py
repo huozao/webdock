@@ -45,6 +45,7 @@ class FakePage:
         self.clicks = []
         self.pressed = []
         self.waits = []
+        self.wait_timeouts = {}
         self.keyboard = FakeKeyboard(self)
         self._on_click = on_click or (lambda selector: None)
 
@@ -53,6 +54,7 @@ class FakePage:
 
     async def wait_for_selector(self, selector, state="attached", timeout=None):
         self.waits.append(selector)
+        self.wait_timeouts[selector] = timeout
         if selector in self.present:
             return object()
         raise TimeoutError(selector)
@@ -159,3 +161,14 @@ def test_ensure_mode_falls_back_when_the_bare_pill_is_not_the_mode_pill():
     assert page.waits[0] == ANY_BUTTON
     assert BUTTON in page.waits
     assert page.clicks == []
+
+
+def test_ensure_mode_gives_a_slow_page_room_to_render_the_pill():
+    # 新开会话时 composer 比输入框还晚渲染。2026-07-28 曾把这里的余量压到 2s，
+    # 慢页面直接 mode_switch_failed —— 模式静默没切成，比慢几秒严重得多。
+    page = FakePage(present={ANY_BUTTON}, texts={ANY_BUTTON: "高级"})
+
+    asyncio.run(ChatGPTPage(page).ensure_mode("advanced"))
+
+    assert page.waits == [ANY_BUTTON]
+    assert page.wait_timeouts[ANY_BUTTON] >= 6000

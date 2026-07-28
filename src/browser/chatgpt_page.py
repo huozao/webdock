@@ -162,19 +162,23 @@ class ChatGPTPage:
 
         校准模式真正需要的只是"那颗胶囊现在写着什么"。旧写法把三个带文案的候选
         交给 find_first 逐个探，每个各等满 2s，落空两次就是 4s 白烧——2026-07-28
-        实测这一步稳定占 6.0s，是发送前最大的一段。改为先用无文案的胶囊本体问一次；
-        只有它落空、或读回的文本不像模式胶囊时，才回退到带文案的候选。
+        实测这一步稳定占 6.0s，是发送前最大的一段。改为只问无文案的胶囊本体。
+
+        这里的超时既是"等页面"的余量，也是唯一一次超时开销：胶囊已经在时几十毫秒
+        就返回，只有新开会话（页面刚导航，composer 比输入框还晚渲染）才真的等满。
+        余量不能砍——2026-07-28 一度压到 2s，慢页面直接 mode_switch_failed，模式
+        静默没切成，这比慢几秒严重得多。
         """
         selector = await find_first(
-            self.page, [selectors.MODE_PICKER_BUTTON_ANY], visible=True, timeout_ms=2000
+            self.page, [selectors.MODE_PICKER_BUTTON_ANY], visible=True, timeout_ms=6000
         )
         if selector:
             text = await self.page.locator(selector).first.inner_text(timeout=1500) or ""
             if any(label in text for label in ALL_MODE_LABELS):
                 return selector, text
-        # 兜底：页面换了文案或胶囊本体选不中，退回逐个候选（此时慢一点无所谓）。
+        # 兜底：页面换了文案或胶囊本体选不中，退回逐个候选。
         selector = await find_first(
-            self.page, selectors.MODE_PICKER_BUTTON[:-1], visible=True, timeout_ms=800
+            self.page, selectors.MODE_PICKER_BUTTON[:-1], visible=True, timeout_ms=1500
         )
         if not selector:
             return None, ""

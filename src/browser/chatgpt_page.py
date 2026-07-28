@@ -195,6 +195,17 @@ class ChatGPTPage:
         except Exception as exc:
             log.warning("mode_switch_failed stage=exception target=%s error=%s", target, exc)
 
+    @staticmethod
+    def _log_send_stages(started: float, marks: list[tuple[str, float]]) -> None:
+        """发送前每一步的耗时。从"收到请求"到"文字进输入框"这段此前没有任何日志，
+        2026-07-28 的 9s 延迟报告卡在这里无法归因——lane ready 之后就是黑盒。"""
+        parts: list[str] = []
+        previous = started
+        for name, at in marks:
+            parts.append(f"{name}={at - previous:.2f}")
+            previous = at
+        log.info("send_stages total=%.2fs %s", previous - started, " ".join(parts))
+
     async def ask(
         self,
         message: str,
@@ -213,14 +224,17 @@ class ChatGPTPage:
             else settings.response_hard_timeout_seconds
         )
         started = time.monotonic()
+        marks: list[tuple[str, float]] = []
         try:
             if await any_selector_found(self.page, selectors.LOGIN_INDICATORS):
                 raise RelayError(
                     ErrorCode.NOT_LOGGED_IN,
                     "ChatGPT is not logged in. Open noVNC and sign in manually.",
                 )
+            marks.append(("login", time.monotonic()))
 
             await dismiss_stale_preview_flyout(self.page)
+            marks.append(("flyout", time.monotonic()))
 
             input_selector = await find_first(self.page, selectors.CHAT_INPUT, visible=True, timeout_ms=2500)
             if not input_selector:
@@ -228,8 +242,10 @@ class ChatGPTPage:
                     ErrorCode.CHAT_INPUT_NOT_FOUND,
                     "Cannot find ChatGPT input box. Open noVNC to inspect the page.",
                 )
+            marks.append(("input", time.monotonic()))
             if mode:
                 await self.ensure_mode(mode)
+            marks.append(("mode", time.monotonic()))
             previous_assistant_count = await assistant_message_count(self.page)
             previous_assistant_text = await rich_assistant_text(self.page)
             previous_image_srcs = await generated_image_srcs(self.page)
@@ -238,8 +254,10 @@ class ChatGPTPage:
             # image's signed estuary URL after the next prompt.  Mark the current
             # DOM so all subsequent image scans are restricted to the new turn.
             await mark_existing_reply_media(self.page)
+            marks.append(("snapshot", time.monotonic()))
 
             await random_delay(settings.before_type_delay_min_ms, settings.before_type_delay_max_ms)
+            marks.append(("type_delay", time.monotonic()))
             await paste_text(
                 self.page,
                 input_selector,
@@ -247,6 +265,7 @@ class ChatGPTPage:
                 delay_min_ms=settings.typing_delay_min_ms,
                 delay_max_ms=settings.typing_delay_max_ms,
             )
+            marks.append(("paste", time.monotonic()))
 
             send_selector = await find_first(self.page, selectors.SEND_BUTTON, visible=True, timeout_ms=2500)
             if not send_selector:
@@ -254,8 +273,11 @@ class ChatGPTPage:
                     ErrorCode.SEND_BUTTON_NOT_FOUND,
                     "Cannot find ChatGPT send button. Open noVNC to inspect the page.",
                 )
+            marks.append(("send_btn", time.monotonic()))
             await random_delay(settings.before_send_delay_min_ms, settings.before_send_delay_max_ms)
             await hover_and_click(self.page, send_selector)
+            marks.append(("click", time.monotonic()))
+            self._log_send_stages(started, marks)
 
             answer = await wait_for_response_complete(
                 self.page,

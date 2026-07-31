@@ -16,10 +16,14 @@ ChatGPT 登录与 Cloudflare 验证必须人工在 noVNC 完成，完成前自�
 ## 排障入口
 
 - 浏览器/登录态/回复截断/图改图 → `docs/runbooks/browser.md`
-- 主备判定：以 aliecs `/etc/default/webdock-failover-proxy` 为准，经 `127.0.0.1:11800` 探测时看响应头 `X-Webdock-Device`。
+- 主备判定：先从 `../AliECS/docs/fleet.md` 确认当前 business-cn 主机，再核对该机 `/etc/default/webdock-failover-proxy` 与 `127.0.0.1:11800/healthz` 的 `X-Webdock-Device`；不得固定写死服务器名。
 - 消息存档：各机 `/var/log/webdock/archive/<UTC日期>.jsonl`，每对话一行。
 
 ## 修改边界
 
 - 不动 `browser_data/`（浏览器登录态）、`photo_storage/`、`logs/`、`runtime/`。
 - webdock2 上执行 Linux 命令须 `wsl -d Ubuntu-24.04-WebDock -- <cmd>`；直连 18000 是 502 属正常（走隧道）。
+
+## 文档闭环
+
+代码或配置验证通过后必须回查浏览器 runbook、README、接口、环境变量、部署和恢复步骤。提交带 `Nav-Impact: updated`，或同时带 `Nav-Impact: none` 与 `Nav-Impact-Reason: <依据>`；直推 main 的 CI 只能事后发现缺失 trailer，不代表阻止了该次推送。

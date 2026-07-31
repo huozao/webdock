@@ -1,6 +1,8 @@
 name: ci
 
 on:
+  push:
+    branches: [main]
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
@@ -13,10 +15,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Navigation and red-green checks
+        run: |
+          python scripts/check_navigation.py
+          python -m unittest discover -s tests -p "test_*navigation*.py"
+          python -m unittest discover -s tests -p test_nav_impact.py
+
+      - name: Check push commit trailers
+        if: github.event_name == 'push'
+        run: python scripts/check_nav_impact.py --range "${{ github.event.before }}" "${{ github.sha }}"
+
+      - name: Check pull request commit trailers
+        if: github.event_name == 'pull_request'
+        run: python scripts/check_nav_impact.py --range "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
 
       - name: Install dependencies
         run: pip install -r requirements.txt

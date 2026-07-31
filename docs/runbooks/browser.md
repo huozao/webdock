@@ -56,11 +56,11 @@ send_stages total=2.39s login=0.19 flyout=0.01 input=0.01 mode=0.03 snapshot=0.0
 | 层 | 位置 | 值 | 备注 |
 |---|---|---|---|
 | bridge → proxy | `openclaw_bridge.py::webdock_timeout()` | 1260s | 最宽松，几乎不触发 |
-| failover-proxy | aliecs `/opt/aliecs/webdock-failover-proxy.py:30` | **320s** | ← **真实天花板**，socket timeout |
+| failover-proxy | 当前 business-cn 主机的受管 failover-proxy（位置查 fleet/infra） | **320s** | ← **真实天花板**，socket timeout |
 | WebDock hard cap | `runtime.json::request_hard_cap_seconds` | 1200s（07-27 前是代码默认 310s） | 抬高后仍被上面的 320s 压住 |
 
 - ⚠️ `response_hard_timeout_seconds` 看着像总上限，其实**从未生效**：scheduler 总是传 `max(effective_timeout, request_hard_cap_seconds)`，只有它不传时那个值才会被用到。要改上限就改 `request_hard_cap_seconds`。
-- ⚠️ 310/320 这组数字是腾讯云迁移方案的门禁项（`infra/docs/plans/2026-07-24-tencent-migration.md` 第八节："主备尝试共享一个 320s 总 deadline，不得各自重新获得完整超时预算"）。**要让长任务真正突破 320s，必须同时抬 failover-proxy 并与该方案对齐**，只改 WebDock 一侧无效。
+- ⚠️ 主备尝试共享一个 320s 总 deadline，不得各自重新获得完整超时预算。**要让长任务真正突破 320s，必须同时修改受管 failover-proxy 声明并做生产链路验证**，只改 WebDock 一侧无效；历史迁移计划不是当前事实源。
 - 实测参考：生成一份 3 页 Word ≈ 289s（`Worked for 4m 49s`），已经贴着 320s。
 
 ## 部署

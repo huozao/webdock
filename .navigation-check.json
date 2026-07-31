@@ -1,0 +1,23 @@
+{
+  "documents": [
+    "AGENTS.md",
+    "README.md",
+    "docs/runbooks/browser.md",
+    "docs/ubuntu-laptop-setup.md",
+    "docs/tailscale-network.md",
+    "docs/openclaw-integration.md",
+    "docs/operations.md"
+  ],
+  "paths": [
+    "src/main.py",
+    "scripts/healthcheck.sh",
+    "scripts/install-ubuntu.sh",
+    "deploy/laptop",
+    "docs/runbooks/browser.md"
+  ],
+  "python_symbols": [
+    {"file": "src/main.py", "symbol": "create_app"},
+    {"file": "src/main.py", "symbol": "app"}
+  ],
+  "optional_link_prefixes": ["../AliECS", "../infra"]
+}

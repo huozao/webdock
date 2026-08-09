@@ -68,7 +68,21 @@ jobs:
         with:
           context: .
           push: true
+          sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=webdock
           cache-to: type=gha,mode=max,scope=webdock
+
+      - name: Export queryable SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ghcr.io/${{ github.repository_owner }}/webdock:sha-${{ github.sha }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          format: spdx-json
+          syft-version: v1.50.0
+          artifact-name: sbom-webdock-${{ github.sha }}.spdx.json
+          output-file: sbom-webdock.spdx.json
+          upload-artifact-retention: 30
+          upload-release-assets: false

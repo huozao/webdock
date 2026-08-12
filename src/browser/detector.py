@@ -8,6 +8,7 @@ from typing import Any
 from src.browser import selectors
 from src.browser.file_download import DownloadTarget, parse_download_targets
 from src.browser.human import idle_mouse_movement
+from src.browser.response_lifecycle_probe import observe_detector_state, record_probe_event
 from src.utils.errors import ErrorCode, RelayError
 
 # Grace fallback for a residual .result-streaming class that lingers with NO stop
@@ -830,6 +831,7 @@ async def wait_for_response_complete(
         # and reports a misleading RESPONSE_TIMEOUT.
         banner = await generation_error_text(page)
         if banner:
+            record_probe_event("detector_terminal", reason="generation_error")
             raise RelayError(
                 ErrorCode.GENERATION_FAILED,
                 f"ChatGPT failed to generate a response: {banner}",
@@ -856,6 +858,17 @@ async def wait_for_response_complete(
             actions_ready,
             tuple(current_image_srcs),
             has_widget,
+        )
+        await observe_detector_state(
+            page,
+            stop_present=stop_button,
+            streaming_present=streaming,
+            action_row_present=actions_ready,
+            assistant_count=current_count,
+            generated_image_count=len(current_image_srcs),
+            widget_present=has_widget,
+            image_in_progress=image_in_progress,
+            scaffold_pending=scaffold_pending,
         )
         if last_progress_signature is None:
             last_progress_signature = progress_signature
@@ -900,6 +913,7 @@ async def wait_for_response_complete(
                 # bounded grace, then accept anyway (some terminal states never
                 # render the action row).
                 if actions_ready or stable_for >= stable_seconds + TURN_ACTIONS_GRACE_SECONDS:
+                    record_probe_event("detector_terminal", reason="content_complete")
                     return current
             # The stop button is the authoritative "still generating" signal: it
             # stays present continuously through a preamble→已思考→answer reply
@@ -908,6 +922,7 @@ async def wait_for_response_complete(
             # when the stop button is GONE but a residual .result-streaming class
             # lingers do we treat it as stuck and return after grace.
             if not stop_button and stable_for >= stable_seconds + STUCK_GRACE_SECONDS:
+                record_probe_event("detector_terminal", reason="streaming_grace")
                 return current
 
         # A silent stretch only means a dead turn when nothing claims the reply is
@@ -921,6 +936,7 @@ async def wait_for_response_complete(
         if now >= soft_deadline and not generating:
             idle_window_started = max(last_progress_at, soft_deadline)
             if now - idle_window_started >= max(0, idle_timeout_seconds):
+                record_probe_event("detector_terminal", reason="idle_timeout")
                 return None
 
         if int(now - start) > 0 and int(now - start) % 10 == 0:
@@ -928,6 +944,7 @@ async def wait_for_response_complete(
 
         await asyncio.sleep(1)
 
+    record_probe_event("detector_terminal", reason="hard_timeout")
     return None
 
 

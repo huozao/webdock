@@ -20,6 +20,7 @@ class Settings:
     archive_dir: Path = Path("logs/archive")
     photo_storage_dir: Path = Path("photo_storage")
     archive_enabled: bool = True
+    diagnostic_probe_enabled: bool = False
     chatgpt_url: str = "https://chatgpt.com/"
     chat_timeout_seconds: int = 120
     # Image-bearing turns (reference images and/or image generation) legitimately
@@ -164,6 +165,7 @@ _RUNTIME_OVERRIDE_STR_FIELDS = (
     "media_base_url",
     "routing_backend_url",
 )
+_RUNTIME_OVERRIDE_BOOL_FIELDS = ("diagnostic_probe_enabled",)
 
 
 def _apply_runtime_overrides(settings: Settings) -> Settings:
@@ -186,5 +188,9 @@ def _apply_runtime_overrides(settings: Settings) -> Settings:
     for field in _RUNTIME_OVERRIDE_STR_FIELDS:
         value = data.get(field)
         if isinstance(value, str):
+            overrides[field] = value
+    for field in _RUNTIME_OVERRIDE_BOOL_FIELDS:
+        value = data.get(field)
+        if isinstance(value, bool):
             overrides[field] = value
     return replace(settings, **overrides) if overrides else settings

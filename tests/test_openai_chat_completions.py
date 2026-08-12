@@ -202,6 +202,66 @@ def test_async_job_submit_is_idempotent_by_request_id(monkeypatch):
         assert calls == ["same request"]
 
 
+def test_async_job_rejects_invalid_probe_id(monkeypatch):
+    client, _ = make_client(monkeypatch)
+
+    response = client.post(
+        "/v1/chat/jobs",
+        json={"messages": [{"role": "user", "content": "probe"}]},
+        headers={
+            "Authorization": "Bearer change-me",
+            "X-Request-ID": "req-probe-invalid",
+            "X-Webdock-Probe-ID": "../unsafe",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error_code"] == "INVALID_PROBE_ID"
+
+
+def test_async_job_rejects_probe_when_runtime_switch_is_off(monkeypatch):
+    client, _ = make_client(monkeypatch)
+
+    response = client.post(
+        "/v1/chat/jobs",
+        json={"messages": [{"role": "user", "content": "probe"}]},
+        headers={
+            "Authorization": "Bearer change-me",
+            "X-Request-ID": "req-probe-disabled",
+            "X-Webdock-Probe-ID": "probe-disabled",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["error_code"] == "DIAGNOSTIC_PROBE_DISABLED"
+
+
+def test_probe_id_participates_in_job_idempotency_fingerprint(monkeypatch):
+    from src.api import routes_chat
+
+    monkeypatch.setattr(routes_chat, "diagnostic_probe_enabled", lambda: True)
+    client, _ = make_client(monkeypatch)
+    body = {"messages": [{"role": "user", "content": "probe"}]}
+    base_headers = {
+        "Authorization": "Bearer change-me",
+        "X-Request-ID": "req-probe-conflict",
+    }
+
+    first = client.post(
+        "/v1/chat/jobs",
+        json=body,
+        headers={**base_headers, "X-Webdock-Probe-ID": "probe-one"},
+    )
+    second = client.post(
+        "/v1/chat/jobs",
+        json=body,
+        headers={**base_headers, "X-Webdock-Probe-ID": "probe-two"},
+    )
+
+    assert first.status_code == 202
+    assert second.status_code == 409
+
+
 def test_async_job_rejects_request_id_reuse_with_different_payload(monkeypatch):
     from src.browser import lane_scheduler
 

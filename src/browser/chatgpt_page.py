@@ -32,6 +32,11 @@ from src.browser.feishu_format import feishu_safe_markdown
 from src.browser.file_download import dismiss_stale_preview_flyout, download_chatgpt_file
 from src.browser.human import hover_and_click, paste_text, random_delay
 from src.browser.image_input import resolve_image_inputs
+from src.browser.response_lifecycle_probe import (
+    record_probe_event,
+    start_response_probe,
+    stop_response_probe,
+)
 from src.config import get_settings
 from src.utils.errors import ErrorCode, RelayError
 
@@ -254,6 +259,8 @@ class ChatGPTPage:
         )
         started = time.monotonic()
         marks: list[tuple[str, float]] = []
+        probe = await start_response_probe(self.page)
+        probe_outcome = "error"
         try:
             if await any_selector_found(self.page, selectors.LOGIN_INDICATORS):
                 raise RelayError(
@@ -306,6 +313,7 @@ class ChatGPTPage:
             await random_delay(settings.before_send_delay_min_ms, settings.before_send_delay_max_ms)
             await hover_and_click(self.page, send_selector)
             marks.append(("click", time.monotonic()))
+            record_probe_event("send_clicked")
             self._log_send_stages(started, marks)
 
             answer = await wait_for_response_complete(
@@ -370,13 +378,19 @@ class ChatGPTPage:
                 )
             if not final_answer.strip():
                 raise RelayError(ErrorCode.RESPONSE_EMPTY, "ChatGPT response is empty.")
+            probe_outcome = "completed"
             return final_answer, round(time.monotonic() - started, 3)
+        except asyncio.CancelledError:
+            probe_outcome = "cancelled"
+            raise
         except RelayError as exc:
             exc.debug_dir = await save_debug_dump(self.page, exc)
             raise
         except Exception as exc:
             debug_dir = await save_debug_dump(self.page, exc)
             raise RelayError(ErrorCode.UNKNOWN_ERROR, str(exc), debug_dir=debug_dir) from exc
+        finally:
+            await stop_response_probe(probe, probe_outcome)
 
     async def _append_media_images(
         self, answer: str, media_base_url: str, exclude_image_srcs: set[str], *, capture_widgets: bool = True

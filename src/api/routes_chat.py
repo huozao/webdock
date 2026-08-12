@@ -14,6 +14,12 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from src.browser.image_input import extract_image_urls
 from src.api.chat_jobs import JobCapacityError, JobConflictError
 from src.browser.lane_scheduler import LaneContext
+from src.browser.response_lifecycle_probe import (
+    diagnostic_probe_enabled,
+    response_probe_request,
+    validate_probe_id,
+)
+from src.config import get_settings
 from src.models.request_models import ChatRequest, OpenAIChatCompletionRequest
 from src.models.response_models import build_openai_models_response, build_openai_response, build_openai_sse_events
 from src.utils.errors import ErrorCode, RelayError, error_response
@@ -129,21 +135,44 @@ async def submit_openai_chat_job(
         )
 
     metadata = dict(body.metadata or {})
+    raw_probe_id = str(request.headers.get("X-Webdock-Probe-ID") or "").strip()
+    probe_id: str | None = None
+    if raw_probe_id:
+        probe_id = validate_probe_id(raw_probe_id)
+        if probe_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error_code": "INVALID_PROBE_ID",
+                    "message": "X-Webdock-Probe-ID must match [A-Za-z0-9._-]{1,64}.",
+                },
+            )
+        if not diagnostic_probe_enabled():
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error_code": "DIAGNOSTIC_PROBE_DISABLED",
+                    "message": "The WebDock response lifecycle probe is disabled.",
+                },
+            )
     request_id = str(request.headers.get("X-Request-ID") or metadata.get("request_id") or "").strip()
     if not request_id:
         request_id = uuid.uuid4().hex
     metadata["request_id"] = request_id
+    fingerprint_payload = {"body": body.model_dump(), "probe_id": probe_id or ""}
     fingerprint = hashlib.sha256(
-        json.dumps(body.model_dump(), ensure_ascii=False, sort_keys=True).encode("utf-8")
+        json.dumps(fingerprint_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()
+    probe_output_dir = get_settings().debug_dir.parent / "probes"
 
     async def run() -> dict[str, Any]:
-        result = await _ask_browser(
-            request,
-            prompt,
-            LaneContext.from_metadata(metadata),
-            images=images,
-        )
+        with response_probe_request(probe_id, probe_output_dir):
+            result = await _ask_browser(
+                request,
+                prompt,
+                LaneContext.from_metadata(metadata),
+                images=images,
+            )
         if isinstance(result, JSONResponse):
             detail = json.loads(result.body)
             raise _JobExecutionError(detail if isinstance(detail, dict) else {})

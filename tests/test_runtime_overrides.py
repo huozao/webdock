@@ -19,6 +19,7 @@ def test_runtime_override_chat_timeout(tmp_path):
         json.dumps(
             {
                 "chat_timeout_seconds": 200,
+                "diagnostic_probe_enabled": True,
                 "response_stable_seconds": 6,
                 "response_idle_timeout_seconds": 20,
                 "response_hard_timeout_seconds": 900,
@@ -29,11 +30,24 @@ def test_runtime_override_chat_timeout(tmp_path):
     s = Settings(browser_profile_dir=tmp_path)
     out = _apply_runtime_overrides(s)
     assert out.chat_timeout_seconds == 200
+    assert out.diagnostic_probe_enabled is True
     assert out.response_stable_seconds == 6
     assert out.response_idle_timeout_seconds == 20
     assert out.response_hard_timeout_seconds == 900
     # original frozen instance is untouched
     assert s.chat_timeout_seconds == 120
+    assert s.diagnostic_probe_enabled is False
+
+
+def test_runtime_override_probe_flag_requires_boolean(tmp_path):
+    (tmp_path / "runtime.json").write_text(
+        json.dumps({"diagnostic_probe_enabled": "true"}),
+        encoding="utf-8",
+    )
+
+    out = _apply_runtime_overrides(Settings(browser_profile_dir=tmp_path))
+
+    assert out.diagnostic_probe_enabled is False
 
 
 def test_runtime_override_ignores_unknown_and_bad_values(tmp_path):

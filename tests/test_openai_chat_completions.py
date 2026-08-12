@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from src.api.routes_chat import build_prompt_from_messages
+from src.api.routes_chat import _status_code_for_error, build_prompt_from_messages
 from src.main import create_app
+from src.utils.errors import ErrorCode
 
 
 class FakeBrowser:
@@ -96,6 +97,10 @@ def test_openai_models_returns_browser_chatgpt(monkeypatch):
             }
         ],
     }
+
+
+def test_lane_busy_maps_to_http_429():
+    assert _status_code_for_error(ErrorCode.LANE_BUSY) == 429
 
 
 def test_openai_prompt_builder_uses_last_user_message_for_simple_request():

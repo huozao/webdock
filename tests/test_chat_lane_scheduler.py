@@ -124,6 +124,92 @@ async def _run_same_lane_serial_case():
     assert order == ["start:first", "end:first", "start:second", "end:second"]
 
 
+def test_scheduler_rejects_busy_lane_without_calling_ask_func():
+    asyncio.run(_run_busy_lane_rejection_case())
+
+
+async def _run_busy_lane_rejection_case():
+    started = asyncio.Event()
+    release = asyncio.Event()
+    ask_messages: list[str] = []
+    archived_errors: list[tuple[str, object]] = []
+
+    async def blocking_ask(page: object, message: str) -> tuple[str, float]:
+        ask_messages.append(message)
+        started.set()
+        await release.wait()
+        return str(page), 0.1
+
+    async def archiver(lane, inbound, images, *, answer=None, duration=None, error=None, kind="ask"):
+        if error is not None:
+            archived_errors.append((inbound, error))
+
+    scheduler = ChatLaneScheduler(
+        max_concurrent_chats=3,
+        ask_func=blocking_ask,
+        archiver=archiver,
+        lane_lock_wait_seconds=0.01,
+    )
+    browser = FakeBrowser()
+    lane = LaneContext.from_metadata(
+        {"channel": "feishu", "chat_type": "group", "peer_id": "oc_busy"}
+    )
+    active = asyncio.create_task(scheduler.ask(browser, lane, "first"))
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    try:
+        await scheduler.ask(browser, lane, "second")
+    except RelayError as exc:
+        raised = exc
+    else:
+        raised = None
+    finally:
+        release.set()
+        await active
+
+    assert raised is not None and raised.code == ErrorCode.LANE_BUSY
+    assert "已等待" in raised.message
+    assert "本次请求未执行" in raised.message
+    assert ask_messages == ["first"]
+    assert archived_errors == [("second", raised)]
+
+
+def test_external_task_cancellation_is_not_archived_as_new_conversation_reset():
+    asyncio.run(_run_external_cancellation_case())
+
+
+async def _run_external_cancellation_case():
+    started = asyncio.Event()
+    archived_errors: list[object] = []
+
+    async def blocking_ask(page: object, message: str) -> tuple[str, float]:
+        started.set()
+        await asyncio.Event().wait()
+        return "never", 0.0
+
+    async def archiver(lane, inbound, images, *, answer=None, duration=None, error=None, kind="ask"):
+        if error is not None:
+            archived_errors.append(error)
+
+    scheduler = ChatLaneScheduler(
+        max_concurrent_chats=1,
+        ask_func=blocking_ask,
+        archiver=archiver,
+    )
+    task = asyncio.create_task(
+        scheduler.ask(FakeBrowser(), LaneContext.from_metadata(None), "first")
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert archived_errors == []
+
+
 def test_metadata_less_request_inherits_recent_active_lane():
     asyncio.run(_run_inherit_case())
 
@@ -144,6 +230,58 @@ async def _run_inherit_case():
     await scheduler.ask(browser, image_lane, "[image]")
 
     # Both ran on the same configured lane page, not a stray default page.
+    assert browser.calls == ["wechat:A:private:user-1", "wechat:A:private:user-1"]
+
+
+def test_metadata_less_image_fragment_keeps_legacy_lane_queue_behavior():
+    asyncio.run(_run_inherited_image_fragment_queue_case())
+
+
+async def _run_inherited_image_fragment_queue_case():
+    router = FakeRouter(configured={"user-1"})
+    started = asyncio.Event()
+    release = asyncio.Event()
+    ask_messages: list[str] = []
+
+    async def blocking_ask(page: object, message: str) -> tuple[str, float]:
+        ask_messages.append(message)
+        if message == "text":
+            started.set()
+            await release.wait()
+        return str(page), 0.1
+
+    async def fake_upload(page: object, images: list[str]) -> int:
+        return len(images)
+
+    scheduler = ChatLaneScheduler(
+        max_concurrent_chats=3,
+        ask_func=blocking_ask,
+        router=router,
+        image_uploader=fake_upload,
+        lane_lock_wait_seconds=0.01,
+    )
+    browser = FakeBrowser()
+    configured_lane = LaneContext.from_metadata(
+        {"wechat_account": "A", "chat_type": "private", "peer_id": "user-1"}
+    )
+    active = asyncio.create_task(scheduler.ask(browser, configured_lane, "text"))
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    fragment = asyncio.create_task(
+        scheduler.ask(
+            browser,
+            LaneContext.from_metadata(None),
+            "[image]",
+            images=["data:image/png;base64,AAAA"],
+        )
+    )
+    await asyncio.sleep(0.03)
+    assert not fragment.done()
+
+    release.set()
+    await asyncio.gather(active, fragment)
+
+    assert ask_messages == ["text", "[image]"]
     assert browser.calls == ["wechat:A:private:user-1", "wechat:A:private:user-1"]
 
 

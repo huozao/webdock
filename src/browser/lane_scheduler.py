@@ -45,6 +45,7 @@ LANE_FALLBACK_WINDOW_SECONDS = 120.0
 # the soft timeout is an *idle* deadline (give up only if a reply stops
 # progressing), so a long but actively-streaming reply keeps going until this cap.
 DEFAULT_REQUEST_HARD_CAP_SECONDS = 310.0
+DEFAULT_LANE_LOCK_WAIT_SECONDS = 5.0
 
 
 def select_chat_timeout(base_seconds: int, with_images_seconds: int, *, has_images: bool) -> int:
@@ -141,14 +142,21 @@ class ChatLaneScheduler:
         chat_timeout_seconds: int = 120,
         chat_timeout_seconds_with_images: int = 300,
         request_hard_cap_seconds: float = DEFAULT_REQUEST_HARD_CAP_SECONDS,
+        lane_lock_wait_seconds: float = DEFAULT_LANE_LOCK_WAIT_SECONDS,
     ) -> None:
         self.max_concurrent_chats = max(1, max_concurrent_chats)
         self._chat_timeout_seconds = chat_timeout_seconds
         self._chat_timeout_seconds_with_images = chat_timeout_seconds_with_images
         self._request_hard_cap_seconds = request_hard_cap_seconds
+        self._lane_lock_wait_seconds = max(0.001, float(lane_lock_wait_seconds))
         self._account_semaphore = asyncio.Semaphore(self.max_concurrent_chats)
         self._lane_locks: dict[str, asyncio.Lock] = {}
         self._lane_locks_guard = asyncio.Lock()
+        self._lane_state_guard = asyncio.Lock()
+        self._lane_generations: dict[str, int] = {}
+        self._lane_resetting: set[str] = set()
+        self._lane_inflight_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._lane_reset_cancelled_tasks: set[asyncio.Task[Any]] = set()
         self._media_store = media_store
         self._ask_func = ask_func or self._default_ask
         # Only our default ask accepts the channel arg; injected ask_funcs (tests)
@@ -185,10 +193,58 @@ class ChatLaneScheduler:
     ) -> ChatResult:
         received_at = time.monotonic()
         force_new, clean_message = parse_new_conversation_trigger(message)
+        is_metadata_less_image_fragment = (
+            not force_new and lane.peer_id == DEFAULT_PEER and bool(images)
+        )
         lane = self._resolve_lane(lane, force_new=force_new)
+        generation = self._lane_generations.get(lane.key, 0)
+        lock_deadline = received_at + self._lane_lock_wait_seconds
+        if force_new:
+            generation = await self._begin_lane_reset(
+                lane.key,
+                wait_seconds=max(0.0, lock_deadline - time.monotonic()),
+            )
 
         lane_lock = await self._get_lane_lock(lane.key)
-        async with lane_lock:
+        try:
+            if is_metadata_less_image_fragment:
+                await lane_lock.acquire()
+            elif force_new and not lane_lock.locked():
+                await lane_lock.acquire()
+            else:
+                wait_seconds = self._lane_lock_wait_seconds
+                if force_new:
+                    wait_seconds = max(0.0, lock_deadline - time.monotonic())
+                await asyncio.wait_for(lane_lock.acquire(), timeout=wait_seconds)
+        except asyncio.TimeoutError:
+            if force_new:
+                await self._abandon_lane_reset(lane.key, generation)
+            waited = time.monotonic() - received_at
+            exc = RelayError(
+                ErrorCode.LANE_BUSY,
+                f"当前会话正在处理另一项任务；已等待 {waited:.1f}s，本次请求未执行。"
+                "请稍后重试，或发送 /新对话 取消当前任务。",
+            )
+            await self._archiver(lane, clean_message, images, error=exc)
+            raise exc
+        except asyncio.CancelledError:
+            if force_new:
+                await self._abandon_lane_reset(lane.key, generation)
+            raise
+        registered = False
+        try:
+            registered = await self._register_lane_task(
+                lane.key,
+                generation,
+                resetting_request=force_new,
+            )
+            if not registered:
+                exc = RelayError(
+                    ErrorCode.LANE_BUSY,
+                    f"lane {lane.key} request was superseded by /新对话 before it started.",
+                )
+                await self._archiver(lane, clean_message, images, error=exc)
+                raise exc
             locked_at = time.monotonic()
             self._lane_last_active[lane.key] = locked_at
             async with self._account_semaphore:
@@ -271,9 +327,28 @@ class ChatLaneScheduler:
                     # save_debug_dump attached), then let the caller handle it.
                     await self._archiver(lane, clean_message, images, error=exc)
                     raise
+                if await self._consume_reset_cancellation():
+                    exc = RelayError(
+                        ErrorCode.REQUEST_CANCELLED,
+                        f"lane {lane.key} request was cancelled by /新对话.",
+                    )
+                    await self._archiver(lane, clean_message, images, error=exc)
+                    raise asyncio.CancelledError
                 conversation_url = self._record_conversation(lane, page)
                 await self._archiver(lane, clean_message, images, answer=answer, duration=duration)
                 return ChatResult(answer, duration, lane, conversation_url)
+        except asyncio.CancelledError:
+            if await self._consume_reset_cancellation():
+                exc = RelayError(
+                    ErrorCode.REQUEST_CANCELLED,
+                    f"lane {lane.key} request was cancelled by /新对话.",
+                )
+                await self._archiver(lane, clean_message, images, error=exc)
+            raise
+        finally:
+            if registered:
+                await self._clear_lane_task(lane.key)
+            lane_lock.release()
 
     def _resolve_lane(self, lane: LaneContext, *, force_new: bool) -> LaneContext:
         """Pick the lane this request really belongs to and attach its target URL.
@@ -374,6 +449,65 @@ class ChatLaneScheduler:
                 lock = asyncio.Lock()
                 self._lane_locks[lane_key] = lock
             return lock
+
+    async def _begin_lane_reset(self, lane_key: str, *, wait_seconds: float) -> int:
+        current = asyncio.current_task()
+        async with self._lane_state_guard:
+            generation = self._lane_generations.get(lane_key, 0) + 1
+            self._lane_generations[lane_key] = generation
+            self._lane_resetting.add(lane_key)
+            active = self._lane_inflight_tasks.get(lane_key)
+            if active is not None and active is not current and not active.done():
+                self._lane_reset_cancelled_tasks.add(active)
+        if active is not None and active is not current and not active.done():
+            active.cancel()
+            done, _ = await asyncio.wait({active}, timeout=wait_seconds)
+            if active in done:
+                await asyncio.gather(active, return_exceptions=True)
+        return generation
+
+    async def _register_lane_task(
+        self,
+        lane_key: str,
+        generation: int,
+        *,
+        resetting_request: bool,
+    ) -> bool:
+        current = asyncio.current_task()
+        if current is None:
+            return False
+        async with self._lane_state_guard:
+            if generation != self._lane_generations.get(lane_key, 0):
+                return False
+            if lane_key in self._lane_resetting and not resetting_request:
+                return False
+            if resetting_request:
+                self._lane_resetting.discard(lane_key)
+            self._lane_inflight_tasks[lane_key] = current
+            return True
+
+    async def _abandon_lane_reset(self, lane_key: str, generation: int) -> None:
+        async with self._lane_state_guard:
+            if generation == self._lane_generations.get(lane_key, 0):
+                self._lane_resetting.discard(lane_key)
+
+    async def _clear_lane_task(self, lane_key: str) -> None:
+        current = asyncio.current_task()
+        async with self._lane_state_guard:
+            if self._lane_inflight_tasks.get(lane_key) is current:
+                self._lane_inflight_tasks.pop(lane_key, None)
+            if current is not None:
+                self._lane_reset_cancelled_tasks.discard(current)
+
+    async def _consume_reset_cancellation(self) -> bool:
+        current = asyncio.current_task()
+        if current is None:
+            return False
+        async with self._lane_state_guard:
+            if current not in self._lane_reset_cancelled_tasks:
+                return False
+            self._lane_reset_cancelled_tasks.discard(current)
+            return True
 
 
 def build_lane_key(wechat_account: str, chat_type: str, peer_id: str) -> str:

@@ -4,6 +4,8 @@ import asyncio
 import json
 import os
 
+import pytest
+
 from src.browser.lane_routing import (
     LaneRouter,
     NEW_CONVERSATION_ACK,
@@ -11,6 +13,7 @@ from src.browser.lane_routing import (
     parse_new_conversation_trigger,
 )
 from src.browser.lane_scheduler import ChatLaneScheduler, LaneContext
+from src.utils.errors import ErrorCode, RelayError
 
 
 PROJECT_A = "https://chatgpt.com/g/g-p-aaaa-weixin-a/project"
@@ -167,6 +170,215 @@ def test_new_conversation_trigger_acks_and_clears(tmp_path):
     assert browser.reset_calls == ["wechat:default:private:u1"]
     # conversation pointer cleared -> next message starts fresh in the project
     assert router.resolve_target_url("u1") == PROJECT_A
+
+
+def test_new_conversation_preempts_active_lane_and_archives_cancellation(tmp_path):
+    asyncio.run(_run_new_conversation_preemption_case(tmp_path))
+
+
+async def _run_new_conversation_preemption_case(tmp_path):
+    router = _router(tmp_path, {"u1": {"project_url": PROJECT_A}})
+    router.record_conversation_url("u1", CONV_A)
+    page = _FakePage(CONV_A)
+    browser = _FakeBrowser(page)
+    started = asyncio.Event()
+    ask_messages: list[str] = []
+    archived_errors: list[object] = []
+
+    async def blocking_ask(page, message):
+        ask_messages.append(message)
+        started.set()
+        await asyncio.Event().wait()
+        return "never", 0.0
+
+    async def archiver(lane, inbound, images, *, answer=None, duration=None, error=None, kind="ask"):
+        if error is not None:
+            archived_errors.append(error)
+
+    scheduler = ChatLaneScheduler(
+        max_concurrent_chats=1,
+        ask_func=blocking_ask,
+        router=router,
+        archiver=archiver,
+        lane_lock_wait_seconds=0.01,
+    )
+    lane = LaneContext.from_metadata({"peer_id": "u1"})
+    active = asyncio.create_task(scheduler.ask(browser, lane, "first"))
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    answer, duration = await scheduler.ask(browser, lane, "/新对话")
+
+    with pytest.raises(asyncio.CancelledError):
+        await active
+    assert answer == NEW_CONVERSATION_ACK
+    assert duration == 0.0
+    assert ask_messages == ["first"]
+    assert browser.reset_calls == ["wechat:default:private:u1"]
+    assert archived_errors and archived_errors[0].code == ErrorCode.REQUEST_CANCELLED
+    assert router.resolve_target_url("u1") == PROJECT_A
+
+
+def test_new_conversation_invalidates_requests_already_waiting_for_lane(tmp_path):
+    asyncio.run(_run_new_conversation_invalidates_waiters_case(tmp_path))
+
+
+async def _run_new_conversation_invalidates_waiters_case(tmp_path):
+    router = _router(tmp_path, {"u1": {"project_url": PROJECT_A}})
+    page = _FakePage(CONV_A)
+    browser = _FakeBrowser(page)
+    started = asyncio.Event()
+    ask_messages: list[str] = []
+
+    async def blocking_ask(page, message):
+        ask_messages.append(message)
+        started.set()
+        await asyncio.Event().wait()
+        return "never", 0.0
+
+    scheduler = ChatLaneScheduler(
+        max_concurrent_chats=1,
+        ask_func=blocking_ask,
+        router=router,
+        lane_lock_wait_seconds=1.0,
+    )
+    lane = LaneContext.from_metadata({"peer_id": "u1"})
+    active = asyncio.create_task(scheduler.ask(browser, lane, "first"))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    queued = asyncio.create_task(scheduler.ask(browser, lane, "queued-before-reset"))
+    lane_lock = await scheduler._get_lane_lock(lane.key)
+    for _ in range(100):
+        if lane_lock._waiters:
+            break
+        await asyncio.sleep(0)
+    assert lane_lock._waiters
+
+    answer, _ = await scheduler.ask(browser, lane, "/新对话")
+    queued_result = (await asyncio.gather(queued, return_exceptions=True))[0]
+
+    with pytest.raises(asyncio.CancelledError):
+        await active
+    assert answer == NEW_CONVERSATION_ACK
+    assert isinstance(queued_result, RelayError)
+    assert queued_result.code == ErrorCode.LANE_BUSY
+    assert "superseded" in queued_result.message
+    assert ask_messages == ["first"]
+    assert browser.reset_calls == [lane.key]
+
+
+def test_new_conversation_is_not_blocked_by_cancelled_task_cleanup_error(tmp_path):
+    asyncio.run(_run_new_conversation_cleanup_error_case(tmp_path))
+
+
+async def _run_new_conversation_cleanup_error_case(tmp_path):
+    router = _router(tmp_path, {"u1": {"project_url": PROJECT_A}})
+    browser = _FakeBrowser(_FakePage(CONV_A))
+    started = asyncio.Event()
+
+    async def failing_cleanup_ask(page, message):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as exc:
+            raise RuntimeError("old task cleanup failed") from exc
+
+    scheduler = ChatLaneScheduler(
+        max_concurrent_chats=1,
+        ask_func=failing_cleanup_ask,
+        router=router,
+        lane_lock_wait_seconds=1.0,
+    )
+    lane = LaneContext.from_metadata({"peer_id": "u1"})
+    active = asyncio.create_task(scheduler.ask(browser, lane, "first"))
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    answer, _ = await scheduler.ask(browser, lane, "/新对话")
+    active_result = (await asyncio.gather(active, return_exceptions=True))[0]
+
+    assert answer == NEW_CONVERSATION_ACK
+    assert isinstance(active_result, RuntimeError)
+    assert browser.reset_calls == [lane.key]
+
+
+def test_new_conversation_bounds_cancel_wait_and_old_request_cannot_succeed(tmp_path):
+    asyncio.run(_run_new_conversation_bounded_cancel_case(tmp_path))
+
+
+async def _run_new_conversation_bounded_cancel_case(tmp_path):
+    router = _router(tmp_path, {"u1": {"project_url": PROJECT_A}})
+    browser = _FakeBrowser(_FakePage(CONV_A))
+    started = asyncio.Event()
+    finish_cleanup = asyncio.Event()
+    archived_errors: list[object] = []
+
+    async def cancellation_suppressing_ask(page, message):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await finish_cleanup.wait()
+            return "old-finished", 0.2
+
+    async def archiver(lane, inbound, images, *, answer=None, duration=None, error=None, kind="ask"):
+        if error is not None:
+            archived_errors.append(error)
+
+    scheduler = ChatLaneScheduler(
+        max_concurrent_chats=1,
+        ask_func=cancellation_suppressing_ask,
+        router=router,
+        archiver=archiver,
+        lane_lock_wait_seconds=0.01,
+    )
+    lane = LaneContext.from_metadata({"peer_id": "u1"})
+    active = asyncio.create_task(scheduler.ask(browser, lane, "first"))
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    started_at = asyncio.get_running_loop().time()
+    with pytest.raises(RelayError) as raised:
+        await scheduler.ask(browser, lane, "/新对话")
+    elapsed = asyncio.get_running_loop().time() - started_at
+
+    assert raised.value.code == ErrorCode.LANE_BUSY
+    assert elapsed < 0.1
+    finish_cleanup.set()
+    active_result = (await asyncio.gather(active, return_exceptions=True))[0]
+    assert isinstance(active_result, asyncio.CancelledError)
+    assert [error.code for error in archived_errors] == [
+        ErrorCode.LANE_BUSY,
+        ErrorCode.REQUEST_CANCELLED,
+    ]
+    assert browser.reset_calls == []
+
+
+def test_timed_out_new_conversation_does_not_leave_lane_permanently_resetting(tmp_path):
+    asyncio.run(_run_timed_out_new_conversation_cleanup_case(tmp_path))
+
+
+async def _run_timed_out_new_conversation_cleanup_case(tmp_path):
+    router = _router(tmp_path, {"u1": {"project_url": PROJECT_A}})
+
+    async def ask_func(page, message):
+        return f"reply:{message}", 0.1
+
+    scheduler = ChatLaneScheduler(
+        max_concurrent_chats=1,
+        ask_func=ask_func,
+        router=router,
+        lane_lock_wait_seconds=0.01,
+    )
+    browser = _FakeBrowser(_FakePage(PROJECT_A))
+    lane = LaneContext.from_metadata({"peer_id": "u1"})
+    lane_lock = await scheduler._get_lane_lock(lane.key)
+    await lane_lock.acquire()
+    try:
+        with pytest.raises(RelayError) as raised:
+            await scheduler.ask(browser, lane, "/新对话")
+        assert raised.value.code == ErrorCode.LANE_BUSY
+    finally:
+        lane_lock.release()
+
+    answer, _ = await scheduler.ask(browser, lane, "after-timeout")
+    assert answer == "reply:after-timeout"
 
 
 def test_scheduler_routes_first_message_then_records(tmp_path):

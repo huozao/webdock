@@ -221,7 +221,7 @@ async def _ensure_browser_ready(browser: Any) -> JSONResponse | None:
 
 
 def _status_code_for_error(code: ErrorCode) -> int:
-    if code == ErrorCode.BUSY:
+    if code in {ErrorCode.BUSY, ErrorCode.LANE_BUSY}:
         return 429
     if code in {ErrorCode.NOT_LOGGED_IN, ErrorCode.AUTH_FAILED}:
         return 401

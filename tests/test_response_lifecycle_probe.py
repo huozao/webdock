@@ -83,6 +83,12 @@ def test_url_sanitization_drops_query_and_fragment():
     assert sanitize_url("not a url") == ""
 
 
+def test_url_sanitization_redacts_conversation_uuid():
+    assert sanitize_url(
+        "https://chatgpt.com/backend-api/conversation/6a7c47a4-cef0-83ea-b935-c409fbc7cc6b/stream_status"
+    ) == "https://chatgpt.com/backend-api/conversation/:uuid/stream_status"
+
+
 def test_terminal_extraction_keeps_only_allowlisted_protocol_fields():
     body = "\n".join(
         [
@@ -162,6 +168,7 @@ def test_close_waits_for_terminal_body_parse_before_probe_end(tmp_path):
         with response_probe_request("terminal-order", tmp_path):
             probe = await start_response_probe(page)
             assert probe is not None
+            probe.record("send_started")
             session.handlers["Network.requestWillBeSent"](
                 {
                     "requestId": "r1",
@@ -186,6 +193,60 @@ def test_close_waits_for_terminal_body_parse_before_probe_end(tmp_path):
         assert names.index("protocol_terminal") < names.index("probe_end")
         assert "secret" not in raw
         assert "token=" not in raw
+
+    asyncio.run(scenario())
+
+
+def test_protocol_terminals_ignore_pre_send_and_unrelated_endpoints(tmp_path):
+    async def scenario():
+        session = FakeSession('data: {"status":"failed"}')
+        page = FakePage(session)
+        with response_probe_request("correlated-terminal", tmp_path):
+            probe = await start_response_probe(page)
+            assert probe is not None
+            session.handlers["Network.requestWillBeSent"](
+                {
+                    "requestId": "before",
+                    "type": "Fetch",
+                    "request": {"url": "https://chatgpt.com/backend-api/tasks"},
+                }
+            )
+            session.handlers["Network.responseReceived"](
+                {"requestId": "before", "response": {"status": 200, "mimeType": "application/json"}}
+            )
+            session.handlers["Network.loadingFinished"](
+                {"requestId": "before", "encodedDataLength": 50}
+            )
+            await asyncio.sleep(0)
+
+            probe.record("send_started")
+            session.body = "data: [DONE]"
+            session.handlers["Network.requestWillBeSent"](
+                {
+                    "requestId": "conversation",
+                    "type": "Fetch",
+                    "request": {"url": "https://chatgpt.com/backend-api/f/conversation"},
+                }
+            )
+            session.handlers["Network.responseReceived"](
+                {
+                    "requestId": "conversation",
+                    "response": {"status": 200, "mimeType": "text/event-stream"},
+                }
+            )
+            session.handlers["Network.loadingFinished"](
+                {"requestId": "conversation", "encodedDataLength": 100}
+            )
+            await stop_response_probe(probe, "completed")
+
+        events = [
+            json.loads(line)
+            for line in (tmp_path / "correlated-terminal.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        terminals = [event for event in events if event["event"] == "protocol_terminal"]
+        assert [(event["terminal_field"], event["terminal_value"]) for event in terminals] == [
+            ("sentinel", "DONE")
+        ]
 
     asyncio.run(scenario())
 

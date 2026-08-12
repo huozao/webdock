@@ -17,6 +17,9 @@ from src.config import Settings, get_settings
 log = logging.getLogger(__name__)
 
 _PROBE_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,64}\Z")
+_UUID_PATH_RE = re.compile(
+    r"(?i)(?<=/)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?=/|$)"
+)
 _TERMINAL_VALUES = frozenset(
     {
         "aborted",
@@ -84,7 +87,8 @@ def sanitize_url(value: str | None) -> str:
         port = f":{parsed.port}" if parsed.port is not None else ""
     except ValueError:
         return ""
-    return f"{parsed.scheme}://{host}{port}{parsed.path or '/'}"
+    path = _UUID_PATH_RE.sub(":uuid", parsed.path or "/")
+    return f"{parsed.scheme}://{host}{port}{path}"
 
 
 def diagnostic_probe_enabled(settings: Settings | None = None) -> bool:
@@ -192,11 +196,14 @@ class ResponseLifecycleProbe:
         self._requests: dict[str, dict[str, Any]] = {}
         self._websockets: dict[str, str] = {}
         self._last_dom_signature = ""
+        self._capture_task_network = False
         self._context_token: Token[ResponseLifecycleProbe | None] | None = None
 
     def record(self, event: str, **fields: Any) -> None:
         if self._closed or self._truncated:
             return
+        if event == "send_started":
+            self._capture_task_network = True
         payload: dict[str, Any] = {
             "offset_ms": round((time.monotonic() - self.started_at) * 1000),
             "utc": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
@@ -312,7 +319,12 @@ class ResponseLifecycleProbe:
             resource_type = str(params.get("type") or "")
             if not _is_task_network_url(url) or resource_type not in {"Fetch", "XHR", "EventSource", "WebSocket"}:
                 return
-            self._requests[request_id] = {"url": url, "resource_type": resource_type, "bytes": 0}
+            self._requests[request_id] = {
+                "url": url,
+                "resource_type": resource_type,
+                "bytes": 0,
+                "after_send": self._capture_task_network,
+            }
             self.record("network_request", request_id=request_id, url=url, resource_type=resource_type)
             return
         if event == "Network.responseReceived" and request_id in self._requests:
@@ -359,11 +371,21 @@ class ResponseLifecycleProbe:
             payload = (params.get("response") or {}).get("payloadData")
             self._record_protocol_markers(request_id, extract_terminal_markers(payload), "websocket")
             return
+        if event == "Network.webSocketFrameReceived" and self._capture_task_network:
+            payload = (params.get("response") or {}).get("payloadData")
+            self._record_protocol_markers(
+                request_id,
+                extract_terminal_markers(payload),
+                "websocket_unmapped",
+            )
+            return
         if event == "Network.webSocketClosed" and request_id in self._websockets:
             self.record("websocket_closed", request_id=request_id, url=self._websockets.pop(request_id))
 
     async def _inspect_response_body(self, request_id: str, state: dict[str, Any]) -> None:
         if self._session is None:
+            return
+        if not state.get("after_send") or not _is_protocol_candidate_url(str(state.get("url") or "")):
             return
         content_type = str(state.get("content_type") or "").lower()
         if "json" not in content_type and "event-stream" not in content_type:
@@ -443,6 +465,11 @@ def _is_task_network_url(url: str) -> bool:
         (host == "chatgpt.com" or host.endswith(".chatgpt.com") or host.endswith(".openai.com"))
         and ("/backend-api/" in path or "/conversation" in path or "/responses" in path)
     )
+
+
+def _is_protocol_candidate_url(url: str) -> bool:
+    path = urlsplit(url).path.lower()
+    return path == "/backend-api/f/conversation" or path.endswith("/stream_status")
 
 
 def _sanitize_fields(fields: dict[str, Any]) -> dict[str, Any]:

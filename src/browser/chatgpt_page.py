@@ -311,6 +311,7 @@ class ChatGPTPage:
                 )
             marks.append(("send_btn", time.monotonic()))
             await random_delay(settings.before_send_delay_min_ms, settings.before_send_delay_max_ms)
+            record_probe_event("send_started")
             await hover_and_click(self.page, send_selector)
             marks.append(("click", time.monotonic()))
             record_probe_event("send_clicked")

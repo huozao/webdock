@@ -207,7 +207,9 @@ async def _run_external_cancellation_case():
     except asyncio.CancelledError:
         pass
 
-    assert archived_errors == []
+    assert len(archived_errors) == 1
+    assert archived_errors[0].code == ErrorCode.REQUEST_CANCELLED
+    assert "by /新对话" not in archived_errors[0].message
 
 
 def test_metadata_less_request_inherits_recent_active_lane():
@@ -505,6 +507,84 @@ async def _run_hang_recovery_case():
     assert raised is not None and raised.code == ErrorCode.RESPONSE_TIMEOUT
     assert reset_calls == ["wechat:A:private:u1"]
     assert archived_errors and archived_errors[0] is not None
+
+
+def test_scheduler_resets_lane_when_outer_job_cancels_request():
+    asyncio.run(_run_outer_cancel_recovery_case())
+
+
+async def _run_outer_cancel_recovery_case():
+    started = asyncio.Event()
+    reset_calls: list[str] = []
+    archived_errors: list[object] = []
+
+    class CancelBrowser:
+        async def page_for_lane(self, lane: LaneContext):
+            return f"page:{lane.key}"
+
+        async def reset_lane_page(self, lane: LaneContext):
+            reset_calls.append(lane.key)
+            return f"page:{lane.key}"
+
+    async def archiver(lane, inbound, images, *, answer=None, duration=None, error=None, kind="ask"):
+        if error is not None:
+            archived_errors.append(error)
+
+    async def hanging_ask(page: object, message: str) -> tuple[str, float]:
+        started.set()
+        await asyncio.Event().wait()
+
+    scheduler = ChatLaneScheduler(max_concurrent_chats=1, ask_func=hanging_ask, archiver=archiver)
+    lane = LaneContext.from_metadata(
+        {"channel": "feishu", "chat_type": "group", "peer_id": "outer-cancel"}
+    )
+    task = asyncio.create_task(scheduler.ask(CancelBrowser(), lane, "long task"))
+    await started.wait()
+    task.cancel()
+    result = await asyncio.gather(task, return_exceptions=True)
+
+    assert isinstance(result[0], asyncio.CancelledError)
+    assert reset_calls == [lane.key]
+    assert archived_errors and archived_errors[0].code == ErrorCode.REQUEST_CANCELLED
+
+
+def test_scheduler_does_not_reset_lane_cancelled_while_waiting_for_browser_slot():
+    asyncio.run(_run_queued_cancel_without_reset_case())
+
+
+async def _run_queued_cancel_without_reset_case():
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    reset_calls: list[str] = []
+
+    class QueueBrowser:
+        async def page_for_lane(self, lane: LaneContext):
+            return f"page:{lane.key}"
+
+        async def reset_lane_page(self, lane: LaneContext):
+            reset_calls.append(lane.key)
+            return f"page:{lane.key}"
+
+    async def blocking_ask(page: object, message: str) -> tuple[str, float]:
+        first_started.set()
+        await release_first.wait()
+        return "done", 0.1
+
+    scheduler = ChatLaneScheduler(max_concurrent_chats=1, ask_func=blocking_ask)
+    browser = QueueBrowser()
+    first_lane = LaneContext.from_metadata({"channel": "feishu", "peer_id": "first"})
+    queued_lane = LaneContext.from_metadata({"channel": "feishu", "peer_id": "queued"})
+    first = asyncio.create_task(scheduler.ask(browser, first_lane, "first"))
+    await first_started.wait()
+    queued = asyncio.create_task(scheduler.ask(browser, queued_lane, "queued"))
+    await asyncio.sleep(0)
+    queued.cancel()
+    result = await asyncio.gather(queued, return_exceptions=True)
+    release_first.set()
+    await first
+
+    assert isinstance(result[0], asyncio.CancelledError)
+    assert reset_calls == []
 
 
 def test_lane_context_parses_chatgpt_mode():

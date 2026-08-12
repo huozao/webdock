@@ -232,6 +232,8 @@ class ChatLaneScheduler:
                 await self._abandon_lane_reset(lane.key, generation)
             raise
         registered = False
+        browser_slot_entered = False
+        reset_cancellation_consumed = False
         try:
             registered = await self._register_lane_task(
                 lane.key,
@@ -248,6 +250,7 @@ class ChatLaneScheduler:
             locked_at = time.monotonic()
             self._lane_last_active[lane.key] = locked_at
             async with self._account_semaphore:
+                browser_slot_entered = True
                 slot_at = time.monotonic()
                 # "/新对话" with no payload: just drop the saved conversation so the
                 # next real message opens a fresh chat in the project. No round-trip.
@@ -328,6 +331,7 @@ class ChatLaneScheduler:
                     await self._archiver(lane, clean_message, images, error=exc)
                     raise
                 if await self._consume_reset_cancellation():
+                    reset_cancellation_consumed = True
                     exc = RelayError(
                         ErrorCode.REQUEST_CANCELLED,
                         f"lane {lane.key} request was cancelled by /新对话.",
@@ -338,10 +342,26 @@ class ChatLaneScheduler:
                 await self._archiver(lane, clean_message, images, answer=answer, duration=duration)
                 return ChatResult(answer, duration, lane, conversation_url)
         except asyncio.CancelledError:
-            if await self._consume_reset_cancellation():
+            was_reset_cancellation = reset_cancellation_consumed
+            if not was_reset_cancellation:
+                was_reset_cancellation = await self._consume_reset_cancellation()
+            if was_reset_cancellation:
+                if reset_cancellation_consumed:
+                    raise
                 exc = RelayError(
                     ErrorCode.REQUEST_CANCELLED,
                     f"lane {lane.key} request was cancelled by /新对话.",
+                )
+                await self._archiver(lane, clean_message, images, error=exc)
+            elif browser_slot_entered:
+                # An outer async-job lifecycle timeout or DELETE cancellation can
+                # stop Python while ChatGPT keeps generating in the tab. Rebuild
+                # the lane before releasing its lock so the next task never
+                # inherits that still-running page.
+                await _reset_lane_page(browser, lane)
+                exc = RelayError(
+                    ErrorCode.REQUEST_CANCELLED,
+                    f"lane {lane.key} request was cancelled; lane reset.",
                 )
                 await self._archiver(lane, clean_message, images, error=exc)
             raise

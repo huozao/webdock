@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import hashlib
 import logging
 import re
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from src.browser.image_input import extract_image_urls
+from src.api.chat_jobs import JobCapacityError, JobConflictError
 from src.browser.lane_scheduler import LaneContext
 from src.models.request_models import ChatRequest, OpenAIChatCompletionRequest
 from src.models.response_models import build_openai_models_response, build_openai_response, build_openai_sse_events
@@ -22,6 +26,12 @@ _OPENCLAW_METADATA_PREFIX_RE = re.compile(
     r"\A(?:\[[^\]\n]*UTC\]\s*)?Conversation info \(untrusted metadata\):\s*",
     flags=re.DOTALL,
 )
+
+
+class _JobExecutionError(Exception):
+    def __init__(self, detail: dict[str, Any]) -> None:
+        super().__init__(str(detail.get("message") or detail.get("error_code") or "job failed"))
+        self.detail = detail
 
 
 @router.post("/chat")
@@ -86,6 +96,106 @@ async def openai_chat_completions(
             headers={"Cache-Control": "no-cache"},
         )
     return build_openai_response(body.model, answer, prompt, metadata=metadata)
+
+
+@router.post("/v1/chat/jobs", response_model=None, status_code=202)
+async def submit_openai_chat_job(
+    request: Request, body: OpenAIChatCompletionRequest
+) -> JSONResponse:
+    if body.stream:
+        raise HTTPException(
+            status_code=400,
+            detail=error_response(
+                ErrorCode.SELECTOR_FAILED,
+                "Async WebDock jobs return the final result from the status endpoint; stream must be false.",
+            ),
+        )
+    if body.tools or body.tool_choice:
+        raise HTTPException(
+            status_code=400,
+            detail=error_response(
+                ErrorCode.SELECTOR_FAILED,
+                "webdock does not support tools/tool_choice. Disable tools for this provider.",
+            ),
+        )
+
+    messages = [msg.model_dump() for msg in body.messages]
+    prompt = build_prompt_from_messages(messages)
+    images = extract_images_from_messages(messages)
+    if not prompt.strip() and not images:
+        raise HTTPException(
+            status_code=400,
+            detail=error_response(ErrorCode.RESPONSE_EMPTY, "No text user message found in messages."),
+        )
+
+    metadata = dict(body.metadata or {})
+    request_id = str(request.headers.get("X-Request-ID") or metadata.get("request_id") or "").strip()
+    if not request_id:
+        request_id = uuid.uuid4().hex
+    metadata["request_id"] = request_id
+    fingerprint = hashlib.sha256(
+        json.dumps(body.model_dump(), ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+    async def run() -> dict[str, Any]:
+        result = await _ask_browser(
+            request,
+            prompt,
+            LaneContext.from_metadata(metadata),
+            images=images,
+        )
+        if isinstance(result, JSONResponse):
+            detail = json.loads(result.body)
+            raise _JobExecutionError(detail if isinstance(detail, dict) else {})
+        answer, _duration = result
+        response_metadata = getattr(result, "metadata", None)
+        return build_openai_response(
+            body.model,
+            answer,
+            prompt,
+            metadata=response_metadata,
+        )
+
+    try:
+        state = await request.app.state.chat_jobs.submit(
+            request_id=request_id,
+            fingerprint=fingerprint,
+            runner=run,
+        )
+    except JobConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=error_response(ErrorCode.REQUEST_ID_CONFLICT, str(exc)),
+        ) from exc
+    except JobCapacityError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=error_response(ErrorCode.JOB_QUEUE_FULL, str(exc)),
+        ) from exc
+    return JSONResponse(status_code=202, content=state)
+
+
+@router.get("/v1/chat/jobs/{job_id}", response_model=None)
+async def get_openai_chat_job(request: Request, job_id: str) -> dict[str, Any]:
+    state = await request.app.state.chat_jobs.get(job_id)
+    if state is None:
+        raise HTTPException(
+            status_code=404,
+            detail=error_response(ErrorCode.JOB_NOT_FOUND, f"Unknown WebDock job: {job_id}"),
+        )
+    return state
+
+
+@router.delete("/v1/chat/jobs/{job_id}", response_model=None)
+async def cancel_openai_chat_job(request: Request, job_id: str) -> dict[str, Any]:
+    state = await request.app.state.chat_jobs.cancel(job_id)
+    if state is None:
+        raise HTTPException(
+            status_code=404,
+            detail=error_response(ErrorCode.JOB_NOT_FOUND, f"Unknown WebDock job: {job_id}"),
+        )
+    await asyncio.sleep(0)
+    return await request.app.state.chat_jobs.get(job_id)
 
 
 def build_prompt_from_messages(messages: list[dict[str, Any]]) -> str:

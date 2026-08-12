@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from src.api.routes_browser import router as browser_router
+from src.api.chat_jobs import ChatJobStore
 from src.api.routes_chat import router as chat_router
 from src.api.routes_health import router as health_router
 from src.api.routes_media import router as media_router
@@ -37,6 +38,9 @@ def create_app(*, start_browser: bool = True) -> FastAPI:
             chat_timeout_seconds=settings.chat_timeout_seconds,
             chat_timeout_seconds_with_images=settings.chat_timeout_seconds_with_images,
             request_hard_cap_seconds=settings.request_hard_cap_seconds,
+        )
+        app.state.chat_jobs = ChatJobStore(
+            execution_timeout_seconds=settings.request_hard_cap_seconds,
         )
         if start_browser and settings.attach_on_start:
             try:
@@ -81,6 +85,7 @@ def create_app(*, start_browser: bool = True) -> FastAPI:
         if app.state.idle_reaper_task is not None:
             app.state.idle_reaper_task.cancel()
         app.state.routing_stop.set()
+        await app.state.chat_jobs.close()
         await app.state.browser.stop()
 
     app = FastAPI(title="webdock", version="0.1.0", lifespan=lifespan)
@@ -89,6 +94,9 @@ def create_app(*, start_browser: bool = True) -> FastAPI:
     app.state.chat_scheduler = ChatLaneScheduler(
         max_concurrent_chats=settings.max_concurrent_chats,
         media_store=app.state.media_store,
+    )
+    app.state.chat_jobs = ChatJobStore(
+        execution_timeout_seconds=settings.request_hard_cap_seconds,
     )
 
     @app.middleware("http")

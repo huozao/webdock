@@ -5,6 +5,12 @@ import asyncio
 import pytest
 
 import src.browser.detector as detector
+from src.browser.response_lifecycle_probe import (
+    ResponseLifecycleState,
+    response_probe_request,
+    start_response_probe,
+    stop_response_probe,
+)
 from src.browser.detector import assistant_message_count, wait_for_response_complete
 from src.utils.errors import ErrorCode, RelayError
 
@@ -237,6 +243,37 @@ def test_wait_keeps_waiting_while_stop_button_present(monkeypatch):
     answer = asyncio.run(wait_for_response_complete(page, timeout_seconds=4, stable_seconds=1, previous_count=0))
 
     assert answer is None
+
+
+def test_wait_accepts_protocol_and_dom_completion_even_when_text_looks_interim(
+    monkeypatch, tmp_path
+):
+    page = FakePage(["generating final report"], stop_button=False)
+    monkeypatch.setattr(detector, "turn_actions_ready", lambda _page: asyncio.sleep(0, result=True))
+
+    async def scenario():
+        state = ResponseLifecycleState()
+        with response_probe_request(None, tmp_path, lifecycle=state):
+            probe = await start_response_probe(page)
+            assert probe is not None
+            state.observe_event("send_started")
+            state.observe_dom(stop_present=True, action_row_present=False, structure={})
+            state.observe_event(
+                "protocol_terminal",
+                source="websocket_unmapped",
+                terminal_field="type",
+                terminal_value="done",
+            )
+            answer = await wait_for_response_complete(
+                page,
+                timeout_seconds=2,
+                stable_seconds=0,
+                previous_count=0,
+            )
+            await stop_response_probe(probe, "completed")
+            return answer
+
+    assert asyncio.run(scenario()) == "generating final report"
 
 
 def test_wait_returns_widget_only_reply_with_empty_text():

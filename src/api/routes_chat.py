@@ -15,6 +15,7 @@ from src.browser.image_input import extract_image_urls
 from src.api.chat_jobs import JobCapacityError, JobConflictError
 from src.browser.lane_scheduler import LaneContext
 from src.browser.response_lifecycle_probe import (
+    ResponseLifecycleState,
     diagnostic_probe_enabled,
     response_probe_request,
     validate_probe_id,
@@ -164,9 +165,10 @@ async def submit_openai_chat_job(
         json.dumps(fingerprint_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()
     probe_output_dir = get_settings().debug_dir.parent / "probes"
+    lifecycle = ResponseLifecycleState()
 
     async def run() -> dict[str, Any]:
-        with response_probe_request(probe_id, probe_output_dir):
+        with response_probe_request(probe_id, probe_output_dir, lifecycle=lifecycle):
             result = await _ask_browser(
                 request,
                 prompt,
@@ -190,6 +192,7 @@ async def submit_openai_chat_job(
             request_id=request_id,
             fingerprint=fingerprint,
             runner=run,
+            progress_provider=lifecycle.snapshot,
         )
     except JobConflictError as exc:
         raise HTTPException(

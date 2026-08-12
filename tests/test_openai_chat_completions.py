@@ -202,6 +202,51 @@ def test_async_job_submit_is_idempotent_by_request_id(monkeypatch):
         assert calls == ["same request"]
 
 
+def test_async_job_status_exposes_sanitized_lifecycle_progress(monkeypatch):
+    from src.browser import lane_scheduler
+    from src.browser.response_lifecycle_probe import current_lifecycle_state
+
+    started = threading.Event()
+    release = threading.Event()
+
+    async def progressing_ask(self, message: str, **_kwargs):
+        state = current_lifecycle_state()
+        assert state is not None
+        state.observe_event("send_started")
+        state.observe_event("send_clicked")
+        state.observe_dom(stop_present=True, action_row_present=False, structure={})
+        started.set()
+        while not release.is_set():
+            await asyncio.sleep(0.01)
+        return "done", 1.0
+
+    monkeypatch.setattr(lane_scheduler.ChatGPTPage, "ask", progressing_ask)
+    app = create_app(start_browser=False)
+    body = {
+        "model": "browser-chatgpt",
+        "messages": [{"role": "user", "content": "long task"}],
+        "metadata": {"channel": "feishu", "peer_id": "group:progress-test"},
+    }
+
+    with TestClient(app) as client:
+        app.state.browser = FakeBrowser()
+        submitted = client.post(
+            "/v1/chat/jobs",
+            json=body,
+            headers={"Authorization": "Bearer change-me", "X-Request-ID": "req-progress-1"},
+        )
+        assert started.wait(timeout=1)
+        state = client.get(
+            f"/v1/chat/jobs/{submitted.json()['job_id']}",
+            headers={"Authorization": "Bearer change-me"},
+        ).json()
+        assert state["progress"]["schema_version"] == 1
+        assert state["progress"]["phase"] == "processing"
+        assert state["progress"]["stop_present"] is True
+        assert "text" not in state["progress"]
+        release.set()
+
+
 def test_async_job_rejects_invalid_probe_id(monkeypatch):
     client, _ = make_client(monkeypatch)
 

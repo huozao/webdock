@@ -7,6 +7,7 @@ import re
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -61,7 +62,79 @@ _NETWORK_EVENTS = (
     "Network.webSocketClosed",
 )
 
-_request_context: ContextVar[tuple[str, Path] | None] = ContextVar(
+@dataclass
+class ResponseLifecycleState:
+    """Sanitized, in-memory lifecycle state shared by detector and API clients."""
+
+    started_at: float = field(default_factory=time.monotonic)
+    phase: str = "queued"
+    stop_present: bool = False
+    action_row_present: bool = False
+    status_component_present: bool = False
+    server_terminal_observed: bool = False
+    _generation_seen: bool = False
+    _last_activity_at: float | None = None
+
+    def observe_event(self, event: str, **fields: Any) -> None:
+        now = time.monotonic()
+        if event == "send_started":
+            self.phase = "submitting"
+        elif event == "send_clicked":
+            self.phase = "processing"
+        elif event.startswith(("network_", "websocket_")):
+            self._last_activity_at = now
+        elif event == "protocol_terminal" and _is_correlated_server_terminal(fields):
+            self.server_terminal_observed = True
+            self.phase = "finalizing"
+            self._last_activity_at = now
+        elif event == "probe_end":
+            outcome = str(fields.get("outcome") or "error")
+            self.phase = outcome if outcome in {"completed", "cancelled"} else "error"
+
+    def observe_dom(self, **state: Any) -> None:
+        self.stop_present = bool(state.get("stop_present"))
+        self.action_row_present = bool(state.get("action_row_present"))
+        structure = state.get("structure") if isinstance(state.get("structure"), dict) else {}
+        self.status_component_present = _has_status_component(structure)
+        if self.stop_present or self.status_component_present:
+            self._generation_seen = True
+            if not self.server_terminal_observed:
+                self.phase = "processing"
+
+    def completion_ready(self) -> bool:
+        return bool(
+            self._generation_seen
+            and self.server_terminal_observed
+            and not self.stop_present
+            and self.action_row_present
+        )
+
+    def snapshot(self) -> dict[str, Any]:
+        now = time.monotonic()
+        payload: dict[str, Any] = {
+            "schema_version": 1,
+            "phase": self.phase,
+            "elapsed_seconds": round(max(0.0, now - self.started_at), 1),
+            "stop_present": self.stop_present,
+            "status_component_present": self.status_component_present,
+            "action_row_present": self.action_row_present,
+            "server_terminal_observed": self.server_terminal_observed,
+        }
+        if self._last_activity_at is not None:
+            payload["last_server_activity_age_seconds"] = round(
+                max(0.0, now - self._last_activity_at), 1
+            )
+        return payload
+
+
+@dataclass(frozen=True)
+class _ProbeRequest:
+    probe_id: str | None
+    output_dir: Path
+    lifecycle: ResponseLifecycleState
+
+
+_request_context: ContextVar[_ProbeRequest | None] = ContextVar(
     "response_probe_request", default=None
 )
 _active_context: ContextVar["ResponseLifecycleProbe | None"] = ContextVar(
@@ -101,6 +174,18 @@ def diagnostic_probe_enabled(settings: Settings | None = None) -> bool:
         return bool(current.diagnostic_probe_enabled)
     value = data.get("diagnostic_probe_enabled") if isinstance(data, dict) else None
     return value if isinstance(value, bool) else bool(current.diagnostic_probe_enabled)
+
+
+def lifecycle_network_monitor_enabled(settings: Settings | None = None) -> bool:
+    """Explicit opt-in for passive protocol monitoring on ordinary requests."""
+    current = settings or get_settings()
+    path = current.browser_profile_dir / "runtime.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    value = data.get("lifecycle_network_monitor_enabled") if isinstance(data, dict) else None
+    return value if isinstance(value, bool) else False
 
 
 def extract_terminal_markers(raw: str | None) -> list[dict[str, str]]:
@@ -164,8 +249,15 @@ def _is_terminal_value(value: str) -> bool:
 
 
 @contextmanager
-def response_probe_request(probe_id: str | None, output_dir: Path) -> Iterator[None]:
-    token = _request_context.set((probe_id, output_dir) if probe_id else None)
+def response_probe_request(
+    probe_id: str | None,
+    output_dir: Path,
+    *,
+    lifecycle: ResponseLifecycleState | None = None,
+) -> Iterator[None]:
+    token = _request_context.set(
+        _ProbeRequest(probe_id, Path(output_dir), lifecycle or ResponseLifecycleState())
+    )
     try:
         yield
     finally:
@@ -178,11 +270,17 @@ class ResponseLifecycleProbe:
         probe_id: str,
         output_dir: Path,
         *,
+        lifecycle: ResponseLifecycleState | None = None,
+        diagnostic: bool = True,
+        network_enabled: bool | None = None,
         max_events: int = 10_000,
         max_bytes: int = 5 * 1024 * 1024,
     ) -> None:
         self.probe_id = probe_id
         self.output_dir = Path(output_dir)
+        self.lifecycle = lifecycle or ResponseLifecycleState()
+        self.diagnostic = diagnostic
+        self.network_enabled = diagnostic if network_enabled is None else network_enabled
         self.max_events = max(1, max_events)
         self.max_bytes = max(512, max_bytes)
         self.started_at = time.monotonic()
@@ -200,10 +298,13 @@ class ResponseLifecycleProbe:
         self._context_token: Token[ResponseLifecycleProbe | None] | None = None
 
     def record(self, event: str, **fields: Any) -> None:
-        if self._closed or self._truncated:
+        if self._closed:
             return
+        self.lifecycle.observe_event(event, **fields)
         if event == "send_started":
             self._capture_task_network = True
+        if not self.diagnostic or self._truncated:
+            return
         payload: dict[str, Any] = {
             "offset_ms": round((time.monotonic() - self.started_at) * 1000),
             "utc": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
@@ -221,6 +322,8 @@ class ResponseLifecycleProbe:
     async def start(self, page: Any) -> None:
         self._context_token = _active_context.set(self)
         self.record("probe_start")
+        if not self.network_enabled:
+            return
         context = getattr(page, "context", None)
         if context is None or not hasattr(context, "new_cdp_session"):
             self.record("network_unavailable", reason="page_context_missing")
@@ -233,12 +336,20 @@ class ResponseLifecycleProbe:
         await self._session.send("Network.enable", {})
 
     async def observe_dom(self, page: Any, **state: Any) -> None:
+        structure: dict[str, Any] = {}
+        if not self.diagnostic and not self.network_enabled:
+            self.lifecycle.observe_dom(**state, structure=structure)
+            return
         try:
-            structure = await page.evaluate(_DOM_STRUCTURE_SCRIPT)
+            observed = await page.evaluate(_DOM_STRUCTURE_SCRIPT)
+            if isinstance(observed, dict):
+                structure = observed
         except Exception as exc:
             self.record("dom_observation_failed", error_type=type(exc).__name__)
+        safe_state = {**state, "structure": structure}
+        self.lifecycle.observe_dom(**safe_state)
+        if not self.diagnostic:
             return
-        safe_state = {**state, "structure": structure if isinstance(structure, dict) else {}}
         signature = json.dumps(safe_state, ensure_ascii=True, sort_keys=True, default=str)
         if signature == self._last_dom_signature:
             return
@@ -278,7 +389,10 @@ class ResponseLifecycleProbe:
                 _active_context.reset(self._context_token)
             except (ValueError, RuntimeError):
                 _active_context.set(None)
-        _probe_claimed = False
+        if self.diagnostic:
+            _probe_claimed = False
+        if not self.diagnostic:
+            return
         try:
             self.output_dir.mkdir(parents=True, exist_ok=True)
             target = self.output_dir / f"{self.probe_id}.jsonl"
@@ -413,15 +527,21 @@ class ResponseLifecycleProbe:
 async def start_response_probe(page: Any) -> ResponseLifecycleProbe | None:
     global _probe_claimed
     requested = _request_context.get()
-    if requested is None or _probe_claimed:
-        return None
-    probe_id, output_dir = requested
-    _probe_claimed = True
-    probe = ResponseLifecycleProbe(probe_id, output_dir)
+    lifecycle = requested.lifecycle if requested else ResponseLifecycleState()
+    diagnostic = bool(requested and requested.probe_id and not _probe_claimed)
+    if diagnostic:
+        _probe_claimed = True
+    probe = ResponseLifecycleProbe(
+        requested.probe_id if diagnostic and requested else "runtime",
+        requested.output_dir if requested else Path("."),
+        lifecycle=lifecycle,
+        diagnostic=diagnostic,
+        network_enabled=diagnostic or lifecycle_network_monitor_enabled(),
+    )
     try:
         await probe.start(page)
     except Exception as exc:
-        log.warning("response probe start failed probe_id=%s error=%s", probe_id, exc)
+        log.warning("response lifecycle monitor start failed probe_id=%s error=%s", probe.probe_id, exc)
         try:
             await probe.close("probe_error")
         except Exception:
@@ -443,6 +563,48 @@ def record_probe_event(event: str, **fields: Any) -> None:
     probe = _active_context.get()
     if probe is not None:
         probe.record(event, **fields)
+
+
+def current_lifecycle_state() -> ResponseLifecycleState | None:
+    probe = _active_context.get()
+    if probe is not None:
+        return probe.lifecycle
+    requested = _request_context.get()
+    return requested.lifecycle if requested is not None else None
+
+
+def response_lifecycle_completion_ready() -> bool:
+    state = current_lifecycle_state()
+    return bool(state and state.completion_ready())
+
+
+def _is_correlated_server_terminal(fields: dict[str, Any]) -> bool:
+    source = str(fields.get("source") or "")
+    field_name = str(fields.get("terminal_field") or "").lower()
+    value = str(fields.get("terminal_value") or "").lower()
+    return bool(
+        source.startswith("websocket")
+        and field_name in {"type", "event", "state", "status"}
+        and _is_terminal_value(value)
+    )
+
+
+def _has_status_component(structure: dict[str, Any]) -> bool:
+    candidates = structure.get("animated_candidates")
+    if not isinstance(candidates, list):
+        return False
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        if str(candidate.get("role") or "").lower() == "status":
+            return True
+        tokens = [
+            *candidate.get("class_tokens", []),
+            *candidate.get("animation_names", []),
+        ]
+        if any("shimmer" in str(token).lower() for token in tokens):
+            return True
+    return False
 
 
 async def observe_detector_state(page: Any, **state: Any) -> None:

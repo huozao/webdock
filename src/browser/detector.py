@@ -8,7 +8,11 @@ from typing import Any
 from src.browser import selectors
 from src.browser.file_download import DownloadTarget, parse_download_targets
 from src.browser.human import idle_mouse_movement
-from src.browser.response_lifecycle_probe import observe_detector_state, record_probe_event
+from src.browser.response_lifecycle_probe import (
+    observe_detector_state,
+    record_probe_event,
+    response_lifecycle_completion_ready,
+)
 from src.utils.errors import ErrorCode, RelayError
 
 # Grace fallback for a residual .result-streaming class that lingers with NO stop
@@ -905,6 +909,13 @@ async def wait_for_response_complete(
         in_progress = (
             image_in_progress or scaffold_pending or bool(_INTERIM_RE.search(current or ""))
         ) and not new_image
+        # A task-correlated WebSocket terminal plus the page's own terminal UI is
+        # stronger than transient/status wording. This path is available only
+        # when passive protocol monitoring was explicitly enabled; otherwise the
+        # existing DOM/text fallback below remains unchanged.
+        if has_new and content_ready and response_lifecycle_completion_ready():
+            record_probe_event("detector_terminal", reason="protocol_and_dom_complete")
+            return current
         if has_new and content_ready and not in_progress and stable_for >= stable_seconds:
             if not generating:
                 # The action row (copy button) is the positive completion signal:

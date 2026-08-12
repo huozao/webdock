@@ -65,6 +65,9 @@ send_stages total=2.39s login=0.19 flyout=0.01 input=0.01 mode=0.03 snapshot=0.0
 - ⚠️ `response_hard_timeout_seconds` 看着像总上限，其实**从未生效**：scheduler 总是传 `max(effective_timeout, request_hard_cap_seconds)`，只有它不传时那个值才会被用到。要改上限就改 `request_hard_cap_seconds`。
 - 生产 bridge 使用异步 job：`POST /v1/chat/jobs` 立即返回 `job_id`，浏览器任务在 WebDock 后台继续；bridge 用 `GET /v1/chat/jobs/{job_id}` 做短轮询。因此 320s 只约束每次提交/查询，不再截断 1200s 浏览器任务，也不用修改 failover-proxy 的 320s。
 - job 按 `X-Request-ID` 幂等；同 ID 不同 payload 返回 409 `REQUEST_ID_CONFLICT`。状态为 `queued/running/succeeded/failed/cancelled`，失败保留原 `error_code/message`。1200s 从提交即开始覆盖排队和执行全过程；活动任务最多 100 个，满载返回 429 `JOB_QUEUE_FULL`；完成记录保留 24h，最多 1000 条。
+- job 查询响应的 `progress` 是可复用的脱敏生命周期接口（`schema_version=1`）：只提供 `phase`、耗时及 Stop/状态组件/操作区/服务器终止等布尔信号，不含提示词、回复正文、DOM 或网络载荷。bridge/卡片只消费这个接口，不直接依赖 detector 内部实现。
+- 普通请求默认只复用 detector 已经读取的 DOM 信号，**不会**额外创建 CDP Network 会话或扫描状态组件。仅显式诊断请求（运行时 `diagnostic_probe_enabled=true` 且带 `X-Webdock-Probe-ID`）会记录脱敏 JSONL；普通请求的被动协议监听还需单独在 `runtime.json` 显式设 `lifecycle_network_monitor_enabled=true`。默认保持 `false`。
+- 协议完成只能作为组合证据：本次任务进入过生成态 + task-correlated WebSocket terminal + Stop 消失 + 操作区出现。SSE `[DONE]` 早于页面完成，不能单独判终局；未开启协议监听时继续走原 DOM/text 兜底。
 - job 是 node-local：bridge 必须根据提交响应的 `X-Webdock-Route` 固定轮询最初接单的 primary/standby；不能在任务中途随主备恢复切到另一台查询。
 - 同步接口保留给本地调试和旧 bridge 兼容；新 bridge 遇到旧 WebDock 的 job endpoint 404/405 才回退同步调用。
 - 实测参考：生成一份 3 页 Word ≈ 289s（`Worked for 4m 49s`）；异步 job 下可继续运行并由飞书处理卡片报告等待时间。

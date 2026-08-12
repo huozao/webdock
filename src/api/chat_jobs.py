@@ -9,6 +9,7 @@ from typing import Any, Awaitable, Callable
 
 
 JobRunner = Callable[[], Awaitable[dict[str, Any]]]
+ProgressProvider = Callable[[], dict[str, Any]]
 
 
 class JobConflictError(Exception):
@@ -31,6 +32,7 @@ class _Job:
     result: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
     task: asyncio.Task[None] | None = None
+    progress_provider: ProgressProvider | None = None
 
 
 class ChatJobStore:
@@ -62,6 +64,7 @@ class ChatJobStore:
         request_id: str,
         fingerprint: str,
         runner: JobRunner,
+        progress_provider: ProgressProvider | None = None,
     ) -> dict[str, Any]:
         async with self._lock:
             self._prune_locked()
@@ -83,7 +86,12 @@ class ChatJobStore:
                 )
 
             job_id = "job-" + hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:24]
-            job = _Job(job_id=job_id, request_id=request_id, fingerprint=fingerprint)
+            job = _Job(
+                job_id=job_id,
+                request_id=request_id,
+                fingerprint=fingerprint,
+                progress_provider=progress_provider,
+            )
             self._jobs[job_id] = job
             self._request_jobs[request_id] = job_id
             job.task = asyncio.create_task(self._run(job, runner), name=f"webdock-{job_id}")
@@ -192,6 +200,13 @@ class ChatJobStore:
             payload["result"] = copy.deepcopy(job.result)
         if job.error is not None:
             payload["error"] = copy.deepcopy(job.error)
+        if job.progress_provider is not None:
+            try:
+                progress = job.progress_provider()
+            except Exception:
+                progress = None
+            if isinstance(progress, dict):
+                payload["progress"] = copy.deepcopy(progress)
         elapsed_start = job.started_at_ms or job.created_at_ms
         elapsed_end = job.finished_at_ms or int(time.time() * 1000)
         payload["elapsed_seconds"] = round(max(0, elapsed_end - elapsed_start) / 1000, 1)

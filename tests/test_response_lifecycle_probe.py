@@ -4,9 +4,11 @@ import asyncio
 import json
 
 from src.browser.response_lifecycle_probe import (
+    ResponseLifecycleState,
     ResponseLifecycleProbe,
     diagnostic_probe_enabled,
     extract_terminal_markers,
+    lifecycle_network_monitor_enabled,
     observe_detector_state,
     response_probe_request,
     sanitize_url,
@@ -278,3 +280,74 @@ def test_runtime_probe_switch_is_read_fresh(tmp_path):
 
     runtime_path.write_text(json.dumps({"diagnostic_probe_enabled": False}), encoding="utf-8")
     assert diagnostic_probe_enabled(settings) is False
+
+
+def test_runtime_lifecycle_state_is_reusable_without_writing_a_trace(tmp_path):
+    async def scenario():
+        state = ResponseLifecycleState()
+        page = FakePage()
+        with response_probe_request(None, tmp_path, lifecycle=state):
+            probe = await start_response_probe(page)
+            assert probe is not None
+            probe.record("send_started")
+            probe.record("send_clicked")
+            await observe_detector_state(
+                page,
+                stop_present=True,
+                streaming_present=False,
+                action_row_present=False,
+                assistant_count=1,
+                generated_image_count=0,
+                widget_present=False,
+            )
+            probe._record_protocol_markers(
+                "ws-1", [{"field": "type", "value": "done"}], "websocket_unmapped"
+            )
+            await observe_detector_state(
+                page,
+                stop_present=False,
+                streaming_present=False,
+                action_row_present=True,
+                assistant_count=1,
+                generated_image_count=0,
+                widget_present=False,
+            )
+            snapshot = state.snapshot()
+            assert snapshot["schema_version"] == 1
+            assert snapshot["phase"] == "finalizing"
+            assert snapshot["server_terminal_observed"] is True
+            assert snapshot["stop_present"] is False
+            assert snapshot["action_row_present"] is True
+            assert state.completion_ready() is True
+            await stop_response_probe(probe, "completed")
+
+        assert state.snapshot()["phase"] == "completed"
+        assert page.context.session.commands == []
+        assert page.evaluate_calls == 0
+        assert list(tmp_path.glob("*.jsonl")) == []
+
+    asyncio.run(scenario())
+
+
+def test_sse_done_does_not_mark_server_terminal():
+    state = ResponseLifecycleState()
+    state.observe_event("send_started")
+    state.observe_event(
+        "protocol_terminal",
+        source="response_body",
+        terminal_field="sentinel",
+        terminal_value="DONE",
+    )
+
+    assert state.snapshot()["server_terminal_observed"] is False
+    assert state.completion_ready() is False
+
+
+def test_runtime_network_monitor_requires_explicit_opt_in(tmp_path):
+    settings = Settings(browser_profile_dir=tmp_path)
+    assert lifecycle_network_monitor_enabled(settings) is False
+
+    (tmp_path / "runtime.json").write_text(
+        json.dumps({"lifecycle_network_monitor_enabled": True}), encoding="utf-8"
+    )
+    assert lifecycle_network_monitor_enabled(settings) is True

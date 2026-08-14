@@ -19,6 +19,7 @@ from src.browser.detector import (
     find_first,
     generated_file_targets,
     generated_image_srcs,
+    imagegen_pending,
     mark_existing_reply_media,
     latest_message_has_widget,
     ordered_feishu_markdown,
@@ -81,6 +82,13 @@ def _media_screenshot_selectors(channel: str) -> list[tuple[str, bool]]:
 # rendered size); we download in-page (so cookies apply) and serve via /media.
 MAX_IMAGES_PER_REPLY = 4
 MAX_FILES_PER_REPLY = 4
+
+# An image-edit turn swaps its rendered picture in and out while it settles:
+# measured 2026-08-14, the generated src went 1 → 0 → 1 over the last 4 seconds
+# of the turn. A single scan right after the wait can therefore land on the empty
+# frame and deliver the overlay text with no picture, so re-scan for a bounded
+# window while the imagegen scaffold still has no completed image.
+IMAGE_RESCAN_SECONDS = 15.0
 
 # A reply that is nothing but a filename is the signature of an unrecognised file
 # pill: the turn has no .markdown body, so inner_text picks up the pill's label.
@@ -340,6 +348,8 @@ class ChatGPTPage:
             final_answer = answer.strip()
             prev_srcs = set(previous_image_srcs)
             new_image_srcs = [s for s in await generated_image_srcs(self.page) if s not in prev_srcs]
+            if not new_image_srcs:
+                new_image_srcs = await self._await_settling_generated_images(prev_srcs)
             feishu_media_inlined = False
             if new_image_srcs:
                 # An image reply's text is only interim/UI noise, and may still be
@@ -392,6 +402,23 @@ class ChatGPTPage:
             raise RelayError(ErrorCode.UNKNOWN_ERROR, str(exc), debug_dir=debug_dir) from exc
         finally:
             await stop_response_probe(probe, probe_outcome)
+
+    async def _await_settling_generated_images(self, exclude_srcs: set[str]) -> list[str]:
+        """Re-scan for the turn's picture while its imagegen scaffold is still empty.
+
+        Only runs when the scaffold is present without a completed image, so a
+        plain text reply returns immediately. Bounded by IMAGE_RESCAN_SECONDS: a
+        genuinely stuck scaffold ends the turn rather than holding the lane."""
+        if not await imagegen_pending(self.page):
+            return []
+        deadline = time.monotonic() + IMAGE_RESCAN_SECONDS
+        while time.monotonic() < deadline:
+            await asyncio.sleep(1)
+            srcs = [s for s in await generated_image_srcs(self.page) if s not in exclude_srcs]
+            if srcs:
+                return srcs
+        log.info("imagegen scaffold still had no completed image after %.0fs", IMAGE_RESCAN_SECONDS)
+        return []
 
     async def _append_media_images(
         self, answer: str, media_base_url: str, exclude_image_srcs: set[str], *, capture_widgets: bool = True

@@ -12,6 +12,7 @@ from src.browser.response_lifecycle_probe import (
     observe_detector_state,
     record_probe_event,
     response_lifecycle_completion_ready,
+    response_lifecycle_status_component,
 )
 from src.utils.errors import ErrorCode, RelayError
 
@@ -874,6 +875,14 @@ async def wait_for_response_complete(
             image_in_progress=image_in_progress,
             scaffold_pending=scaffold_pending,
         )
+        # The animated status component ("shimmer") is the page's own "I am still
+        # working" mark, and it survives the stop button flapping off. Measured
+        # 2026-08-14: it stayed lit for the whole 241s of a document build and for
+        # the whole image render, going out 4.9s / 1.3s before the stop button did.
+        # It is unknown (None) when nobody samples the DOM structure — then it must
+        # not block anything.
+        status_component = response_lifecycle_status_component() is True
+
         if last_progress_signature is None:
             last_progress_signature = progress_signature
         elif progress_signature != last_progress_signature:
@@ -906,14 +915,35 @@ async def wait_for_response_complete(
         # an image-gen placeholder meanwhile. While either is present the reply
         # isn't done — keep waiting (ignore the interim text) until it clears (and,
         # for images, a NEW src appears). A refusal / plain reply has neither.
+        # The status component joins this set, so a turn whose stop button flapped
+        # off mid-render is still held open (that flap is what returned the bare
+        # "Edit" overlay label and lost the picture on 2026-08-14). Bounded by the
+        # same grace the residual streaming class gets: once nothing else claims to
+        # be generating and the text has been stable past the grace, a lingering
+        # animation node is treated as residue, not as work in flight — otherwise a
+        # stale shimmer would hold the turn to the 1200s hard cap.
+        status_component_pending = status_component and (
+            generating or stable_for < stable_seconds + STUCK_GRACE_SECONDS
+        )
         in_progress = (
-            image_in_progress or scaffold_pending or bool(_INTERIM_RE.search(current or ""))
+            image_in_progress
+            or scaffold_pending
+            or status_component_pending
+            or bool(_INTERIM_RE.search(current or ""))
         ) and not new_image
         # A task-correlated WebSocket terminal plus the page's own terminal UI is
         # stronger than transient/status wording. This path is available only
         # when passive protocol monitoring was explicitly enabled; otherwise the
         # existing DOM/text fallback below remains unchanged.
-        if has_new and content_ready and response_lifecycle_completion_ready():
+        #
+        # It must NOT outrank in_progress. Measured 2026-08-14 on an image-edit
+        # turn: SSE [DONE] at 4.2s and the WebSocket finished_successfully at
+        # 6.1s, while the picture only landed in the DOM at 36.8s — the protocol
+        # terminal says "the server is done", not "the page is done". Without
+        # this guard the fast path skips the imagegen scaffold gate added on
+        # 2026-07-18 and returns the overlay's "Edit" label as the whole reply,
+        # losing the image (observed in production 2026-08-14).
+        if has_new and content_ready and not in_progress and response_lifecycle_completion_ready():
             record_probe_event("detector_terminal", reason="protocol_and_dom_complete")
             return current
         if has_new and content_ready and not in_progress and stable_for >= stable_seconds:

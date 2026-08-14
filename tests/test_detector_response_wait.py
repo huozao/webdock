@@ -245,10 +245,8 @@ def test_wait_keeps_waiting_while_stop_button_present(monkeypatch):
     assert answer is None
 
 
-def test_wait_accepts_protocol_and_dom_completion_even_when_text_looks_interim(
-    monkeypatch, tmp_path
-):
-    page = FakePage(["generating final report"], stop_button=False)
+def test_wait_accepts_protocol_and_dom_completion(monkeypatch, tmp_path):
+    page = FakePage(["the final report"], stop_button=False)
     monkeypatch.setattr(detector, "turn_actions_ready", lambda _page: asyncio.sleep(0, result=True))
 
     async def scenario():
@@ -273,7 +271,107 @@ def test_wait_accepts_protocol_and_dom_completion_even_when_text_looks_interim(
             await stop_response_probe(probe, "completed")
             return answer
 
-    assert asyncio.run(scenario()) == "generating final report"
+    assert asyncio.run(scenario()) == "the final report"
+
+
+def _protocol_complete_scenario(page, tmp_path, timeout_seconds=3):
+    """Drive a turn whose protocol terminal + terminal UI both say 'done'."""
+
+    async def scenario():
+        state = ResponseLifecycleState()
+        with response_probe_request(None, tmp_path, lifecycle=state):
+            probe = await start_response_probe(page)
+            assert probe is not None
+            state.observe_event("send_started")
+            state.observe_dom(stop_present=True, action_row_present=False, structure={})
+            state.observe_event(
+                "protocol_terminal",
+                source="websocket_unmapped",
+                terminal_field="type",
+                terminal_value="done",
+            )
+            answer = await wait_for_response_complete(
+                page,
+                timeout_seconds=timeout_seconds,
+                stable_seconds=0,
+                previous_count=0,
+            )
+            await stop_response_probe(probe, "completed")
+            return answer
+
+    return asyncio.run(scenario())
+
+
+def test_wait_holds_while_imagegen_scaffold_pending_despite_protocol_terminal(
+    monkeypatch, tmp_path
+):
+    # Production 2026-08-14: the WebSocket terminal arrived at 6.1s while the
+    # edited picture only landed at 36.8s. With the stop button flapped off and
+    # the action row already rendered, the protocol fast path must still defer to
+    # the scaffold gate — otherwise it returns the overlay's "Edit" label and the
+    # image is lost.
+    page = FakePage(["Edit"], stop_button=False)
+    monkeypatch.setattr(detector, "turn_actions_ready", lambda _page: asyncio.sleep(0, result=True))
+    monkeypatch.setattr(detector, "imagegen_pending", lambda _page: asyncio.sleep(0, result=True))
+
+    assert _protocol_complete_scenario(page, tmp_path) is None
+
+
+def test_wait_holds_while_status_component_is_lit_after_stop_button_flapped_off(
+    monkeypatch, tmp_path
+):
+    # The page's own animated status component says it is still working. Measured
+    # 2026-08-14 it stays lit through the whole render and goes out only 1.3-4.9s
+    # before the stop button — so while it is lit, a flapped-off stop button must
+    # not be read as "finished" (that flap is what returned a bare "Edit" label
+    # and lost the picture in production).
+    page = FakePage(["Edit"], stop_button=False)
+    monkeypatch.setattr(detector, "turn_actions_ready", lambda _page: asyncio.sleep(0, result=True))
+    monkeypatch.setattr(detector, "response_lifecycle_status_component", lambda: True)
+
+    answer = asyncio.run(
+        wait_for_response_complete(page, timeout_seconds=3, stable_seconds=0, previous_count=0)
+    )
+
+    assert answer is None
+
+
+def test_wait_treats_a_lingering_status_component_as_residue_after_grace(monkeypatch):
+    # Opposite failure mode: the animation node never unmounts although the turn is
+    # done. Once nothing else claims to be generating and the text held past the
+    # grace, accept — otherwise a stale shimmer would hold the turn to the hard cap.
+    monkeypatch.setattr(detector, "STUCK_GRACE_SECONDS", 1)
+    page = FakePage(["final answer"], stop_button=False)
+    monkeypatch.setattr(detector, "turn_actions_ready", lambda _page: asyncio.sleep(0, result=True))
+    monkeypatch.setattr(detector, "response_lifecycle_status_component", lambda: True)
+
+    answer = asyncio.run(
+        wait_for_response_complete(page, timeout_seconds=10, stable_seconds=1, previous_count=0)
+    )
+
+    assert answer == "final answer"
+
+
+def test_wait_ignores_status_component_when_it_is_unknown(monkeypatch):
+    # Nobody sampling the DOM structure -> None. That must not block completion.
+    page = FakePage(["final answer"], stop_button=False)
+    monkeypatch.setattr(detector, "turn_actions_ready", lambda _page: asyncio.sleep(0, result=True))
+    monkeypatch.setattr(detector, "response_lifecycle_status_component", lambda: None)
+
+    answer = asyncio.run(
+        wait_for_response_complete(page, timeout_seconds=5, stable_seconds=0, previous_count=0)
+    )
+
+    assert answer == "final answer"
+
+
+def test_wait_holds_while_interim_text_despite_protocol_terminal(monkeypatch, tmp_path):
+    # Same reason: the server being done does not mean the page is done, so
+    # interim status wording still holds the turn open.
+    page = FakePage(["generating final report"], stop_button=False)
+    monkeypatch.setattr(detector, "turn_actions_ready", lambda _page: asyncio.sleep(0, result=True))
+
+    assert _protocol_complete_scenario(page, tmp_path) is None
 
 
 def test_wait_returns_widget_only_reply_with_empty_text():

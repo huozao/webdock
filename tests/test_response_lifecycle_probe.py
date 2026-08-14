@@ -10,6 +10,7 @@ from src.browser.response_lifecycle_probe import (
     extract_terminal_markers,
     lifecycle_network_monitor_enabled,
     observe_detector_state,
+    response_lifecycle_status_component,
     response_probe_request,
     sanitize_url,
     start_response_probe,
@@ -341,6 +342,24 @@ def test_sse_done_does_not_mark_server_terminal():
 
     assert state.snapshot()["server_terminal_observed"] is False
     assert state.completion_ready() is False
+
+
+def test_status_component_reads_unknown_when_structure_is_not_sampled(tmp_path):
+    # Nobody sampling the DOM structure must read as "unknown", never as "the page
+    # stopped working" — otherwise a disabled monitor looks like a wedged turn.
+    state = ResponseLifecycleState()
+    with response_probe_request(None, tmp_path, lifecycle=state):
+        assert response_lifecycle_status_component() is None
+
+        state.structure_available = True
+        assert response_lifecycle_status_component() is False
+
+        state.observe_dom(
+            stop_present=True,
+            action_row_present=False,
+            structure={"animated_candidates": [{"role": "status", "class_tokens": []}]},
+        )
+        assert response_lifecycle_status_component() is True
 
 
 def test_runtime_network_monitor_requires_explicit_opt_in(tmp_path):

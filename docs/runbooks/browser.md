@@ -12,6 +12,18 @@ ChatGPT 登录与 Cloudflare 验证必须人工在 noVNC 完成，自动化必�
 - 长思考超时链：cloud-provider idle watchdog 是 B 根因，`baseUrl→172.17.0.1` 判 local 禁 watchdog。
 - 登录态在 `browser_data/` 卷；重建容器登录态可存活（卷保住，无需重登），但**改浏览器启动逻辑的重建必须先问用户**。
 - 图改图：图片文件 pill 点击=开预览层非下载；预览层兜底抓图按 MEDIA 投递；copy 按钮=正向完成信号（生成中不出现），缺失时 +8s 宽限。
+- **图改图的完成判据只有一个能信：imagegen scaffold 里有没有落地的图**（`imagegen_pending`）。2026-08-14 诊断探针实测一条 43s 的图改图，逐秒取证结论如下，改这块前先对着看：
+  - SSE `[DONE]` 在 4.2s、WebSocket `finished_successfully` 在 6.1s 就到，**图片 36.8s 才进 DOM**。协议终态说的是"服务器写完了"，不是"页面画完了"，早 30 秒，不能当完成判据。
+  - 图片渲染的这 30 秒里 `stop_present` **全程为 true**。07-17 记的"stop 按钮会 flap"不是常态，别当成必然；但也别反过来当保证。
+  - 闪烁/动画组件（`role=status`、`loading-shimmer`）**比 stop 先灭，中途还有空窗**：35.6s 那一帧 scaffold 在、图为 0、`animated_candidates` 已经空了。所以它挡不住这个窗口，`completion_ready()` 里刻意没有它，别再往回加。
+  - 生成图 src 会 **1 → 0 → 1 跳变**（ChatGPT 换图重渲），detector 返回后紧接着扫一次可能正好扑空 → `chatgpt_page` 用 `IMAGE_RESCAN_SECONDS` 有界重扫补回。
+  - imagegen 覆盖层的 `Edit`/`Share` 会混进 `rich_assistant_text`（它们不是 button，逃过 UI 过滤），所以**不要用文字判完成**，图画完了 `Edit` 照样在。
+  - 复现工具：`runtime.json` 临时置 `diagnostic_probe_enabled=true`，请求带 `X-Webdock-Probe-ID`，逐秒 `dom_state` 落在 `/app/logs/probes/<probe-id>.jsonl`，跑完改回 false。
+
+<!-- nav-check-python: src/browser/detector.py:imagegen_pending -->
+<!-- nav-check-python: src/browser/detector.py:rich_assistant_text -->
+<!-- nav-check-python: src/browser/chatgpt_page.py:IMAGE_RESCAN_SECONDS -->
+<!-- nav-check-python: src/browser/response_lifecycle_probe.py:completion_ready -->
 - OpenClaw monitor 串行投递图片（慢是设计不是 bug）；⛔ bridge 反转合并别重试。
 - 文件附件：捕获正则必须容忍 ` (image/*)`；context-summary 历史块要先剥离防死循环。
 - **生成文档 pill 点击 = 开预览飞出层，不触发 download**（07-27）。层是 `data-testid=stage-thread-flyout` / `screen-threadFlyOut`，自带 `aria-label=Download`；**Escape 关不掉它**（实测 width 751 扛过多次 Escape），必须点 `data-testid=close-button`。层不关会盖住会话，下一轮永远等不到完成信号 → 整条 lane 被 wedge。每轮发送前会清一次残留层。
@@ -72,8 +84,18 @@ send_stages total=2.39s login=0.19 flyout=0.01 input=0.01 mode=0.03 snapshot=0.0
 - 生产 bridge 使用异步 job：`POST /v1/chat/jobs` 立即返回 `job_id`，浏览器任务在 WebDock 后台继续；bridge 用 `GET /v1/chat/jobs/{job_id}` 做短轮询。因此 320s 只约束每次提交/查询，不再截断 1200s 浏览器任务，也不用修改 failover-proxy 的 320s。
 - job 按 `X-Request-ID` 幂等；同 ID 不同 payload 返回 409 `REQUEST_ID_CONFLICT`。状态为 `queued/running/succeeded/failed/cancelled`，失败保留原 `error_code/message`。1200s 从提交即开始覆盖排队和执行全过程；活动任务最多 100 个，满载返回 429 `JOB_QUEUE_FULL`；完成记录保留 24h，最多 1000 条。
 - job 查询响应的 `progress` 是可复用的脱敏生命周期接口（`schema_version=1`）：只提供 `phase`、耗时及 Stop/状态组件/操作区/服务器终止等布尔信号，不含提示词、回复正文、DOM 或网络载荷。bridge/卡片只消费这个接口，不直接依赖 detector 内部实现。
-- 普通请求默认只复用 detector 已经读取的 DOM 信号，**不会**额外创建 CDP Network 会话或扫描状态组件。仅显式诊断请求（运行时 `diagnostic_probe_enabled=true` 且带 `X-Webdock-Probe-ID`）会记录脱敏 JSONL；普通请求的被动协议监听还需单独在 `runtime.json` 显式设 `lifecycle_network_monitor_enabled=true`。默认保持 `false`。
-- 协议完成只能作为组合证据：本次任务进入过生成态 + task-correlated WebSocket terminal + Stop 消失 + 操作区出现。SSE `[DONE]` 早于页面完成，不能单独判终局；未开启协议监听时继续走原 DOM/text 兜底。
+- 普通请求默认只复用 detector 已经读取的 DOM 信号，**不会**额外创建 CDP Network 会话或扫描状态组件。仅显式诊断请求（运行时 `diagnostic_probe_enabled=true` 且带 `X-Webdock-Probe-ID`）会记录脱敏 JSONL；普通请求的被动协议监听还需单独在 `runtime.json` 显式设 `lifecycle_network_monitor_enabled=true`。⚠️ **代码默认 `false`，但 webdock2 生产实际是 `true`**（2026-08-14 核对）——判断"这条路径生产上跑不跑得到"要去读设备上的 `runtime.json`，别按代码默认推。
+- 协议完成只能作为组合证据，而且**排在 `in_progress` 之后**：本次任务进入过生成态 + task-correlated WebSocket terminal + Stop 消失 + 操作区出现，且 imagegen scaffold / image-gen 占位 / interim 状态文字都不在。SSE `[DONE]` 早于页面完成，不能单独判终局；未开启协议监听时继续走原 DOM/text 兜底。
+  - ⚠️ 2026-08-12 引入这条快通道时它排在 `in_progress` **之前**，等于绕开 07-18 为图改图加的 scaffold 闸门，08-14 生产上回归成"只回 Edit、图丢失"。2026-08-14 已改为 `not in_progress` 前置；连带的行为变更：协议终态**不再**压过 interim 状态文字。
+- reload 兜底（页面卡死 / stop 按钮卡住时刷新页面重试）**至今没有实现**。它只出现在 `docs/superpowers/specs/2026-08-12-webdock-response-lifecycle-probe-design.md` 里，且那份 spec 明确把它排除在该阶段之外（"不在本阶段实现 reload 探针、提前判死或新的超时策略"）。别把它当成现存机制。
+- **闪烁组件（动态状态组件）已进完成判定**（08-14）：`response_lifecycle_status_component()` 为 True 时算 `in_progress`，页面自己说"还在干活"就不许判完成。它是 stop 按钮 flap 掉时的第二道保险——那次 flap 正是"只回 Edit、图丢失"的直接窗口。
+  - 实测依据（08-14 两条诊断样本）：271.8s 的长文档任务里 shimmer 从 2.7s 一直亮到 243.5s，**"跑代码、页面完全静止"那段照样亮着**；图改图那条也是全程亮。它熄灭到 stop 熄灭的间隔分别是 4.9s 和 1.3s。
+  - ⚠️ 反向风险已加界：动画节点残留（页面其实完事了但节点没卸载）会把整轮拖到 1200s 硬顶，所以复用 `STUCK_GRACE_SECONDS` —— 没有别的生成信号且文本稳定超过宽限后，残留的动画不再算"在忙"。改这个判据前先想清楚这两个方向。
+  - 采不到结构时（没人采样 DOM structure）返回 `None`，**必须当"未知"而不是"组件不在"**，否则关掉监听会变成"页面停止工作"。
+  - 卡死形状（shimmer 灭、stop 却一直亮）没有做自动处置：用户在使用中发现异常直接报，再定 reload 方案。
+
+<!-- nav-check-python: src/browser/detector.py:STUCK_GRACE_SECONDS -->
+<!-- nav-check-python: src/browser/response_lifecycle_probe.py:response_lifecycle_status_component -->
 - job 是 node-local：bridge 必须根据提交响应的 `X-Webdock-Route` 固定轮询最初接单的 primary/standby；不能在任务中途随主备恢复切到另一台查询。
 - 同步接口保留给本地调试和旧 bridge 兼容；新 bridge 遇到旧 WebDock 的 job endpoint 404/405 才回退同步调用。
 - 实测参考：生成一份 3 页 Word ≈ 289s（`Worked for 4m 49s`）；异步 job 下可继续运行并由飞书处理卡片报告等待时间。

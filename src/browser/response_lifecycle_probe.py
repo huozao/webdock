@@ -72,6 +72,9 @@ class ResponseLifecycleState:
     action_row_present: bool = False
     status_component_present: bool = False
     server_terminal_observed: bool = False
+    # False when nobody samples the turn's DOM structure, so status_component_present
+    # is "unknown", not "absent" — observers must not read it as a real signal.
+    structure_available: bool = False
     _generation_seen: bool = False
     _last_activity_at: float | None = None
 
@@ -281,6 +284,7 @@ class ResponseLifecycleProbe:
         self.lifecycle = lifecycle or ResponseLifecycleState()
         self.diagnostic = diagnostic
         self.network_enabled = diagnostic if network_enabled is None else network_enabled
+        self.lifecycle.structure_available = self.diagnostic or self.network_enabled
         self.max_events = max(1, max_events)
         self.max_bytes = max(512, max_bytes)
         self.started_at = time.monotonic()
@@ -576,6 +580,18 @@ def current_lifecycle_state() -> ResponseLifecycleState | None:
 def response_lifecycle_completion_ready() -> bool:
     state = current_lifecycle_state()
     return bool(state and state.completion_ready())
+
+
+def response_lifecycle_status_component() -> bool | None:
+    """Whether the turn currently shows an animated status component.
+
+    Returns None when nobody is sampling the DOM structure — callers must treat
+    that as "unknown" rather than "no component", or they would read a disabled
+    monitor as a page that stopped working."""
+    state = current_lifecycle_state()
+    if state is None or not state.structure_available:
+        return None
+    return state.status_component_present
 
 
 def _is_correlated_server_terminal(fields: dict[str, Any]) -> bool:

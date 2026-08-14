@@ -14,6 +14,8 @@ OPENCLAW_BRIDGE_KEEPALIVE_SECONDS=15
 
 `WEB_DOCK_TIMEOUT_SECONDS` must outlast WebDock's `chat_timeout_seconds` (prod ~300s); the bridge sends SSE keepalive chunks every `OPENCLAW_BRIDGE_KEEPALIVE_SECONDS` during the wait so OpenClaw's ~120s idle timeout does not cut the connection.
 
+<!-- nav-check-python: src/config.py:chat_timeout_seconds -->
+
 The bridge should call:
 
 ```text

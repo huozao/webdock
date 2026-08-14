@@ -20,6 +20,9 @@ ChatGPT 登录与 Cloudflare 验证必须人工在 noVNC 完成，自动化必�
 - **同车道不再长时间排队**：普通请求等待同一 `lane.key` 的锁最多 5s；仍忙则返回 HTTP 429 / `LANE_BUSY`，明确说明等待时间和“本次请求未执行”，并写入 archive。不同 lane 仍按 `max_concurrent_chats` 并发。例外是微信同一入站消息拆出的 metadata-less 图片分片，它继续沿用既有 lane 继承与排队行为，不能被误判成独立追问。
 - **`/新对话` 是抢占控制指令**：它先使旧一代排队请求失效，再取消当前 in-flight task、重建该 lane 的 tab。被取消任务以 `REQUEST_CANCELLED` 归档；旧排队请求醒来后只返回 `LANE_BUSY`，不得调用 ChatGPT。
 
+<!-- nav-check-python: src/browser/detector.py:generation_error_text -->
+<!-- nav-check-python: src/utils/errors.py:GENERATION_FAILED -->
+
 ## 症状表
 
 | 症状 | 先查 | 处置 |
@@ -46,6 +49,9 @@ send_stages total=2.39s login=0.19 flyout=0.01 input=0.01 mode=0.03 snapshot=0.0
 - ⚠️ `mode` 曾经稳定占 6.02s：`ensure_mode` 把三个带文案的候选逐个探、每个各等满 2s，而多数时候只是确认模式已经对了。现在只问无文案的胶囊本体（`MODE_PICKER_BUTTON_ANY`）一次，命中即返回（07-28，`cdca628`）。
 - ⛔ 那次超时预算不能再往下压：一度压到 2s，新开会话时胶囊来不及渲染 → `mode_switch_failed stage=button`，**模式静默没切成**。这比慢几秒严重得多，6000ms 是"等页面"的余量而不是浪费。
 
+<!-- nav-check-python: src/browser/chatgpt_page.py:ensure_mode -->
+<!-- nav-check-python: src/browser/selectors.py:MODE_PICKER_BUTTON_ANY -->
+
 ## 排障工具
 
 - CDP 旁路：patchright `connect_over_cdp` 容器 `:9222` dump DOM。**⚠️ 9222 是 ChatGPT 生产实例别乱动**（webdock2 上 9223 是另一独立 Chrome）。
@@ -71,6 +77,9 @@ send_stages total=2.39s login=0.19 flyout=0.01 input=0.01 mode=0.03 snapshot=0.0
 - job 是 node-local：bridge 必须根据提交响应的 `X-Webdock-Route` 固定轮询最初接单的 primary/standby；不能在任务中途随主备恢复切到另一台查询。
 - 同步接口保留给本地调试和旧 bridge 兼容；新 bridge 遇到旧 WebDock 的 job endpoint 404/405 才回退同步调用。
 - 实测参考：生成一份 3 页 Word ≈ 289s（`Worked for 4m 49s`）；异步 job 下可继续运行并由飞书处理卡片报告等待时间。
+
+<!-- nav-check-python: src/config.py:response_hard_timeout_seconds -->
+<!-- nav-check-python: src/config.py:request_hard_cap_seconds -->
 
 ## 部署
 

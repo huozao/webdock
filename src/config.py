@@ -27,9 +27,18 @@ class Settings:
     # run far longer than text — image rendering has >idle_timeout quiet gaps that
     # would trip the text timeout. Kept under the bridge's WEB_DOCK_TIMEOUT (320s).
     chat_timeout_seconds_with_images: int = 300
-    # Absolute wall-clock ceiling per request (kept just under the bridge's 320s).
-    # NOT the soft timeout: a long but actively-streaming reply runs until this cap.
-    request_hard_cap_seconds: int = 310
+    # Absolute wall-clock ceiling per request. NOT the soft timeout: a long but
+    # actively-streaming reply runs until this cap.
+    # Was 310 to sit just under the failover-proxy's 320s single-HTTP limit, so the
+    # browser side failed first and could return a structured error instead of being
+    # cut off mid-connection. That reason stopped applying on 2026-07-27, when the
+    # bridge moved to async jobs (submit + poll) — the browser task no longer rides a
+    # single 320s HTTP connection. Devices were re-pinned to 1200 in runtime.json back
+    # then but this default was left behind; webdock1 was still silently running at 310
+    # on 2026-08-14. Raised here on 2026-08-15 so a fresh install is correct by default.
+    # ⚠️ A caller falling back to the sync /v1/chat/completions endpoint no longer fails
+    # before the proxy does — see docs/runbooks/browser.md「超时三层与异步 job」.
+    request_hard_cap_seconds: int = 1200
     response_stable_seconds: int = 5
     response_idle_timeout_seconds: int = 15
     response_hard_timeout_seconds: int = 1200
@@ -84,7 +93,7 @@ def get_settings() -> Settings:
         chatgpt_url=_get("CHATGPT_URL", "https://chatgpt.com/", env),
         chat_timeout_seconds=int(_get("CHAT_TIMEOUT_SECONDS", "120", env)),
         chat_timeout_seconds_with_images=int(_get("CHAT_TIMEOUT_SECONDS_WITH_IMAGES", "300", env)),
-        request_hard_cap_seconds=int(_get("REQUEST_HARD_CAP_SECONDS", "310", env)),
+        request_hard_cap_seconds=int(_get("REQUEST_HARD_CAP_SECONDS", "1200", env)),
         response_stable_seconds=int(_get("RESPONSE_STABLE_SECONDS", "5", env)),
         response_idle_timeout_seconds=int(_get("RESPONSE_IDLE_TIMEOUT_SECONDS", "15", env)),
         response_hard_timeout_seconds=int(_get("RESPONSE_HARD_TIMEOUT_SECONDS", "1200", env)),

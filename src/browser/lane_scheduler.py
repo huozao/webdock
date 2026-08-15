@@ -40,11 +40,15 @@ CHATGPT_MODES = {"fast", "balanced", "advanced"}
 # so those images land in the same conversation instead of a stray default chat.
 LANE_FALLBACK_WINDOW_SECONDS = 120.0
 
-# Absolute wall-clock ceiling for a single request (kept just under the bridge's
-# 320s so WebDock returns first and frees the slot). This is NOT the soft timeout:
+# Absolute wall-clock ceiling for a single request. This is NOT the soft timeout:
 # the soft timeout is an *idle* deadline (give up only if a reply stops
 # progressing), so a long but actively-streaming reply keeps going until this cap.
-DEFAULT_REQUEST_HARD_CAP_SECONDS = 310.0
+# Was 310.0 to stay just under the proxy's 320s single-HTTP limit; obsolete since the
+# 2026-07-27 async-job cutover. Raised 2026-08-15 to match Settings — see the comment
+# on Settings.request_hard_cap_seconds in src/config.py for the full reasoning.
+# Production always passes settings.request_hard_cap_seconds explicitly (src/main.py);
+# this default only covers directly-constructed schedulers such as tests.
+DEFAULT_REQUEST_HARD_CAP_SECONDS = 1200.0
 DEFAULT_LANE_LOCK_WAIT_SECONDS = 5.0
 
 

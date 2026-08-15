@@ -78,7 +78,12 @@ send_stages total=2.39s login=0.19 flyout=0.01 input=0.01 mode=0.03 snapshot=0.0
 |---|---|---|---|
 | bridge → proxy | `openclaw_bridge.py::webdock_timeout()` | 1260s | 最宽松，几乎不触发 |
 | failover-proxy | 当前 business-cn 主机的受管 failover-proxy（位置查 fleet/infra） | **320s/单次 HTTP** | 同步调用的真实天花板 |
-| WebDock hard cap | `runtime.json::request_hard_cap_seconds` | 1200s（07-27 前是代码默认 310s） | 浏览器后台任务的真实上限 |
+| WebDock hard cap | `runtime.json::request_hard_cap_seconds` | 1200s（代码默认 2026-08-15 起也是 1200） | 浏览器后台任务的真实上限 |
+
+⚠️ **上表这行的旧写法「1200s（07-27 前是代码默认 310s）」自 2026-08-15 起确认会误导**：它读起来像"310 已经是历史"，
+实际 07-27 只改了设备上的 `runtime.json`，代码默认一直停在 310——webdock1 因此静默跑了三周 310s。
+2026-08-15 已把 `config.py` 与 `lane_scheduler.py` 的默认一并抬到 1200，根因消除；机制和缺键语义见下方
+「runtime.json：host 权威，改完必须重启」节。**判断生产行为仍要读设备文件，别只看代码默认**——这次是两者恰好一致了，不是这条规矩失效了。
 
 - ⚠️ `response_hard_timeout_seconds` 看着像总上限，其实**从未生效**：scheduler 总是传 `max(effective_timeout, request_hard_cap_seconds)`，只有它不传时那个值才会被用到。要改上限就改 `request_hard_cap_seconds`。
 - 生产 bridge 使用异步 job：`POST /v1/chat/jobs` 立即返回 `job_id`，浏览器任务在 WebDock 后台继续；bridge 用 `GET /v1/chat/jobs/{job_id}` 做短轮询。因此 320s 只约束每次提交/查询，不再截断 1200s 浏览器任务，也不用修改 failover-proxy 的 320s。
@@ -127,8 +132,14 @@ ssh webdock2 "wsl -d Ubuntu-24.04-WebDock -- sudo systemctl restart webdock"
 
 - 生效点是 `browser_data/runtime.json`，**进程启动时读一次**（`config.py`），热改不生效，必须 `systemctl restart webdock`。
 - `render.sh` 对它只做镜像比对：`MIRROR DRIFT` 是**告警不是失败**，脚本不会覆盖，host 才是权威。仓库 `config/webdock/runtime.json` 只是新机基线。
-- ⚠️ **缺键 = 静默落回代码默认**，不会报错。2026-08-14 实测 webdock1 的 host 文件缺 `request_hard_cap_seconds`，硬顶落回 310s（应为 1200s），长任务会被截；`media_base_url` 还停在旧公网域名。已补齐并与 webdock2 对齐。排查"备机行为和主机不一样"时先 diff 这两份文件。
+- ⚠️ **缺键 = 静默落回下一层，不报错也不打日志**。取值链是 dataclass 默认（`config.py` 的 `request_hard_cap_seconds`）→ 环境变量（`REQUEST_HARD_CAP_SECONDS`，2026-08-15 实测**两机 `.env` 都没设**）→ `runtime.json` override，而 override 的实现是 `if field in data` 才覆盖。所以键不在就一路落到 dataclass 默认。这条机制对所有 runtime 键都成立，不因某个键的默认值改了而消失。
+- 2026-08-14 实测 webdock1 缺这个键，硬顶 310s 而 webdock2 是 1200s：**同一个镜像、两台机行为差 4 倍，日志里没有任何一行提示**。已补齐对齐。`media_base_url` 当时也还停在旧公网域名，一并改成内网值。排"备机行为和主机不一样"先 diff 两边的 runtime.json。
+- 这个数管的是**墙钟绝对上限**（`lane_scheduler.py` 的 `hard_cap = max(effective_timeout, request_hard_cap_seconds)`）：超过就取消整个 task 返回 RESPONSE_TIMEOUT，ChatGPT 正在正常输出也照砍。`chat_timeout_seconds`(120s) 是软超时，判的是页面 idle，两者不是一回事。
+- **310 的由来别当成随手取的数**：它是同步接口时代贴着 failover-proxy 的 320s/单次 HTTP 设的——浏览器端比上游先失败，才能返回结构化错误码而不是被代理掐断连接。07-27 生产改异步 job 后这个理由不再成立，设备值抬到 1200，但代码默认漏了，直到 2026-08-15 才补上（`config.py` + `lane_scheduler.py` 两处）。
+- ⚠️ **抬到 1200 的代价要记住**：同步 `/v1/chat/completions` 回退路径（旧 bridge）上，浏览器端不再比 320s 的代理先失败，超时表现会从结构化 `RESPONSE_TIMEOUT` 变成被代理掐断的断流。生产 bridge 走异步 job 不受影响；哪天有人排"同步调用超时看不到错误码"，根因在这里。
+- **失效场景是"只在备机接管期间出现"**：webdock1 平时不接单，缺键无感；一旦 failover 切过去，长任务（生成 Word 实测 289s）跑到 310s 被砍，切回主机又复现不了。
 
 <!-- nav-check-python: src/config.py:request_hard_cap_seconds -->
+<!-- nav-check-python: src/browser/lane_scheduler.py:DEFAULT_REQUEST_HARD_CAP_SECONDS -->
 
 - 两机预期差异：`routing_backend_url` 目前只有 webdock2 有（指向本机 routing 后端），不是漂移。其余键两机应一致。

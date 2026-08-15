@@ -106,6 +106,29 @@ send_stages total=2.39s login=0.19 flyout=0.01 input=0.01 mode=0.03 snapshot=0.0
 ## 部署
 
 - 换镜像：在 infra `secrets/webdock<N>.enc.env` 更新 `WEBDOCK_IMAGE`，推送并在设备执行 `render.sh webdock<N>` + restart。`.env` 是渲染产物，禁止直接长期修改；机型化 unit 从同一渲染流程生成。
-- `webdock.service` 已加 `ExecStartPre=-pull`（自愈拉镜像）；新机装 `install-ubuntu.sh` 自带。
+- 设备侧两条命令就够（2026-08-14 在 webdock2 实跑）：
+
+```bash
+# webdock1：ssh webdock1 直接是 Linux
+sudo /home/webdock/infra/scripts/render.sh webdock1 && sudo systemctl restart webdock
+# webdock2：Windows 宿主，须穿 WSL；两条分开发，别拼 &&
+ssh webdock2 "wsl -d Ubuntu-24.04-WebDock -- sudo /home/webdock/infra/scripts/render.sh webdock2"
+ssh webdock2 "wsl -d Ubuntu-24.04-WebDock -- sudo systemctl restart webdock"
+```
+
+- render 用 **root** 跑：它要写 `/opt/webdock/deploy/laptop/.env`，且 `SOPS_AGE_KEY_FILE` 默认取 `$HOME/.config/sops/age/keys.txt`，root 那份在位。⚠️ 但 **git pull 必须用 `webdock` 用户**（root pull 会写出 root 属主对象，下次同步卡在半更新态）——两者别混。
+- 验证顺序：设备 `docker ps` 看 tag 变新 + healthy → 从当前 business-cn 主机 `curl -i http://127.0.0.1:11800/healthz`，看 `X-Webdock-Device` / `X-Webdock-Route` 是否还是预期主机（重启不该改变主备，若变了说明 failover 切走了）。
+- ⛔ restart 会**重建容器、Chrome 随之重启**，中断生产链路 1-2 分钟（登录态在 `browser_data` 卷不会丢）。动手前先与用户确认时机。
+- `webdock.service` 已加 `ExecStartPre=-pull`（自愈拉镜像）；新机装 `install-ubuntu.sh` 自带。**webdock2 出网可达 ghcr**（2026-08-14 实测），换镜像不需要从 devbox 递镜像；要走 bundle 的只有 infra 仓本身，见 `infra/AGENTS.md`「webdock2 同步链路」。
 - ⚠️ CI 只在 PR 跑 pytest，直推 main 不跑 → 直推前必须本地 `pytest -q`。
 - ⚠️ Windows 侧写 JSON 必须显式 utf-8，否则 API 吃坏 body。
+
+## runtime.json：host 权威，改完必须重启
+
+- 生效点是 `browser_data/runtime.json`，**进程启动时读一次**（`config.py`），热改不生效，必须 `systemctl restart webdock`。
+- `render.sh` 对它只做镜像比对：`MIRROR DRIFT` 是**告警不是失败**，脚本不会覆盖，host 才是权威。仓库 `config/webdock/runtime.json` 只是新机基线。
+- ⚠️ **缺键 = 静默落回代码默认**，不会报错。2026-08-14 实测 webdock1 的 host 文件缺 `request_hard_cap_seconds`，硬顶落回 310s（应为 1200s），长任务会被截；`media_base_url` 还停在旧公网域名。已补齐并与 webdock2 对齐。排查"备机行为和主机不一样"时先 diff 这两份文件。
+
+<!-- nav-check-python: src/config.py:request_hard_cap_seconds -->
+
+- 两机预期差异：`routing_backend_url` 目前只有 webdock2 有（指向本机 routing 后端），不是漂移。其余键两机应一致。

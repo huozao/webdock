@@ -13,6 +13,14 @@ ChatGPT 登录与 Cloudflare 验证必须人工在 noVNC 完成，完成前自�
 - 用户授权提交/推送后，串行检查 status/分支/remote，显式 add 文件，再直推 main。
 - 部署换镜像通过 infra 的 SOPS 源更新 `WEBDOCK_IMAGE`，同步设备并执行 render/restart；禁止长期手改渲染后的 `.env`。
 
+## ⛔ 改 detector 完成判定前，先取一条真实时间线
+
+`wait_for_response_complete` 的每一个信号都有反例，**没有实测就不要动它**。诊断探针跑一次只要几分钟：`runtime.json` 临时置 `diagnostic_probe_enabled=true`，请求带 `X-Webdock-Probe-ID`，逐秒 `dom_state` 落在 `/app/logs/probes/<probe-id>.jsonl`，跑完改回 `false`。至少覆盖图改图和长任务两种，它们的信号次序完全不同。
+
+- 历史 commit message 里的结论只是线索，不是依据。2026-08-14 实测：07-17 记的"stop 按钮在图改图时会 flap"，在当天两条样本里都没出现（渲染 30 秒里 stop 全程亮）。
+- 2026-08-12 把协议终态接进判定却没实测图改图，08-14 就回归成"只回 Edit、图丢失"——**新增一条完成快通道时，先问它在图改图/长文档/纯文本三种场景各是什么时序**。
+- 各信号的实测层级、反例和阈值写在 `docs/runbooks/browser.md`，改判定前通读那两节。
+
 ## 排障入口
 
 - 浏览器/登录态/回复截断/图改图 → `docs/runbooks/browser.md`

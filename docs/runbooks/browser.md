@@ -114,14 +114,23 @@ send_stages total=2.39s login=0.19 flyout=0.01 input=0.01 mode=0.03 snapshot=0.0
 - 设备侧两条命令就够（2026-08-14 在 webdock2 实跑）：
 
 ```bash
-# webdock1：ssh webdock1 直接是 Linux
-sudo /home/webdock/infra/scripts/render.sh webdock1 && sudo systemctl restart webdock
+# webdock1：ssh 直接是 Linux。⚠️ 必须显式传 key 路径，见下条
+sudo SOPS_AGE_KEY_FILE=/home/webdock/.config/sops/age/keys.txt /home/webdock/infra/scripts/render.sh webdock1
+sudo systemctl restart webdock
 # webdock2：Windows 宿主，须穿 WSL；两条分开发，别拼 &&
 ssh webdock2 "wsl -d Ubuntu-24.04-WebDock -- sudo /home/webdock/infra/scripts/render.sh webdock2"
 ssh webdock2 "wsl -d Ubuntu-24.04-WebDock -- sudo systemctl restart webdock"
 ```
 
-- render 用 **root** 跑：它要写 `/opt/webdock/deploy/laptop/.env`，且 `SOPS_AGE_KEY_FILE` 默认取 `$HOME/.config/sops/age/keys.txt`，root 那份在位。⚠️ 但 **git pull 必须用 `webdock` 用户**（root pull 会写出 root 属主对象，下次同步卡在半更新态）——两者别混。
+- render 必须 **root** 跑（要写 `/opt/webdock/deploy/laptop/.env`），但 **age key 的位置两机不一样**（2026-08-15 实测）：webdock2 的 root 有 `/root/.config/sops/age/keys.txt`，直接 sudo 即可；**webdock1 的 key 只在 `/home/webdock/.config/sops/age/keys.txt`，root 下没有**，不显式传 `SOPS_AGE_KEY_FILE` 就会以 `no master key was able to decrypt the file` 失败——这不是密钥坏了，是 sudo 后 `$HOME` 变成 `/root` 而那儿没有 key。
+- ⚠️ 但 **git pull 必须用 `webdock` 用户**（root pull 会写出 root 属主对象，下次同步卡在半更新态）——和上一条别混。
+- ⚠️ webdock2 的三段 bundle 链路里「`git -C /home/webdock/infra pull --ff-only`」这步**在实际权限下跑不通**（2026-08-15 实测）：工作树的 origin 是 `/root/infra.git`，`webdock` 用户读不了 root 家目录，报 `Could not read from remote repository`；换 root 跑又违反上一条。可行做法是让 bundle 同时喂两处，工作树这侧以 `webdock` 用户直接从 bundle 取：
+
+```bash
+sudo git --git-dir=/root/infra.git fetch /mnt/c/temp/<file>.bundle main:main
+sudo -u webdock git -C /home/webdock/infra fetch /mnt/c/temp/<file>.bundle main
+sudo -u webdock git -C /home/webdock/infra merge --ff-only FETCH_HEAD
+```
 - 验证顺序：设备 `docker ps` 看 tag 变新 + healthy → 从当前 business-cn 主机 `curl -i http://127.0.0.1:11800/healthz`，看 `X-Webdock-Device` / `X-Webdock-Route` 是否还是预期主机（重启不该改变主备，若变了说明 failover 切走了）。
 - ⛔ restart 会**重建容器、Chrome 随之重启**，中断生产链路 1-2 分钟（登录态在 `browser_data` 卷不会丢）。动手前先与用户确认时机。
 - `webdock.service` 已加 `ExecStartPre=-pull`（自愈拉镜像）；新机装 `install-ubuntu.sh` 自带。**webdock2 出网可达 ghcr**（2026-08-14 实测），换镜像不需要从 devbox 递镜像；要走 bundle 的只有 infra 仓本身，见 `infra/AGENTS.md`「webdock2 同步链路」。

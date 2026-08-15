@@ -124,12 +124,10 @@ ssh webdock2 "wsl -d Ubuntu-24.04-WebDock -- sudo systemctl restart webdock"
 
 - render 必须 **root** 跑（要写 `/opt/webdock/deploy/laptop/.env`），但 **age key 的位置两机不一样**（2026-08-15 实测）：webdock2 的 root 有 `/root/.config/sops/age/keys.txt`，直接 sudo 即可；**webdock1 的 key 只在 `/home/webdock/.config/sops/age/keys.txt`，root 下没有**，不显式传 `SOPS_AGE_KEY_FILE` 就会以 `no master key was able to decrypt the file` 失败——这不是密钥坏了，是 sudo 后 `$HOME` 变成 `/root` 而那儿没有 key。
 - ⚠️ 但 **git pull 必须用 `webdock` 用户**（root pull 会写出 root 属主对象，下次同步卡在半更新态）——和上一条别混。
-- ⚠️ webdock2 的三段 bundle 链路里「`git -C /home/webdock/infra pull --ff-only`」这步**在实际权限下跑不通**（2026-08-15 实测）：工作树的 origin 是 `/root/infra.git`，`webdock` 用户读不了 root 家目录，报 `Could not read from remote repository`；换 root 跑又违反上一条。可行做法是让 bundle 同时喂两处，工作树这侧以 `webdock` 用户直接从 bundle 取：
+- webdock2 同步 infra **不经过设备上那个 bare**（它接不了 push、长期落后，原因见 `infra/AGENTS.md`「webdock2 同步链路」）。bundle 直喂工作树，一条命令：
 
 ```bash
-sudo git --git-dir=/root/infra.git fetch /mnt/c/temp/<file>.bundle main:main
-sudo -u webdock git -C /home/webdock/infra fetch /mnt/c/temp/<file>.bundle main
-sudo -u webdock git -C /home/webdock/infra merge --ff-only FETCH_HEAD
+sudo -u webdock git -C /home/webdock/infra pull --ff-only /mnt/c/temp/<file>.bundle main
 ```
 - 验证顺序：设备 `docker ps` 看 tag 变新 + healthy → 从当前 business-cn 主机 `curl -i http://127.0.0.1:11800/healthz`，看 `X-Webdock-Device` / `X-Webdock-Route` 是否还是预期主机（重启不该改变主备，若变了说明 failover 切走了）。
 - ⛔ restart 会**重建容器、Chrome 随之重启**，中断生产链路 1-2 分钟（登录态在 `browser_data` 卷不会丢）。动手前先与用户确认时机。

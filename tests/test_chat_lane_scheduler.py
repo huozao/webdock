@@ -328,6 +328,44 @@ async def _run_upload_case():
     assert calls == [("page:wechat:A:private:user-1", ["data:image/png;base64,AAAA"])]
 
 
+def test_scheduler_fails_loudly_when_upload_lands_nothing():
+    """图没进输入框就不要发这一轮：旧行为是照发文字，让 ChatGPT 回"没收到图"。"""
+    asyncio.run(_run_upload_failure_case())
+
+
+async def _run_upload_failure_case():
+    asked: list[str] = []
+    archived: list[tuple[str, object]] = []
+
+    async def counting_ask(page: object, message: str) -> tuple[str, float]:
+        asked.append(message)
+        return "ok", 0.0
+
+    async def failing_upload(page: object, images: list[str]) -> int:
+        return 0
+
+    async def fake_archiver(lane, message, images, **kwargs):
+        archived.append((message, kwargs.get("error")))
+
+    scheduler = ChatLaneScheduler(
+        max_concurrent_chats=1,
+        ask_func=counting_ask,
+        image_uploader=failing_upload,
+        archiver=fake_archiver,
+    )
+    lane = LaneContext.from_metadata({"wechat_account": "A", "chat_type": "private", "peer_id": "user-1"})
+
+    try:
+        await scheduler.ask(FakeBrowser(), lane, "改图", images=["data:image/png;base64,AAAA"])
+    except RelayError as exc:
+        assert exc.code == ErrorCode.UPLOAD_FAILED
+    else:
+        raise AssertionError("upload failure must not be swallowed")
+
+    assert asked == []  # 没有把残缺的一轮发给 ChatGPT
+    assert archived and archived[0][1] is not None  # 失败进了存档
+
+
 def test_scheduler_skips_upload_when_no_images():
     asyncio.run(_run_no_upload_case())
 

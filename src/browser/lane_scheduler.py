@@ -291,7 +291,16 @@ class ChatLaneScheduler:
                 if images:
                     # Attach the inbound image(s) to this lane's composer so the
                     # text that follows edits/answers about them in one turn.
-                    await self._image_uploader(page, images)
+                    # A silent no-op here used to send the turn text-only, so
+                    # ChatGPT spent ~40s answering "我没收到图片" — fail fast and
+                    # tell the user to resend instead (2026-08-16).
+                    if not await self._image_uploader(page, images):
+                        exc = RelayError(
+                            ErrorCode.UPLOAD_FAILED,
+                            "图片未能附加到 ChatGPT 输入框，本次请求未发送。请重新发送这条消息。",
+                        )
+                        await self._archiver(lane, clean_message, images, error=exc)
+                        raise exc
                 effective_timeout = select_chat_timeout(
                     self._chat_timeout_seconds,
                     self._chat_timeout_seconds_with_images,

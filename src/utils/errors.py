@@ -16,6 +16,10 @@ class ErrorCode(str, Enum):
     # whereas a timeout means we stopped watching a reply that was still coming.
     GENERATION_FAILED = "GENERATION_FAILED"
     SELECTOR_FAILED = "SELECTOR_FAILED"
+    # Inbound images/files never landed in the composer, so the turn was NOT
+    # sent. Distinct from a failed reply: nothing reached ChatGPT, and resending
+    # the same message is the correct recovery.
+    UPLOAD_FAILED = "UPLOAD_FAILED"
     BROWSER_NOT_STARTED = "BROWSER_NOT_STARTED"
     BUSY = "BUSY"
     LANE_BUSY = "LANE_BUSY"

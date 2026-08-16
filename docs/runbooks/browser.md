@@ -24,6 +24,15 @@ ChatGPT 登录与 Cloudflare 验证必须人工在 noVNC 完成，自动化必�
 <!-- nav-check-python: src/browser/detector.py:rich_assistant_text -->
 <!-- nav-check-python: src/browser/chatgpt_page.py:IMAGE_RESCAN_SECONDS -->
 <!-- nav-check-python: src/browser/response_lifecycle_probe.py:completion_ready -->
+- **入站图片/文件的上传必须被证实，不能只看"set 完了"**（08-16）。`upload_images` 用 `set_input_files` 塞隐藏 `input[type=file]`（图片和文档同一条路，只在等待策略上分叉），但刚导航完的 composer 会**静默吞掉**这一次 set——和 `paste_text` 注释里记的 ProseMirror 静默 no-op 是同一类问题。判据是 `attachment_count()` **相对上传前变多**（不是"页面上有没有附件"：会话里的历史图也匹配 `ATTACHMENT_PREVIEW`）；没变多就重找 input 再 set 一次，仍不落地则返回 0，调用方报 `UPLOAD_FAILED` 且**不发这一轮**。
+  - 实测（08-15 06:21、07:25，08-16 05:42 三次失败 + 同期成功样本）：`api.log` 里"lane ready → send_stages"的空档，**11.5-13.3s = 上传打空**（8s 检测超时 + 3s 旧兜底 sleep），**2-3s = 附件已落地**。旧代码这里无任何日志，现在每次上传都有 `upload_stages total= files= attempts= input_found= attached= url=`。
+  - 三次失败全部发生在 `force_new=True`（`/新对话` 新开 tab 刚导航到 project 页），紧接着在 `/c/` 会话页重发同样的图必成功；但 08-12 全天 8 次 `/新对话` 带图全成功，所以是**新页竞态，不是新页必错**——排查时别把 force_new 当充分条件。
+  - 用户侧症状是 ChatGPT 花 40 秒回"当前这条消息里没有收到可处理的原图文件"。看到这句先查 `upload_stages`，别去查 bridge：bridge 的 `image_count` 和 archive 的 `inbound.images` 那时都是对的。
+
+<!-- nav-check-python: src/browser/chatgpt_page.py:upload_images -->
+<!-- nav-check-python: src/browser/chatgpt_page.py:attachment_count -->
+<!-- nav-check-python: src/browser/human.py:paste_text -->
+<!-- nav-check-python: src/utils/errors.py:UPLOAD_FAILED -->
 - OpenClaw monitor 串行投递图片（慢是设计不是 bug）；⛔ bridge 反转合并别重试。
 - 文件附件：捕获正则必须容忍 ` (image/*)`；context-summary 历史块要先剥离防死循环。
 - **生成文档 pill 点击 = 开预览飞出层，不触发 download**（07-27）。层是 `data-testid=stage-thread-flyout` / `screen-threadFlyOut`，自带 `aria-label=Download`；**Escape 关不掉它**（实测 width 751 扛过多次 Escape），必须点 `data-testid=close-button`。层不关会盖住会话，下一轮永远等不到完成信号 → 整条 lane 被 wedge。每轮发送前会清一次残留层。
@@ -43,6 +52,7 @@ ChatGPT 登录与 Cloudflare 验证必须人工在 noVNC 完成，自动化必�
 | 回复半截/只有开场白 | detector 完成判定是否被改动 | 见上方 stop 按钮红线 |
 | RESPONSE_TIMEOUT | 先看失败卡片的取证行（错误码/耗时/快照/设备）；耗时落在 ~173-190s 且请求是"生成文件"= idle 判定；落在 ~320s = failover-proxy 上限 | 长思考等即可；查 `logs/debug/<快照>/selector_report.json`，`STOP_BUTTON: true` 说明当时页面还在生成 |
 | 要求发文件却只回一个文件名 | 存档 `outbound.text` 有无 `FILE:` 标记 | 无标记=没提取到/没下载成功，查 api.log 的 `file pill click did not produce a download`；有标记=bridge 侧投递问题 |
+| 发了图，ChatGPT 却说"没收到图片/请重新上传" | `api.log` 查该轮 `upload_stages`（`attached=0` = 没进输入框）；bridge `image_count` 与 archive `inbound.images` 用来排除上游丢图 | 现在这种情况直接报 `UPLOAD_FAILED` 且不发送，用户重发即可；连续复现查 composer 是否又改了 `ATTACHMENT_PREVIEW` 结构 |
 | Cloudflare 无限验证循环 | 自动化是否 attach 着 | detach 后人工过验证 |
 | 多图请求后全线卡死 | 单 worker 被堵（142-153s/13图）；healthz 假绿 | 等释放或重启容器；车道隔离测试须测对车道 |
 | 同群后续消息很快收到 `LANE_BUSY` | archive 查同一 `lane.key` 的 active 请求和被拒请求 | 这是车道保护：被拒消息没有发进 ChatGPT。等待当前任务完成，或发送 `/新对话` 抢占重建 |

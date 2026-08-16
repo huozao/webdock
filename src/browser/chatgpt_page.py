@@ -104,7 +104,11 @@ def _looks_like_bare_filename(text: str) -> bool:
 UPLOAD_INPUT_TIMEOUT_MS = 5000
 _UPLOAD_DETECT_TIMEOUT_SECONDS = 8.0
 _UPLOAD_SETTLE_SECONDS = 2.0
-_UPLOAD_FALLBACK_SECONDS = 3.0
+# A freshly navigated composer can swallow the first set_input_files (React not
+# wired up yet) — same failure mode paste_text already guards against. One retry
+# is enough in every 2026-08-15/16 sample; the second attempt only runs when the
+# attachment count did not grow, so it cannot duplicate a slow-but-landed upload.
+_UPLOAD_ATTEMPTS = 2
 # ChatGPT disables the send button while processing document uploads (PDF, DOCX…).
 # We poll until it re-enables before sending the message.
 _UPLOAD_SEND_READY_TIMEOUT_SECONDS = 60.0
@@ -751,8 +755,14 @@ async def upload_images(page: Any, image_urls: list[str]) -> int:
     Resolves each URL (base64 data URL or http(s)) to bytes, writes temp files,
     and sets them on ChatGPT's hidden <input type="file">. For document uploads
     (PDF, DOCX, XLSX…) ChatGPT disables the send button while processing; we wait
-    for it to re-enable before returning. Best-effort: any failure leaves the turn
-    to proceed as text-only. Returns how many files were actually attached."""
+    for it to re-enable before returning.
+
+    VERIFIED, like paste_text: on a page that just navigated (every `/新对话`),
+    set_input_files can silently no-op, and this used to report success anyway —
+    the turn then went out text-only and ChatGPT answered "没有收到原图" ~40s
+    later (2026-08-15/16, three samples). We now compare the composer's
+    attachment count before/after, retry once, and return 0 when nothing landed
+    so the caller can fail loudly instead of sending a crippled turn."""
     resolved = resolve_image_inputs(image_urls)
     if not resolved:
         return 0
@@ -760,19 +770,73 @@ async def upload_images(page: Any, image_urls: list[str]) -> int:
     if not paths:
         return 0
     has_documents = any(ext.lower() not in _IMAGE_EXTENSIONS for _, ext in resolved)
+    started = time.monotonic()
+    attached = 0
+    attempts = 0
+    input_found = False
     try:
-        selector = await find_first(page, selectors.FILE_INPUT, timeout_ms=UPLOAD_INPUT_TIMEOUT_MS)
-        if not selector:
-            return 0
-        await page.set_input_files(selector, paths)
-        await _wait_uploads_ready(page, has_documents=has_documents)
-        return len(paths)
+        # Chips already on screen (images earlier in the thread) are NOT ours —
+        # every later check is against this count, never against zero.
+        initial = await attachment_count(page)
+        for attempt in range(1, _UPLOAD_ATTEMPTS + 1):
+            attempts = attempt
+            baseline = await attachment_count(page)
+            if attempt > 1 and baseline > initial:
+                # The previous attempt did land, we just missed it inside the
+                # detect window; setting the files again would duplicate them.
+                attached = len(paths)
+                break
+            selector = await find_first(page, selectors.FILE_INPUT, timeout_ms=UPLOAD_INPUT_TIMEOUT_MS)
+            if not selector:
+                continue
+            input_found = True
+            try:
+                await page.set_input_files(selector, paths)
+            except Exception as exc:
+                log.warning("upload set_input_files failed on attempt %d: %s", attempt, exc)
+                continue
+            if await _wait_uploads_ready(page, has_documents=has_documents, baseline=baseline):
+                attached = len(paths)
+                break
+        log.info(
+            "upload_stages total=%.2fs files=%d attempts=%d input_found=%s attached=%d url=%s",
+            time.monotonic() - started,
+            len(paths),
+            attempts,
+            input_found,
+            attached,
+            _safe_page_url(page),
+        )
+        return attached
     finally:
         for path in paths:
             try:
                 os.unlink(path)
             except OSError:
                 pass
+
+
+def _safe_page_url(page: Any) -> str:
+    try:
+        url = page.url
+        return str(url() if callable(url) else url)
+    except Exception:
+        return "?"
+
+
+async def attachment_count(page: Any) -> int:
+    """How many attachment chips the composer shows.
+
+    ATTACHMENT_PREVIEW selectors overlap (one chip can match several) and can
+    also match images already in the thread, so this is only meaningful as a
+    "did it grow" signal, never as an exact file count."""
+    total = 0
+    for selector in selectors.ATTACHMENT_PREVIEW:
+        try:
+            total += await page.locator(selector).count()
+        except Exception:
+            continue
+    return total
 
 
 def _write_temp_images(resolved: list[tuple[bytes, str]]) -> list[str]:
@@ -788,24 +852,30 @@ def _write_temp_images(resolved: list[tuple[bytes, str]]) -> list[str]:
     return paths
 
 
-async def _wait_uploads_ready(page: Any, has_documents: bool = False) -> None:
-    """Give the upload time to finalize before sending.
+async def _wait_uploads_ready(page: Any, has_documents: bool = False, baseline: int = 0) -> bool:
+    """Wait until the composer really holds the new attachment(s).
 
-    Phase 1 (all types): wait for an attachment preview chip — quick signal that
-    the browser registered the file. Phase 2: for documents ChatGPT disables the
-    send button while processing; poll until it re-enables. For images only the
-    original short settle is sufficient."""
+    Phase 1 (all types): wait for the attachment-chip count to grow past
+    `baseline` — the browser registering the file. Growth (not "any chip found")
+    is the signal, so images already in the thread and chips left by an earlier
+    attempt cannot be mistaken for this upload. Returns False when it never
+    grows: the caller retries or fails, and no blind fallback sleep pretends the
+    file is there. Phase 2: for documents ChatGPT disables the send button while
+    processing; poll until it re-enables. Images only need the short settle."""
     deadline = time.monotonic() + _UPLOAD_DETECT_TIMEOUT_SECONDS
     detected = False
     while time.monotonic() < deadline:
-        if await any_selector_found(page, selectors.ATTACHMENT_PREVIEW):
+        if await attachment_count(page) > baseline:
             detected = True
             break
         await asyncio.sleep(0.3)
+    if not detected:
+        return False
     if has_documents:
         await _wait_send_button_enabled(page)
     else:
-        await asyncio.sleep(_UPLOAD_SETTLE_SECONDS if detected else _UPLOAD_FALLBACK_SECONDS)
+        await asyncio.sleep(_UPLOAD_SETTLE_SECONDS)
+    return True
 
 
 async def _wait_send_button_enabled(page: Any, timeout_seconds: float = _UPLOAD_SEND_READY_TIMEOUT_SECONDS) -> None:

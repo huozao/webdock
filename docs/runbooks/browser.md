@@ -18,7 +18,7 @@ ChatGPT 登录与 Cloudflare 验证必须人工在 noVNC 完成，自动化必�
   - 闪烁/动画组件（`role=status`、`loading-shimmer`）**比 stop 先灭，中途还有空窗**：35.6s 那一帧 scaffold 在、图为 0、`animated_candidates` 已经空了。所以它挡不住这个窗口，`completion_ready()` 里刻意没有它，别再往回加。
   - 生成图 src 会 **1 → 0 → 1 跳变**（ChatGPT 换图重渲），detector 返回后紧接着扫一次可能正好扑空 → `chatgpt_page` 用 `IMAGE_RESCAN_SECONDS` 有界重扫补回。
   - imagegen 覆盖层的 `Edit`/`Share` 会混进 `rich_assistant_text`（它们不是 button，逃过 UI 过滤），所以**不要用文字判完成**，图画完了 `Edit` 照样在。
-  - 复现工具：`runtime.json` 临时置 `diagnostic_probe_enabled=true`，请求带 `X-Webdock-Probe-ID`，逐秒 `dom_state` 落在 `/app/logs/probes/<probe-id>.jsonl`，跑完改回 false。
+  - 复现工具：`runtime.json` 临时置 `diagnostic_probe_enabled=true`，请求带 `X-Webdock-Probe-ID`，逐秒 `dom_state` 落在 `/app/logs/probes/<probe-id>.jsonl`，跑完改回 false。⚠️ "请求带 header"这句自 2026-08-16 起不再是唯一入口：bridge 从不发这个 header，所以**照这句做只能采到自己手工构造的请求，采不到飞书真实流量**——而完成判定要看的恰恰是真实流量。现开关打开时没带 header 的请求会自动用 `auto-<request_id>` 落盘，飞书流量直接可采。
 
 <!-- nav-check-python: src/browser/detector.py:imagegen_pending -->
 <!-- nav-check-python: src/browser/detector.py:rich_assistant_text -->
@@ -33,7 +33,20 @@ ChatGPT 登录与 Cloudflare 验证必须人工在 noVNC 完成，自动化必�
 <!-- nav-check-python: src/browser/chatgpt_page.py:attachment_count -->
 <!-- nav-check-python: src/browser/human.py:paste_text -->
 <!-- nav-check-python: src/utils/errors.py:UPLOAD_FAILED -->
+- **多图回复：完成那一帧的图数不可信，必须等回本轮高水位**（08-16）。⚠️ 上面 08-14 那条"生成图 src 会 1→0→1 跳变"仍然成立，但**"stop 熄灭后页面就稳了"这个隐含前提自 2026-08-16 起确认会误导**——实测 stop 熄灭≈重排开始，不是结束。逐帧证据（5 图请求，探针 `auto-3ceb61b8ae325e3ad7565d2e`）：
+  - 161.9→169.2s 依次下载 5 个 file_id，DOM 图数 1→3→4→5；**169.5s 起 5 张稳定了 22 秒**（192.0s 仍是 5，stop 全程亮）。
+  - 193.5s 页面**重新请求其中 3 个同 id**（不是新图，收尾重渲）；194.5s 完成帧 `stop_present=False`、`action_row_present=True`、**图数塌陷成 3** → 判完成 → 投 3 张。判定时机不早反晚 25 秒，错的是只信这一帧。
+  - 修法：`GeneratedImageWatch` 在等待循环里记高水位（单帧最大图数）和 src 并集；判完成后 `_await_stable_generated_images` 把图数等回高水位，上限 `IMAGE_RESCAN_SECONDS`，单图回复第一次扫描即达标、零延迟；等不回来才用"最全的一帧 + 并集"兜底，日志 `generated images never returned to N`。
+  - **判定用的采样和投递用的采样必须是同一份**：旧代码 `_capture_image_tokens` 自己又扫了一次 DOM，重渲窗口里两次采样能给出不同的图集。现在由调用方把等稳定后的 src 传进去。
+  - 抓下来**按 sha256 去重**：同一张图重渲后换 src，而 media store 每次 put 发随机 token，不去重就会把同一张发两遍。
+  - **收发都不限张数**（08-16 产品决定）：出站原 `MAX_IMAGES_PER_REPLY=4`、入站原 `MAX_INPUT_IMAGES=20` 已删除。一条"这几张图分别改"是一图一出，任何固定张数都会静默截掉合法结果。剩下的界是**每张**的 `MAX_IMAGE_BYTES`（20MB）和 media store 的 TTL，不是张数。bridge 侧 `MAX_BRIDGE_IMAGES` 在 AliECS 仓，另行处理。
+  - 多图的那些"预览小框"是 48×48 侧栏缩略图，尺寸不到 200px 门槛，靠 `alt` 以"已生成图片/Generated image"开头才被 `generated_image_srcs` 收进来；重渲时 alt 短暂缺失就会掉出计数。实测投递的仍是高清原图（缩略节点的 src 指向原图），不需要按分辨率择优。
+
+<!-- nav-check-python: src/browser/detector.py:GeneratedImageWatch -->
+<!-- nav-check-python: src/browser/detector.py:generated_image_srcs -->
+<!-- nav-check-python: src/browser/image_input.py:MAX_IMAGE_BYTES -->
 - OpenClaw monitor 串行投递图片（慢是设计不是 bug）；⛔ bridge 反转合并别重试。
+  - 08-16 实测的后果：同一批 5 张图若被 OpenClaw **逐条**投递（间隔 20-25s，远超 bridge 0.5s 合并窗口），就会变成 **5 轮独立 ChatGPT 往返**，每轮 `upload_stages files=1`、inbound text 是"（已上传文件）"，ChatGPT 逐张回"这张图要怎么改？"。同一天另一次 `files=5` 合并成功，是因为 OpenClaw 那次一次性投了 5 张。**看到"发一批图却触发了 N 轮"先看 `upload_stages files=`，不是 bridge 合并坏了。**
 - 文件附件：捕获正则必须容忍 ` (image/*)`；context-summary 历史块要先剥离防死循环。
 - **生成文档 pill 点击 = 开预览飞出层，不触发 download**（07-27）。层是 `data-testid=stage-thread-flyout` / `screen-threadFlyOut`，自带 `aria-label=Download`；**Escape 关不掉它**（实测 width 751 扛过多次 Escape），必须点 `data-testid=close-button`。层不关会盖住会话，下一轮永远等不到完成信号 → 整条 lane 被 wedge。每轮发送前会清一次残留层。
 - **idle 判定必须尊重 stop 按钮**（07-27）。ChatGPT 跑代码生成文档时页面完全静止（文本冻结、stop 亮着），progress signature 不变；旧逻辑在 `soft_deadline + idle_timeout` 处判死，实测 173/173/188/191s 全灭，而页面本身 4m49s 才生成完。
@@ -52,6 +65,7 @@ ChatGPT 登录与 Cloudflare 验证必须人工在 noVNC 完成，自动化必�
 | 回复半截/只有开场白 | detector 完成判定是否被改动 | 见上方 stop 按钮红线 |
 | RESPONSE_TIMEOUT | 先看失败卡片的取证行（错误码/耗时/快照/设备）；耗时落在 ~173-190s 且请求是"生成文件"= idle 判定；落在 ~320s = failover-proxy 上限 | 长思考等即可；查 `logs/debug/<快照>/selector_report.json`，`STOP_BUTTON: true` 说明当时页面还在生成 |
 | 要求发文件却只回一个文件名 | 存档 `outbound.text` 有无 `FILE:` 标记 | 无标记=没提取到/没下载成功，查 api.log 的 `file pill click did not produce a download`；有标记=bridge 侧投递问题 |
+| 页面生成了 N 张图，飞书只收到几张 | archive 数 `outbound.text` 里 `MEDIA:` 行数；api.log 找 `generated images never returned to` | 判定不是判早了：图早就齐了，是完成帧撞上收尾重渲。见上「多图回复」节 |
 | 发了图，ChatGPT 却说"没收到图片/请重新上传" | `api.log` 查该轮 `upload_stages`（`attached=0` = 没进输入框）；bridge `image_count` 与 archive `inbound.images` 用来排除上游丢图 | 现在这种情况直接报 `UPLOAD_FAILED` 且不发送，用户重发即可；连续复现查 composer 是否又改了 `ATTACHMENT_PREVIEW` 结构 |
 | Cloudflare 无限验证循环 | 自动化是否 attach 着 | detach 后人工过验证 |
 | 多图请求后全线卡死 | 单 worker 被堵（142-153s/13图）；healthz 假绿 | 等释放或重启容器；车道隔离测试须测对车道 |

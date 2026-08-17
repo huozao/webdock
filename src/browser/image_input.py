@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import logging
-import os
 import re
 import urllib.parse
 import urllib.request
@@ -10,13 +9,10 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-# Cap inbound images per turn (mirrors the bridge's MAX_BRIDGE_IMAGES) and the size
-# of each, so a malformed/huge data URL can't exhaust memory. Env-tunable (default
-# 20) so the cap can track what ChatGPT's composer actually accepts.
-try:
-    MAX_INPUT_IMAGES = max(1, int(os.getenv("MAX_INPUT_IMAGES", "20")))
-except ValueError:
-    MAX_INPUT_IMAGES = 20
+# No cap on how MANY images a turn carries (2026-08-16, by product decision):
+# dropping images the user actually sent is worse than the memory it costs, and a
+# silent truncation here is invisible downstream. Each image is still bounded on
+# its own so one malformed/huge data URL can't exhaust memory.
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 _DOWNLOAD_TIMEOUT_SECONDS = 20
 
@@ -70,13 +66,13 @@ def extract_image_urls(content: Any) -> list[str]:
         url = image_url.get("url") if isinstance(image_url, dict) else image_url
         if isinstance(url, str) and url.strip():
             urls.append(url.strip())
-    return urls[:MAX_INPUT_IMAGES]
+    return urls
 
 
 def resolve_image_inputs(urls: list[str]) -> list[tuple[bytes, str]]:
     """Resolve image URLs to ``(bytes, extension)`` pairs, skipping any that fail."""
     resolved: list[tuple[bytes, str]] = []
-    for url in urls[:MAX_INPUT_IMAGES]:
+    for url in urls:
         item = resolve_image(url)
         if item is not None:
             resolved.append(item)

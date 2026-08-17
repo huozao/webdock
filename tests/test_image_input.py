@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 
 from src.browser.image_input import (
-    MAX_INPUT_IMAGES,
     extract_image_urls,
     resolve_image,
     resolve_image_inputs,
@@ -36,14 +35,12 @@ def test_extract_image_urls_accepts_direct_string_image_url():
     ]
 
 
-def test_max_input_images_default_is_20():
-    assert MAX_INPUT_IMAGES == 20
+def test_inbound_images_are_never_truncated_by_count():
+    # 2026-08-16 起入站不限张数：用户发几张就送几张，截断是静默丢消息。
+    many = [{"type": "image_url", "image_url": {"url": PNG_DATA_URL}} for _ in range(37)]
 
-
-def test_extract_image_urls_caps_count():
-    many = [{"type": "image_url", "image_url": {"url": PNG_DATA_URL}} for _ in range(MAX_INPUT_IMAGES + 3)]
-
-    assert len(extract_image_urls(many)) == MAX_INPUT_IMAGES
+    assert len(extract_image_urls(many)) == 37
+    assert len(resolve_image_inputs(extract_image_urls(many))) == 37
 
 
 def test_resolve_image_decodes_base64_data_url():

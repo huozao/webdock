@@ -160,6 +160,15 @@ async def submit_openai_chat_job(
     if not request_id:
         request_id = uuid.uuid4().hex
     metadata["request_id"] = request_id
+    if probe_id is None and diagnostic_probe_enabled():
+        # The bridge never sends X-Webdock-Probe-ID, so header-only probing can
+        # sample everything EXCEPT the real Feishu traffic — which is the traffic
+        # whose per-second timeline the "no completion-judgment change without a
+        # measured timeline" rule actually asks for. While the flag is on (off by
+        # default, flipped by ops in runtime.json) name the probe after the
+        # request instead. Derived from request_id, so it stays deterministic for
+        # the job fingerprint below.
+        probe_id = validate_probe_id("auto-" + request_id)
     fingerprint_payload = {"body": body.model_dump(), "probe_id": probe_id or ""}
     fingerprint = hashlib.sha256(
         json.dumps(fingerprint_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")

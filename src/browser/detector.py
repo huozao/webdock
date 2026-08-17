@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 from src.browser import selectors
@@ -805,6 +806,27 @@ async def latest_message_has_widget(page: Any) -> bool:
         return False
 
 
+@dataclass
+class GeneratedImageWatch:
+    """Running tally of the images a turn produced, filled in by the wait loop.
+
+    A multi-image turn's DOM count is NOT monotonic: measured 2026-08-16, five
+    finished images sat stable for 22s and then ChatGPT re-rendered three of them
+    exactly as the stop button went out, so the frame we judge complete on can
+    show fewer pictures than the turn actually made. `max_count` is the high water
+    mark to wait back up to; `srcs` is every src seen (insertion-ordered), the
+    last-resort set to capture from when the DOM never recovers."""
+
+    max_count: int = 0
+    srcs: list[str] = field(default_factory=list)
+
+    def observe(self, new_srcs: list[str]) -> None:
+        self.max_count = max(self.max_count, len(new_srcs))
+        for src in new_srcs:
+            if src not in self.srcs:
+                self.srcs.append(src)
+
+
 async def wait_for_response_complete(
     page: Any,
     *,
@@ -816,12 +838,14 @@ async def wait_for_response_complete(
     previous_text: str = "",
     previous_image_srcs: list[str] | None = None,
     previous_has_widget: bool = False,
+    image_watch: GeneratedImageWatch | None = None,
 ) -> str | None:
     """Wait until the latest assistant reply is complete. Returns the reply text
     (possibly "" for a widget/image-only reply that has no markdown text), or None
     on timeout. The "" vs None distinction lets the caller tell a finished
     media-only reply (deliver the screenshot/image) apart from a real timeout."""
     start = time.monotonic()
+    previous_srcs = set(previous_image_srcs or [])
     soft_deadline = start + max(0, timeout_seconds)
     hard_deadline = start + max(0, hard_timeout_seconds if hard_timeout_seconds is not None else timeout_seconds)
     last_progress_at = start
@@ -848,6 +872,8 @@ async def wait_for_response_complete(
         generating = streaming or stop_button
         has_widget = await latest_message_has_widget(page)
         current_image_srcs = await generated_image_srcs(page)
+        if image_watch is not None:
+            image_watch.observe([s for s in current_image_srcs if s not in previous_srcs])
         has_image = bool(current_image_srcs)
         image_in_progress = await image_generating(page)
         scaffold_pending = await imagegen_pending(page)

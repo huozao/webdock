@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import logging
 import os
 import re
@@ -19,6 +20,7 @@ from src.browser.detector import (
     find_first,
     generated_file_targets,
     generated_image_srcs,
+    GeneratedImageWatch,
     imagegen_pending,
     mark_existing_reply_media,
     latest_message_has_widget,
@@ -80,7 +82,11 @@ def _media_screenshot_selectors(channel: str) -> list[tuple[str, bool]]:
 # estuary/content src — often OUTSIDE the assistant container, and the src needs
 # the logged-in session to fetch. detector.generated_image_srcs locates them (by
 # rendered size); we download in-page (so cookies apply) and serve via /media.
-MAX_IMAGES_PER_REPLY = 4
+# No per-reply picture cap (2026-08-16, by product decision): a "把这几张图分别改
+# 一下" turn returns one picture per inbound image, so any fixed number silently
+# truncates a legitimate answer — the old cap of 4 did exactly that. The bounds
+# that remain are per-image (MAX_IMAGE_BYTES on the way in) and the media store's
+# TTL/eviction on the way out, not a count.
 MAX_FILES_PER_REPLY = 4
 
 # An image-edit turn swaps its rendered picture in and out while it settles:
@@ -88,7 +94,14 @@ MAX_FILES_PER_REPLY = 4
 # of the turn. A single scan right after the wait can therefore land on the empty
 # frame and deliver the overlay text with no picture, so re-scan for a bounded
 # window while the imagegen scaffold still has no completed image.
+#
+# 2026-08-16 measured the multi-image version of the same trap: five finished
+# images were stable for 22s, then ChatGPT re-fetched three of the five right as
+# the stop button went out. The completion frame showed 3, and the turn shipped
+# 3 of 5 pictures. The count is only trustworthy back at the turn's high water
+# mark, so the same bounded window is used to wait for it.
 IMAGE_RESCAN_SECONDS = 15.0
+_IMAGE_SETTLE_POLL_SECONDS = 0.5
 
 # A reply that is nothing but a filename is the signature of an unrecognised file
 # pill: the turn has no .markdown body, so inner_text picks up the pill's label.
@@ -329,6 +342,7 @@ class ChatGPTPage:
             record_probe_event("send_clicked")
             self._log_send_stages(started, marks)
 
+            image_watch = GeneratedImageWatch()
             answer = await wait_for_response_complete(
                 self.page,
                 timeout_seconds=soft_timeout,
@@ -339,6 +353,7 @@ class ChatGPTPage:
                 previous_text=previous_assistant_text,
                 previous_image_srcs=previous_image_srcs,
                 previous_has_widget=previous_has_widget,
+                image_watch=image_watch,
             )
             if answer is None:
                 raise RelayError(
@@ -351,7 +366,7 @@ class ChatGPTPage:
             # only treat the reply as empty AFTER trying to attach the image.
             final_answer = answer.strip()
             prev_srcs = set(previous_image_srcs)
-            new_image_srcs = [s for s in await generated_image_srcs(self.page) if s not in prev_srcs]
+            new_image_srcs = await self._await_stable_generated_images(prev_srcs, image_watch)
             if not new_image_srcs:
                 new_image_srcs = await self._await_settling_generated_images(prev_srcs)
             feishu_media_inlined = False
@@ -377,7 +392,11 @@ class ChatGPTPage:
                     if markdown:
                         final_answer = feishu_safe_markdown(_strip_markdown_tables(markdown))
             final_answer = await self._append_media_images(
-                final_answer, settings.media_base_url, prev_srcs, capture_widgets=not feishu_media_inlined
+                final_answer,
+                settings.media_base_url,
+                prev_srcs,
+                capture_widgets=not feishu_media_inlined,
+                image_srcs=new_image_srcs,
             )
             if self._channel == "feishu":
                 final_answer = await self._append_generated_files(
@@ -407,6 +426,46 @@ class ChatGPTPage:
         finally:
             await stop_response_probe(probe, probe_outcome)
 
+    async def _await_stable_generated_images(
+        self, exclude_srcs: set[str], watch: GeneratedImageWatch
+    ) -> list[str]:
+        """The turn's pictures, waited back up to the count the turn actually made.
+
+        The completion frame can show FEWER pictures than the turn produced:
+        ChatGPT re-renders the finished set right as the stop button goes out
+        (2026-08-16: 5 stable for 22s → 3 in the completion frame → shipped 3).
+        Poll until the count is back at `watch.max_count`, bounded by
+        IMAGE_RESCAN_SECONDS. A single-image reply hits the mark on the first
+        scan and returns immediately, so nothing slows down the common case.
+
+        On timeout, deliver the fullest single frame seen here, then top it up
+        from `watch.srcs` (every src the wait loop saw). Stale srcs in that union
+        just fail to fetch and are dropped downstream, whereas a src the DOM
+        dropped for good is otherwise lost."""
+        best: list[str] = []
+        deadline = time.monotonic() + IMAGE_RESCAN_SECONDS
+        while True:
+            srcs = [s for s in await generated_image_srcs(self.page) if s not in exclude_srcs]
+            if len(srcs) > len(best):
+                best = srcs
+            if len(srcs) >= watch.max_count:
+                return srcs
+            if time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(_IMAGE_SETTLE_POLL_SECONDS)
+        merged = list(best)
+        for src in watch.srcs:
+            if src not in merged:
+                merged.append(src)
+        log.info(
+            "generated images never returned to %d (best frame %d, union %d) after %.0fs",
+            watch.max_count,
+            len(best),
+            len(merged),
+            IMAGE_RESCAN_SECONDS,
+        )
+        return merged
+
     async def _await_settling_generated_images(self, exclude_srcs: set[str]) -> list[str]:
         """Re-scan for the turn's picture while its imagegen scaffold is still empty.
 
@@ -425,19 +484,32 @@ class ChatGPTPage:
         return []
 
     async def _append_media_images(
-        self, answer: str, media_base_url: str, exclude_image_srcs: set[str], *, capture_widgets: bool = True
+        self,
+        answer: str,
+        media_base_url: str,
+        exclude_image_srcs: set[str],
+        *,
+        capture_widgets: bool = True,
+        image_srcs: list[str] | None = None,
     ) -> str:
         """Screenshot ChatGPT widgets AND download NEW generated images (e.g.
         DALL-E) in the latest reply, store them, and append 'MEDIA: <url>' tokens
         so OpenClaw forwards them. No-op without a media store / base url.
         capture_widgets=False when widgets/tables were already inlined in document
-        order (Feishu ordered path) — only NEW generated images are appended then."""
+        order (Feishu ordered path) — only NEW generated images are appended then.
+
+        `image_srcs` is the settled set the caller already waited for. Passing it
+        matters: re-scanning here sampled the DOM a SECOND time, so the pictures
+        delivered could differ from the ones completion was judged on — during the
+        2026-08-16 re-render window that is exactly how a 5-image turn shipped 3."""
         base = (media_base_url or "").rstrip("/")
         if self._media_store is None or not base:
             return answer
         result = answer
         tokens = await self._capture_widget_tokens() if capture_widgets else []
-        tokens += await self._capture_image_tokens(exclude_image_srcs)
+        if image_srcs is None:
+            image_srcs = [s for s in await generated_image_srcs(self.page) if s not in exclude_image_srcs]
+        tokens += await self._capture_image_tokens(image_srcs)
         for token in tokens:
             result = f"{result}\nMEDIA: {base}/media/{token}".strip()
         return result
@@ -511,14 +583,17 @@ class ChatGPTPage:
                     continue
         return tokens
 
-    async def _capture_image_tokens(self, exclude_srcs: set[str]) -> list[str]:
-        """Download NEW ChatGPT-generated images (e.g. DALL-E) from the reply via
-        an in-page fetch (so the logged-in session/cookies apply — estuary/content
-        URLs need it). Skips srcs already present before sending (exclude_srcs) so
-        repeated image requests don't re-send the earlier image(s)."""
+    async def _capture_image_tokens(self, srcs: list[str]) -> list[str]:
+        """Download the turn's generated images (e.g. DALL-E) via an in-page fetch
+        (so the logged-in session/cookies apply — estuary/content URLs need it).
+
+        `srcs` is already filtered to this turn's new pictures by the caller. The
+        same picture can appear under two srcs when ChatGPT re-renders it, and the
+        media store hands out a random token per put, so identical bytes would be
+        delivered twice — de-dupe on content hash, keeping first-seen order."""
         tokens: list[str] = []
-        srcs = [s for s in await generated_image_srcs(self.page) if s not in exclude_srcs]
-        for src in srcs[:MAX_IMAGES_PER_REPLY]:
+        seen_digests: set[str] = set()
+        for src in srcs:
             try:
                 b64 = await self.page.evaluate(_FETCH_IMG_B64_JS, src)
             except Exception:
@@ -531,6 +606,10 @@ class ChatGPTPage:
                 continue
             if len(data) < 1024:  # too small to be a real generated image
                 continue
+            digest = hashlib.sha256(data).hexdigest()
+            if digest in seen_digests:
+                continue
+            seen_digests.add(digest)
             try:
                 tokens.append(self._media_store.put(data, "image/png"))
             except Exception:

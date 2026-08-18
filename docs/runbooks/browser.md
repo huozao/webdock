@@ -26,10 +26,17 @@ ChatGPT 登录与 Cloudflare 验证必须人工在 noVNC 完成，自动化必�
 <!-- nav-check-python: src/browser/response_lifecycle_probe.py:completion_ready -->
 - **入站图片/文件的上传必须被证实，不能只看"set 完了"**（08-16）。`upload_images` 用 `set_input_files` 塞隐藏 `input[type=file]`（图片和文档同一条路，只在等待策略上分叉），但刚导航完的 composer 会**静默吞掉**这一次 set——和 `paste_text` 注释里记的 ProseMirror 静默 no-op 是同一类问题。判据是 `attachment_count()` **相对上传前变多**（不是"页面上有没有附件"：会话里的历史图也匹配 `ATTACHMENT_PREVIEW`）；没变多就重找 input 再 set 一次，仍不落地则返回 0，调用方报 `UPLOAD_FAILED` 且**不发这一轮**。
   - 实测（08-15 06:21、07:25，08-16 05:42 三次失败 + 同期成功样本）：`api.log` 里"lane ready → send_stages"的空档，**11.5-13.3s = 上传打空**（8s 检测超时 + 3s 旧兜底 sleep），**2-3s = 附件已落地**。旧代码这里无任何日志，现在每次上传都有 `upload_stages total= files= attempts= input_found= attached= url=`。
-  - 三次失败全部发生在 `force_new=True`（`/新对话` 新开 tab 刚导航到 project 页），紧接着在 `/c/` 会话页重发同样的图必成功；但 08-12 全天 8 次 `/新对话` 带图全成功，所以是**新页竞态，不是新页必错**——排查时别把 force_new 当充分条件。
+  - 三次失败全部发生在 `force_new=True`（`/新对话` 新开 tab 刚导航到 project 页），紧接着在 `/c/` 会话页重发同样的图必成功；但 08-12 全天 8 次 `/新对话` 带图全成功，所以是**新页竞态，不是新页必错**——排查时别把 force_new 当充分条件。⚠️ **"不是新页必错"这句自 2026-08-17 起确认会误导**：翻完整段 `upload_stages` 历史后事实更硬——**project 页 8 条记录全是 `attempts=2`，即第一次 set 必打空**，只是第二次通常兜住了（总耗时稳定 11.0-11.3s = 8s 检测超时 + 3s 第二次）；`/c/` 会话页 6 条全是 `attempts=1`、2.6-3.0s。08-16 之所以看着"时好时坏"，是因为当时只有失败样本进了日志。新情况见下条。
+  - **project 页第一次必打空的原因是抢跑，不是网络**（08-17 实测）：临时 tab 上量 project 页 TTFB 629ms、DOMContentLoaded 1.43s，**t=1.4s 时页面上连 `input[type=file]` 都不存在**，2.8s 时编辑器、发送按钮、三个 file input 一起出现。旧代码只等"input 出现"就立刻 set，正踩在 composer 刚挂载那一瞬。
+    - 现在 set 之前先 `_wait_composer_ready`：等编辑器可见 + file input 存在，**再 click 编辑器唤醒**（`paste_text` 对付 ProseMirror 静默 no-op 用的是同一招），日志多了 `ready=<秒数>/<True|False>`。
+    - `_UPLOAD_ATTEMPTS` 2 → **3**。两次不是"一次重试"而是**零余量**：08-17 12:33 那次第二次也没赶上，直接 `attached=0` 报 UPLOAD_FAILED（`total=17.23s` = 8+8）。
+    - `FILE_INPUT` 收窄成 composer 作用域优先、裸 `input[type='file']` 兜底。⚠️ 但 dump 证实 **project 页和会话页结构完全相同**（3 个 input 全在 composer 子树内：第一个在 `form.group/composer` 的 `div.hidden` 里、`accept=""` 通用口，另两个 `accept="image/*"`），所以**选择器从来没选错，也不存在把图传进项目文件的风险**——这条收窄是防御未来，不是根因。
+    - ⚠️ `find_first` 对**每个**候选都等满 `timeout_ms`，加候选就是加超时。所以前两个 composer 候选各只探 1s，只有裸兜底吃满 5s。
   - 用户侧症状是 ChatGPT 花 40 秒回"当前这条消息里没有收到可处理的原图文件"。看到这句先查 `upload_stages`，别去查 bridge：bridge 的 `image_count` 和 archive 的 `inbound.images` 那时都是对的。
 
 <!-- nav-check-python: src/browser/chatgpt_page.py:upload_images -->
+<!-- nav-check-python: src/browser/chatgpt_page.py:_wait_composer_ready -->
+<!-- nav-check-python: src/browser/file_download.py:_recover_from_preview -->
 <!-- nav-check-python: src/browser/chatgpt_page.py:attachment_count -->
 <!-- nav-check-python: src/browser/human.py:paste_text -->
 <!-- nav-check-python: src/utils/errors.py:UPLOAD_FAILED -->
@@ -49,6 +56,11 @@ ChatGPT 登录与 Cloudflare 验证必须人工在 noVNC 完成，自动化必�
   - 08-16 实测的后果：同一批 5 张图若被 OpenClaw **逐条**投递（间隔 20-25s，远超 bridge 0.5s 合并窗口），就会变成 **5 轮独立 ChatGPT 往返**，每轮 `upload_stages files=1`、inbound text 是"（已上传文件）"，ChatGPT 逐张回"这张图要怎么改？"。同一天另一次 `files=5` 合并成功，是因为 OpenClaw 那次一次性投了 5 张。**看到"发一批图却触发了 N 轮"先看 `upload_stages files=`，不是 bridge 合并坏了。**
 - 文件附件：捕获正则必须容忍 ` (image/*)`；context-summary 历史块要先剥离防死循环。
 - **生成文档 pill 点击 = 开预览飞出层，不触发 download**（07-27）。层是 `data-testid=stage-thread-flyout` / `screen-threadFlyOut`，自带 `aria-label=Download`；**Escape 关不掉它**（实测 width 751 扛过多次 Escape），必须点 `data-testid=close-button`。层不关会盖住会话，下一轮永远等不到完成信号 → 整条 lane 被 wedge。每轮发送前会清一次残留层。
+- **图片走的是另一个预览层，且它没有 Download**（08-17）。⚠️ 上一条只覆盖文档；代码工具产出的图片点开的是 **`data-testid=modal-lightbox-new`**（同时也是 `role=dialog`），实测控件只有 `aria-label=Close` + 两个无 testid 无 aria-label 的按钮 `Save` / `Share`，**没有 `aria-label=Download`，也没有 `<a download>`**。旧代码只认飞出层那两个 testid，于是判成"没有预览层"，白等完整文档预算。
+  - 取件顺序：预览层自带下载控件 → 拿不到就抓层里那张图（层里渲染的就是 484×484 的 `backend-api/estuary/content?id=file_...` 原图）→ **无论成败都关层**。关层走 `Close`，实测点一次即消失。
+  - ⚠️ **已知文档扩展名不做抓图兜底**：PDF 预览同样渲染成 backend 图，抓了会把首页当图片发出去。
+  - **pill 的标签可能根本没有扩展名**（实测 `下载 800×800 图片`）。旧代码按后缀判 `is_image`，无后缀 → 当成文档 → 10s 点击 + 50s 等剩余预算 + 5s 点一个不存在的下载控件 = **68 秒白烧且丢图**。现在只有**已知文档后缀**才吃长预算，图片和无后缀都走短探。
+  - 抓到的图按魔数嗅探类型并补扩展名，否则无后缀会被 `_guess_content_type` 判成 `application/octet-stream`，投递成文件卡片而不是内联图。
 - **idle 判定必须尊重 stop 按钮**（07-27）。ChatGPT 跑代码生成文档时页面完全静止（文本冻结、stop 亮着），progress signature 不变；旧逻辑在 `soft_deadline + idle_timeout` 处判死，实测 173/173/188/191s 全灭，而页面本身 4m49s 才生成完。
 - **ChatGPT 自己的失败横幅**（`Something went wrong while generating the response` + Retry）现由 `generation_error_text()` 识别，立即报 `GENERATION_FAILED`。只认最后一轮的横幅——历史失败轮会永远留在会话里，匹配到就会毒化之后每个请求。
 - **同车道不再长时间排队**：普通请求等待同一 `lane.key` 的锁最多 5s；仍忙则返回 HTTP 429 / `LANE_BUSY`，明确说明等待时间和“本次请求未执行”，并写入 archive。不同 lane 仍按 `max_concurrent_chats` 并发。例外是微信同一入站消息拆出的 metadata-less 图片分片，它继续沿用既有 lane 继承与排队行为，不能被误判成独立追问。
@@ -65,6 +77,8 @@ ChatGPT 登录与 Cloudflare 验证必须人工在 noVNC 完成，自动化必�
 | 回复半截/只有开场白 | detector 完成判定是否被改动 | 见上方 stop 按钮红线 |
 | RESPONSE_TIMEOUT | 先看失败卡片的取证行（错误码/耗时/快照/设备）；耗时落在 ~173-190s 且请求是"生成文件"= idle 判定；落在 ~320s = failover-proxy 上限 | 长思考等即可；查 `logs/debug/<快照>/selector_report.json`，`STOP_BUTTON: true` 说明当时页面还在生成 |
 | 要求发文件却只回一个文件名 | 存档 `outbound.text` 有无 `FILE:` 标记 | 无标记=没提取到/没下载成功，查 api.log 的 `file pill click did not produce a download`；有标记=bridge 侧投递问题 |
+| ChatGPT 给了「下载 XX 图片」但飞书只收到文字 | `reply_stages` 的 `files=` 是不是几十秒；api.log 找 `preview layer download control unusable` | 新版 `modal-lightbox-new` 没有 Download 控件，兜底是抓层里的原图。见上「图片走的是另一个预览层」 |
+| 带图的 `/新对话` 报 UPLOAD_FAILED | `upload_stages` 的 `ready=` 与 `attempts=`；`attached=0` = 三次都没落地 | 本次请求未发送，bridge 会自动改投备机重试一次；连续复现查 composer 结构是否又变了 |
 | 页面生成了 N 张图，飞书只收到几张 | archive 数 `outbound.text` 里 `MEDIA:` 行数；api.log 找 `generated images never returned to` | 判定不是判早了：图早就齐了，是完成帧撞上收尾重渲。见上「多图回复」节 |
 | 发了图，ChatGPT 却说"没收到图片/请重新上传" | `api.log` 查该轮 `upload_stages`（`attached=0` = 没进输入框）；bridge `image_count` 与 archive `inbound.images` 用来排除上游丢图 | 现在这种情况直接报 `UPLOAD_FAILED` 且不发送，用户重发即可；连续复现查 composer 是否又改了 `ATTACHMENT_PREVIEW` 结构 |
 | Cloudflare 无限验证循环 | 自动化是否 attach 着 | detach 后人工过验证 |
@@ -88,6 +102,25 @@ send_stages total=2.39s login=0.19 flyout=0.01 input=0.01 mode=0.03 snapshot=0.0
 <!-- nav-check-python: src/browser/chatgpt_page.py:ensure_mode -->
 <!-- nav-check-python: src/browser/selectors.py:MODE_PICKER_BUTTON_ANY -->
 
+## 一次请求到底慢在哪：三条日志连起来看（08-17 起）
+
+跑满硬顶的请求以前在 `send_stages` 和 20 分钟后的超时之间**没有任何一行日志**，既分不清卡在判定还是卡在后处理，也说不出"用户等了 214s 而 ChatGPT 只说 Worked for 10s"差在哪。现在每轮固定产出：
+
+```
+upload_stages total=12.57s ready=1.77s/True files=1 attempts=2 input_found=True attached=1 url=...
+send_stages   total=2.84s  login=.. flyout=.. input=.. mode=.. snapshot=.. type_delay=.. paste=.. send_btn=.. click=..
+wait_signals  t=61s stop=0 stream=0 count=0 text=0 imgs=0 new_img=0 img_loading=0 scaffold=0 status=False actions=1 widget=0 has_new=0 in_progress=0 stable=40 sig_age=61s
+reply_stages  total=179.10s images=0 chatgpt=10s wait=110.97 img_settle=0.01 text=0.01 media=0.05 files=68.06
+```
+
+- `wait_signals` 每 30s 一行，**纯记录，不参与判定**。`sig_age` 是解释"为什么跑满硬顶"的那一个：idle 兜底要求 progress signature 静止满 `idle_timeout_seconds`，而 signature 里含**全页面**的生成图 src 元组，上一轮的图刷新签名 URL 就会一直把它顶回 0。
+- `chatgpt=` 是 ChatGPT 自己写在这一轮上的 `Worked for 10s` / `已思考 12 秒`（`self_reported_work_seconds`，取自 turn 的 innerText，因为 `rich_assistant_text` 会剥掉按钮）。它和 `wait=` 的差额就是**不属于模型的等待**。
+- 08-17 实测的一条 214s：`wait=111s`（其中**前 61 秒页面完全空白**，count/text/stop 全 0）+ `files=68s`（无效下载，已修）+ 上传发送 15s，而 `chatgpt=10s`。
+- ⚠️ **"提交后页面空白几十秒"目前没有解释**，三次实测分别是 61s、153s、61s。它不是超时（带图软超时 300s），但把它算进任何"该等多久"的判断前，先用 `wait_signals` 取一条真实时间线。
+
+<!-- nav-check-python: src/browser/detector.py:self_reported_work_seconds -->
+<!-- nav-check-python: src/browser/detector.py:WAIT_SIGNAL_LOG_INTERVAL_SECONDS -->
+
 ## 排障工具
 
 - CDP 旁路：patchright `connect_over_cdp` 容器 `:9222` dump DOM。**⚠️ 9222 是 ChatGPT 生产实例别乱动**（webdock2 上 9223 是另一独立 Chrome）。
@@ -103,12 +136,14 @@ send_stages total=2.39s login=0.19 flyout=0.01 input=0.01 mode=0.03 snapshot=0.0
 | bridge → proxy | `openclaw_bridge.py::webdock_timeout()` | 1260s | 最宽松，几乎不触发 |
 | failover-proxy | 当前 business-cn 主机的受管 failover-proxy（位置查 fleet/infra） | **320s/单次 HTTP** | 同步调用的真实天花板 |
 | WebDock hard cap | `runtime.json::request_hard_cap_seconds` | 1200s（代码默认 2026-08-15 起也是 1200） | 浏览器后台任务的真实上限 |
+| job 生命周期 cap | `chat_jobs.py::JOB_LIFECYCLE_GRACE_SECONDS` + 硬顶 | **1230s** | 比浏览器硬顶晚 30s，让浏览器先失败 |
 
 ⚠️ **上表这行的旧写法「1200s（07-27 前是代码默认 310s）」自 2026-08-15 起确认会误导**：它读起来像"310 已经是历史"，
 实际 07-27 只改了设备上的 `runtime.json`，代码默认一直停在 310——webdock1 因此静默跑了三周 310s。
 2026-08-15 已把 `config.py` 与 `lane_scheduler.py` 的默认一并抬到 1200，根因消除；机制和缺键语义见下方
 「runtime.json：host 权威，改完必须重启」节。**判断生产行为仍要读设备文件，别只看代码默认**——这次是两者恰好一致了，不是这条规矩失效了。
 
+- **job cap 必须晚于浏览器硬顶**（08-17）。两者都是 1200 时 job 总是先赢——它从提交开始算，浏览器从 detector 开始算，中间差着发送那两三秒。后果是每一次真正跑满硬顶的请求都归档成 `REQUEST_CANCELLED`，detector 自己的超时分支和 `save_debug_dump`（page.html + 截图）**从来没执行过**：08-17 那次 1250s 故障事后一张快照都没有。现在 job cap = 硬顶 + `JOB_LIFECYCLE_GRACE_SECONDS`(30) = 1230s，仍低于 bridge 的 1260s 上限。
 - ⚠️ `response_hard_timeout_seconds` 看着像总上限，其实**从未生效**：scheduler 总是传 `max(effective_timeout, request_hard_cap_seconds)`，只有它不传时那个值才会被用到。要改上限就改 `request_hard_cap_seconds`。
 - 生产 bridge 使用异步 job：`POST /v1/chat/jobs` 立即返回 `job_id`，浏览器任务在 WebDock 后台继续；bridge 用 `GET /v1/chat/jobs/{job_id}` 做短轮询。因此 320s 只约束每次提交/查询，不再截断 1200s 浏览器任务，也不用修改 failover-proxy 的 320s。
 - job 按 `X-Request-ID` 幂等；同 ID 不同 payload 返回 409 `REQUEST_ID_CONFLICT`。状态为 `queued/running/succeeded/failed/cancelled`，失败保留原 `error_code/message`。1200s 从提交即开始覆盖排队和执行全过程；活动任务最多 100 个，满载返回 429 `JOB_QUEUE_FULL`；完成记录保留 24h，最多 1000 条。

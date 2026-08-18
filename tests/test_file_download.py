@@ -145,7 +145,46 @@ def test_download_button_falls_back_to_preview_capture_for_images():
     assert file.filename == "scene.png"
     assert file.content_type == "image/png"
     assert file.data == payload
-    assert "Escape" in page.pressed  # the preview overlay is closed afterwards
+    # The overlay is dismissed through its own close control; Escape does not
+    # close the document flyout (2026-07-27) and is only the last-ditch fallback.
+    assert any("close-button" in selector for selector in page.selectors)
+
+
+def test_prose_labelled_image_pill_is_recovered_from_the_new_lightbox():
+    """2026-08-17 生产：ChatGPT 用代码工具改完图后给的是「下载 800×800 图片」，
+    没有扩展名，于是被当成文档——白等 68s、飞书只收到文字没有图。新版预览层
+    `modal-lightbox-new` 没有任何 Download 控件（只有 Close/Save/Share），但它
+    渲染着 484×484 的原图，抓这张图才是正解。"""
+    payload = b"\x89PNG\r\n\x1a\n" + b"P" * 2048
+    page = _FakePillPage(payload)
+    target = DownloadTarget(kind="button", filename="下载 800×800 图片", href=None)
+
+    file = asyncio.run(_download_button(page, target))
+
+    assert file is not None
+    assert file.data == payload
+    # Named from the bytes, not the label: an extension-less name would guess
+    # application/octet-stream and ship the picture as a file card.
+    assert file.content_type == "image/png"
+    assert file.filename.endswith(".png")
+    assert any("close-button" in selector for selector in page.selectors)
+
+
+def test_prose_labelled_pill_does_not_pay_the_document_budget():
+    """没有扩展名 ≠ 文档：旧代码给它 10s+50s 的文档预算，再花 5s 点一个不存在的
+    下载控件。预览层一开就该立刻转向，绝不进入剩余预算的等待。"""
+    page = _FakePillPage(b"\x89PNG\r\n\x1a\n" + b"P" * 2048)
+    late_waits: list[str] = []
+
+    async def _record_wait(event: str, timeout: int = 0):
+        late_waits.append(event)
+        raise TimeoutError("Timeout waiting for event download")
+
+    page.wait_for_event = _record_wait
+
+    asyncio.run(_download_button(page, DownloadTarget(kind="button", filename="下载 800×800 图片", href=None)))
+
+    assert late_waits == []
 
 
 def test_download_button_document_never_scans_for_a_preview_image():

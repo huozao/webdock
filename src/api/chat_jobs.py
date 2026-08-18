@@ -11,6 +11,16 @@ from typing import Any, Awaitable, Callable
 JobRunner = Callable[[], Awaitable[dict[str, Any]]]
 ProgressProvider = Callable[[], dict[str, Any]]
 
+# The browser task carries its own hard cap (Settings.request_hard_cap_seconds,
+# counted from the moment the detector starts waiting). Giving the job store the
+# SAME number made it win the race by the couple of seconds the send takes, so a
+# genuine "ran the full 1200s" hang always surfaced as REQUEST_CANCELLED and the
+# browser's own timeout path — including save_debug_dump's page.html/screenshot —
+# never ran (2026-08-17: no debug dump existed for the 1250s failure). The job cap
+# stays above the browser cap so the browser fails first with structured detail;
+# it must stay BELOW the bridge's 1260s ceiling (openclaw_bridge.webdock_timeout).
+JOB_LIFECYCLE_GRACE_SECONDS = 30
+
 
 class JobConflictError(Exception):
     pass

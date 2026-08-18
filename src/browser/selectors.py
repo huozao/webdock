@@ -17,7 +17,17 @@ SEND_BUTTON = [
 # ChatGPT's composer hides a multi-file <input type="file"> that the "attach"
 # button drives; we set files on it directly (no visible click needed) to attach
 # an inbound WeChat image. Matched in the "attached" (not visible) DOM state.
+#
+# Dumped 2026-08-17 (project page and conversation page are identical): THREE
+# file inputs live under the composer — the first sits in a `div.hidden` inside
+# `form.group/composer` and takes anything (accept=""), the other two are
+# accept="image/*". The generic one is the right target because images and
+# documents share this path, so scope to the composer's form first and keep the
+# bare selector only as the fallback: it is what a stray file input elsewhere on
+# the page (project files, settings dialogs) would otherwise match first.
 FILE_INPUT = [
+    "form[class*='composer'] input[type='file']",
+    "[class*='composer'] input[type='file']",
     "input[type='file']",
 ]
 

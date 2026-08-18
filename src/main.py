@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from src.api.routes_browser import router as browser_router
-from src.api.chat_jobs import ChatJobStore
+from src.api.chat_jobs import ChatJobStore, JOB_LIFECYCLE_GRACE_SECONDS
 from src.api.routes_chat import router as chat_router
 from src.api.routes_health import router as health_router
 from src.api.routes_media import router as media_router
@@ -40,7 +40,7 @@ def create_app(*, start_browser: bool = True) -> FastAPI:
             request_hard_cap_seconds=settings.request_hard_cap_seconds,
         )
         app.state.chat_jobs = ChatJobStore(
-            execution_timeout_seconds=settings.request_hard_cap_seconds,
+            execution_timeout_seconds=settings.request_hard_cap_seconds + JOB_LIFECYCLE_GRACE_SECONDS,
         )
         if start_browser and settings.attach_on_start:
             try:
@@ -96,7 +96,7 @@ def create_app(*, start_browser: bool = True) -> FastAPI:
         media_store=app.state.media_store,
     )
     app.state.chat_jobs = ChatJobStore(
-        execution_timeout_seconds=settings.request_hard_cap_seconds,
+        execution_timeout_seconds=settings.request_hard_cap_seconds + JOB_LIFECYCLE_GRACE_SECONDS,
     )
 
     @app.middleware("http")

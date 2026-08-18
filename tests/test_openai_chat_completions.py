@@ -444,6 +444,23 @@ def test_job_store_bounds_inflight_tasks_and_entire_lifecycle():
     asyncio.run(scenario())
 
 
+def test_job_cap_leaves_room_for_the_browser_to_time_out_first():
+    """job 层的上限必须晚于浏览器自己的硬顶。两者相等时 job 总是先赢（发送那两三秒
+    的差），于是每一次真正跑满硬顶的请求都归档成 REQUEST_CANCELLED，detector 自己的
+    超时分支和 save_debug_dump 永远不执行——2026-08-17 的 1250s 故障就没有任何快照。"""
+    from src.api.chat_jobs import JOB_LIFECYCLE_GRACE_SECONDS
+    from src.config import get_settings
+
+    settings = get_settings()
+    app = create_app(start_browser=False)
+    assert JOB_LIFECYCLE_GRACE_SECONDS > 0
+    assert app.state.chat_jobs._execution_timeout_seconds == (
+        settings.request_hard_cap_seconds + JOB_LIFECYCLE_GRACE_SECONDS
+    )
+    # ...and stay under the bridge's own 1260s ceiling (openclaw_bridge.webdock_timeout).
+    assert app.state.chat_jobs._execution_timeout_seconds < 1260
+
+
 def test_job_store_prunes_completed_records_when_jobs_finish():
     async def scenario():
         store = ChatJobStore(max_completed_jobs=2)

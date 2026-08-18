@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import time
 from dataclasses import dataclass, field
@@ -16,6 +17,15 @@ from src.browser.response_lifecycle_probe import (
     response_lifecycle_status_component,
 )
 from src.utils.errors import ErrorCode, RelayError
+
+log = logging.getLogger(__name__)
+
+# How often the wait loop reports the signals it is looking at. A turn that runs
+# to the hard cap used to leave NO trace at all between "send_stages" and the
+# timeout 20 minutes later (2026-08-17), so neither branch — completion nor the
+# idle fallback — could be told apart afterwards. Reporting is metadata only (no
+# prompt, no reply text, only its length) and does not touch the judgement.
+WAIT_SIGNAL_LOG_INTERVAL_SECONDS = 30
 
 # Grace fallback for a residual .result-streaming class that lingers with NO stop
 # button: if the reply text has been stable this many seconds beyond stable_seconds
@@ -793,6 +803,45 @@ async def is_generating(page: Any) -> bool:
     )
 
 
+# ChatGPT stamps its own working time on the finished turn ("Worked for 10s",
+# "Thought for 4m 49s", "已思考 12 秒"). It is the only number that says how long
+# the MODEL took, so logging it next to our own timings turns "user waited 214s
+# but ChatGPT says 10s" into an attributable gap instead of a suspicion
+# (2026-08-17). The label lives in a button/summary, which rich_assistant_text
+# deliberately strips, so it is read from the turn's raw innerText.
+_WORK_SUMMARY_PATTERNS = (
+    re.compile(r"(?:worked|thought|reasoned)\s+for\s+(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?", re.IGNORECASE),
+    re.compile(r"(?:已思考|思考了|用时)\s*(?:(\d+)\s*分)?\s*(?:(\d+)\s*秒)?"),
+)
+_TURN_RAW_TEXT_JS = """
+() => {
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn']");
+  const turn = turns[turns.length - 1];
+  if (!turn) return "";
+  if (turn.querySelector("[data-message-author-role='user']")) return "";
+  return (turn.innerText || "").slice(0, 400);
+}
+"""
+
+
+async def self_reported_work_seconds(page: Any) -> int | None:
+    """How long ChatGPT says it worked on the latest turn, in seconds (None when
+    the turn carries no such label — a plain reply usually doesn't)."""
+    try:
+        text = await page.evaluate(_TURN_RAW_TEXT_JS)
+    except Exception:
+        return None
+    for pattern in _WORK_SUMMARY_PATTERNS:
+        match = pattern.search(text or "")
+        if not match:
+            continue
+        minutes, seconds = match.group(1), match.group(2)
+        if not minutes and not seconds:
+            continue
+        return int(minutes or 0) * 60 + int(seconds or 0)
+    return None
+
+
 async def latest_message_has_widget(page: Any) -> bool:
     """True if the latest assistant message contains a rich widget (clock/weather/
     etc card). Such replies can have NO markdown text — rich_assistant_text skips
@@ -852,6 +901,7 @@ async def wait_for_response_complete(
     last_progress_signature: tuple[Any, ...] | None = None
     last_text: str | None = None
     stable_for = 0
+    last_report_at = start
 
     while time.monotonic() < hard_deadline:
         now = time.monotonic()
@@ -957,6 +1007,35 @@ async def wait_for_response_complete(
             or status_component_pending
             or bool(_INTERIM_RE.search(current or ""))
         ) and not new_image
+        # Periodic signal report. `sig_age` is the one that explains a run to the
+        # hard cap: the idle fallback below only fires once the progress signature
+        # has been still for idle_timeout_seconds, and the signature includes every
+        # generated image src on the page — an earlier turn's pictures re-fetching
+        # their signed URLs keeps resetting it.
+        if now - last_report_at >= WAIT_SIGNAL_LOG_INTERVAL_SECONDS:
+            last_report_at = now
+            log.info(
+                "wait_signals t=%.0fs stop=%d stream=%d count=%d text=%d imgs=%d new_img=%d "
+                "img_loading=%d scaffold=%d status=%s actions=%d widget=%d has_new=%d "
+                "in_progress=%d stable=%d sig_age=%.0fs",
+                now - start,
+                stop_button,
+                streaming,
+                current_count,
+                len(current or ""),
+                len(current_image_srcs),
+                new_image,
+                image_in_progress,
+                scaffold_pending,
+                response_lifecycle_status_component(),
+                actions_ready,
+                has_widget,
+                has_new,
+                in_progress,
+                stable_for,
+                now - last_progress_at,
+            )
+
         # A task-correlated WebSocket terminal plus the page's own terminal UI is
         # stronger than transient/status wording. This path is available only
         # when passive protocol monitoring was explicitly enabled; otherwise the

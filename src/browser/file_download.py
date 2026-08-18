@@ -60,6 +60,13 @@ DOCUMENT_PILL_DOWNLOAD_TIMEOUT_MS = 10000
 _PREVIEW_FLYOUT_CONTAINERS = (
     "[data-testid='stage-thread-flyout']",
     "[data-testid='screen-threadFlyOut']",
+    # 2026-08-17: an image produced by the code tool opens THIS layer instead —
+    # `modal-lightbox-new` (also role=dialog), whose controls are an aria-label
+    # 'Close' and two unlabelled buttons reading Save / Share. It carries no
+    # aria-label='Download' and no <a download>, so the old flyout handling saw
+    # "no preview open", waited out the whole 60s document budget and delivered
+    # the reply with no picture at all (68s burned, user got text only).
+    "[data-testid='modal-lightbox-new']",
 )
 _PREVIEW_DOWNLOAD_LABELS = ("Download", "下载")
 PREVIEW_DOWNLOAD_BUTTON = ", ".join(
@@ -67,8 +74,11 @@ PREVIEW_DOWNLOAD_BUTTON = ", ".join(
     for container in _PREVIEW_FLYOUT_CONTAINERS
     for label in _PREVIEW_DOWNLOAD_LABELS
 )
+_PREVIEW_CLOSE_CONTROLS = ("[data-testid='close-button']", "button[aria-label='Close']")
 PREVIEW_CLOSE_BUTTON = ", ".join(
-    f"{container} [data-testid='close-button']" for container in _PREVIEW_FLYOUT_CONTAINERS
+    f"{container} {control}"
+    for container in _PREVIEW_FLYOUT_CONTAINERS
+    for control in _PREVIEW_CLOSE_CONTROLS
 )
 
 
@@ -194,12 +204,17 @@ async def _overlay_controls_debug(page: object) -> list[dict[str, str]]:
 
 
 async def _download_button(page: object, target: DownloadTarget) -> DownloadedFile | None:
-    # Image pills open a preview instead of downloading (fallback below), so
-    # don't pay the full download wait before capturing the preview.
-    is_image = Path(target.filename).suffix.lower() in IMAGE_FILE_EXTENSIONS
+    # Only a KNOWN document extension earns the long backend-materialisation
+    # budget. A pill labelled in prose carries no extension at all ("下载 800×800
+    # 图片", 2026-08-17) and used to fall through to the document path: 10s for the
+    # click + 50s waiting out the rest of the budget + 5s on a download control
+    # that layer does not have = 68s spent to deliver nothing. Images and
+    # extension-less pills both open a preview, so they take the short look.
+    suffix = Path(target.filename).suffix.lower()
+    is_document = bool(suffix) and suffix not in IMAGE_FILE_EXTENSIONS
     try:
         async with page.expect_download(
-            timeout=4000 if is_image else DOCUMENT_PILL_DOWNLOAD_TIMEOUT_MS
+            timeout=DOCUMENT_PILL_DOWNLOAD_TIMEOUT_MS if is_document else 4000
         ) as download_info:
             await page.locator("button").filter(has_text=target.filename).first.click(timeout=5000)
         download = await download_info.value
@@ -210,23 +225,50 @@ async def _download_button(page: object, target: DownloadTarget) -> DownloadedFi
             str(exc).splitlines()[0][:200] if str(exc) else "",
             target.filename,
         )
-        # An image filename pill opens a preview overlay instead of firing a
-        # download event (observed 2026-07-18) — capture the previewed image.
-        if is_image:
-            return await _capture_preview_image(page, target)
-        # A document pill opens ChatGPT's preview flyout (observed 2026-07-27) —
-        # the flyout carries its own download control.
+        # The pill opened a preview layer (document flyout since 2026-07-27,
+        # image lightbox since 2026-08-17). Whatever the label said, the file is
+        # in front of us: use the layer's own download control, else grab the
+        # picture it is displaying.
         if await _preview_flyout_visible(page):
-            return await _download_from_preview_flyout(page, target)
-        # No flyout: this pill is a direct download that is merely slow, so spend
+            return await _recover_from_preview(page, target, allow_image_fallback=not is_document)
+        # An image pill can also fire the overlay slightly late — _capture_preview_image
+        # polls for it (observed 2026-07-18).
+        if not is_document:
+            return await _capture_preview_image(page, target)
+        # No preview: this pill is a direct download that is merely slow, so spend
         # the rest of the original budget on the event we already armed the click for.
         pending = await _await_pending_download(
             page, DOCUMENT_DOWNLOAD_TIMEOUT_MS - DOCUMENT_PILL_DOWNLOAD_TIMEOUT_MS
         )
         if pending is not None:
             return await _read_download(pending, target)
-        return await _download_from_preview_flyout(page, target)
+        return await _recover_from_preview(page, target, allow_image_fallback=not is_document)
     return await _read_download(download, target)
+
+
+async def _recover_from_preview(
+    page: object, target: DownloadTarget, *, allow_image_fallback: bool
+) -> DownloadedFile | None:
+    """Get the file out of an open preview layer, then always close the layer.
+
+    Order matters: the layer's own download control is authoritative (it yields
+    the real document), but the image lightbox has none — its Save/Share buttons
+    carry no aria-label and Save opens the browser's own save flow rather than a
+    download event, while the layer already renders the full-size backend image.
+
+    The image fallback is refused for a KNOWN document extension: a PDF preview
+    also renders as a backend image, and capturing it would ship page one as a
+    picture instead of the file. Close the layer either way — a layer left open
+    covers the thread and wedges every following turn."""
+    try:
+        file = await _click_preview_download_control(page, target)
+        if file is not None:
+            return file
+        if not allow_image_fallback:
+            return None
+        return await _capture_preview_image(page, target, close_layer=False)
+    finally:
+        await _close_preview_flyout(page)
 
 
 async def _preview_flyout_visible(page: object) -> bool:
@@ -253,30 +295,28 @@ async def _await_pending_download(page: object, timeout_ms: int) -> object | Non
         return None
 
 
-async def _download_from_preview_flyout(
+async def _click_preview_download_control(
     page: object, target: DownloadTarget
 ) -> DownloadedFile | None:
-    """Use the preview flyout's own Download control, then close the flyout.
+    """Use the preview layer's own Download control if it has one.
 
     Clicking a generated-document pill opens ChatGPT's document preview instead of
-    downloading, so the click resolves but no download event ever fires. The
-    flyout is left open if we don't dismiss it, which would render the next reply
-    behind it."""
+    downloading, so the click resolves but no download event ever fires. Closing
+    the layer is the caller's job (_recover_from_preview) — the image fallback
+    needs the layer still on screen."""
     try:
         async with page.expect_download(timeout=DOCUMENT_DOWNLOAD_TIMEOUT_MS) as download_info:
             await page.locator(PREVIEW_DOWNLOAD_BUTTON).first.click(timeout=5000)
         download = await download_info.value
     except Exception as exc:
         log.warning(
-            "preview flyout download failed: %s: %s (file=%r) overlay=%s",
+            "preview layer download control unusable: %s: %s (file=%r) overlay=%s",
             type(exc).__name__,
             str(exc).splitlines()[0][:200] if str(exc) else "",
             target.filename,
             await _overlay_controls_debug(page),
         )
-        await _close_preview_flyout(page)
         return None
-    await _close_preview_flyout(page)
     return await _read_download(download, target)
 
 
@@ -397,8 +437,14 @@ async (src) => {
 """
 
 
-async def _capture_preview_image(page: object, target: DownloadTarget) -> DownloadedFile | None:
-    """Grab the image shown by the file pill's preview overlay, then close it."""
+async def _capture_preview_image(
+    page: object, target: DownloadTarget, *, close_layer: bool = True
+) -> DownloadedFile | None:
+    """Grab the image shown by the file pill's preview overlay.
+
+    `close_layer` is False when the caller owns the layer's lifetime; note that
+    Escape alone does NOT dismiss the document flyout (2026-07-27), so closing
+    goes through _close_preview_flyout's control-first path."""
     src = None
     for _ in range(10):  # the overlay renders async after the click
         try:
@@ -415,15 +461,33 @@ async def _capture_preview_image(page: object, target: DownloadTarget) -> Downlo
             data = base64.b64decode(b64) if b64 else None
         except Exception:
             data = None
-    try:
-        await page.keyboard.press("Escape")
-    except Exception:
-        pass
+    if close_layer:
+        await _close_preview_flyout(page)
     if not data or len(data) < 1024 or len(data) > MAX_DOWNLOAD_BYTES:
         return None
-    return DownloadedFile(
-        filename=target.filename, content_type=_guess_content_type(target.filename), data=data
-    )
+    # A prose-labelled pill has no extension, so the guessed type would be
+    # application/octet-stream and the picture would be delivered as a file card
+    # instead of being rendered inline. What we captured IS the preview image;
+    # name it accordingly so the caller emits MEDIA.
+    filename = target.filename
+    content_type = _guess_content_type(filename)
+    if not content_type.startswith("image/"):
+        content_type = _sniff_image_type(data) or "image/png"
+        filename = f"{Path(filename).stem or 'image'}{mimetypes.guess_extension(content_type) or '.png'}"
+    return DownloadedFile(filename=filename, content_type=content_type, data=data)
+
+
+def _sniff_image_type(data: bytes) -> str | None:
+    """Identify the captured bytes by magic number — the pill's label cannot."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"GIF8"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
 
 
 def _target_filename(raw: dict[str, object]) -> str | None:

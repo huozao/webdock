@@ -29,6 +29,7 @@ from src.browser.detector import (
     _strip_markdown_tables,
     rich_assistant_markdown,
     rich_assistant_text,
+    self_reported_work_seconds,
     wait_for_response_complete,
 )
 from src.browser.feishu_format import feishu_safe_markdown
@@ -118,10 +119,23 @@ UPLOAD_INPUT_TIMEOUT_MS = 5000
 _UPLOAD_DETECT_TIMEOUT_SECONDS = 8.0
 _UPLOAD_SETTLE_SECONDS = 2.0
 # A freshly navigated composer can swallow the first set_input_files (React not
-# wired up yet) — same failure mode paste_text already guards against. One retry
-# is enough in every 2026-08-15/16 sample; the second attempt only runs when the
-# attachment count did not grow, so it cannot duplicate a slow-but-landed upload.
-_UPLOAD_ATTEMPTS = 2
+# wired up yet) — same failure mode paste_text already guards against. The retry
+# only runs when the attachment count did not grow, so it cannot duplicate a
+# slow-but-landed upload.
+#
+# 2026-08-17: two attempts turned out to be zero margin, not one spare. All 8
+# `/project` uploads on record (every `/新对话`) took attempts=2 — the first set
+# on that page ALWAYS lands nothing — while all 6 `/c/` uploads took attempts=1.
+# So the retry was not a safety net, it was the only working attempt, and the one
+# time it too came up short (07:33, total=17.23s attached=0) the turn failed.
+_UPLOAD_ATTEMPTS = 3
+# The composer must be alive before files are set on it: measured on the project
+# page, `input[type=file]` does not exist at all 1.4s after navigation and appears
+# together with the composer at 2.8s (page load itself is fine — TTFB 629ms). The
+# old code raced that by setting files the moment the input existed. Clicking the
+# editor first is what paste_text already does for the very same "React not wired
+# up yet" no-op.
+_COMPOSER_READY_TIMEOUT_SECONDS = 8.0
 # ChatGPT disables the send button while processing document uploads (PDF, DOCX…).
 # We poll until it re-enables before sending the message.
 _UPLOAD_SEND_READY_TIMEOUT_SECONDS = 60.0
@@ -265,6 +279,30 @@ class ChatGPTPage:
             previous = at
         log.info("send_stages total=%.2fs %s", previous - started, " ".join(parts))
 
+    @staticmethod
+    def _log_reply_stages(
+        wait_started: float,
+        marks: list[tuple[str, float]],
+        *,
+        images: int,
+        reported_seconds: int | None = None,
+    ) -> None:
+        """判定完成之后每一步的耗时。detector 返回到最终答案之间此前没有任何日志，
+        2026-08-17 排"跑满 1200s 被 job 层砍掉"时无法区分卡在判定还是卡在后处理
+        （等图稳定 / 下载媒体 / 飞书排版），只能靠推断。"""
+        parts: list[str] = []
+        previous = wait_started
+        for name, at in marks:
+            parts.append(f"{name}={at - previous:.2f}")
+            previous = at
+        log.info(
+            "reply_stages total=%.2fs images=%d chatgpt=%s %s",
+            previous - wait_started,
+            images,
+            f"{reported_seconds}s" if reported_seconds is not None else "?",
+            " ".join(parts),
+        )
+
     async def ask(
         self,
         message: str,
@@ -343,6 +381,7 @@ class ChatGPTPage:
             self._log_send_stages(started, marks)
 
             image_watch = GeneratedImageWatch()
+            wait_started = time.monotonic()
             answer = await wait_for_response_complete(
                 self.page,
                 timeout_seconds=soft_timeout,
@@ -364,11 +403,16 @@ class ChatGPTPage:
             # answer may be "" for a widget-only reply (no markdown text). The
             # widget screenshot appended below becomes the actual content, so we
             # only treat the reply as empty AFTER trying to attach the image.
+            reply_marks: list[tuple[str, float]] = [("wait", time.monotonic())]
+            # Read before post-processing: the download/preview steps below open
+            # overlays and can re-render the turn.
+            reported_seconds = await self_reported_work_seconds(self.page)
             final_answer = answer.strip()
             prev_srcs = set(previous_image_srcs)
             new_image_srcs = await self._await_stable_generated_images(prev_srcs, image_watch)
             if not new_image_srcs:
                 new_image_srcs = await self._await_settling_generated_images(prev_srcs)
+            reply_marks.append(("img_settle", time.monotonic()))
             feishu_media_inlined = False
             if new_image_srcs:
                 # An image reply's text is only interim/UI noise, and may still be
@@ -391,6 +435,7 @@ class ChatGPTPage:
                     markdown = await rich_assistant_markdown(self.page)
                     if markdown:
                         final_answer = feishu_safe_markdown(_strip_markdown_tables(markdown))
+            reply_marks.append(("text", time.monotonic()))
             final_answer = await self._append_media_images(
                 final_answer,
                 settings.media_base_url,
@@ -398,10 +443,15 @@ class ChatGPTPage:
                 capture_widgets=not feishu_media_inlined,
                 image_srcs=new_image_srcs,
             )
+            reply_marks.append(("media", time.monotonic()))
             if self._channel == "feishu":
                 final_answer = await self._append_generated_files(
                     final_answer, settings.media_base_url, set()
                 )
+            reply_marks.append(("files", time.monotonic()))
+            self._log_reply_stages(
+                wait_started, reply_marks, images=len(new_image_srcs), reported_seconds=reported_seconds
+            )
             if settings.test_media_url:
                 # Manual link-check switch (browser_data/runtime.json).
                 final_answer = f"{final_answer}\nMEDIA: {settings.test_media_url}".strip()
@@ -854,18 +904,32 @@ async def upload_images(page: Any, image_urls: list[str]) -> int:
     attempts = 0
     input_found = False
     try:
+        ready = await _wait_composer_ready(page)
+        ready_at = time.monotonic()
         # Chips already on screen (images earlier in the thread) are NOT ours —
         # every later check is against this count, never against zero.
         initial = await attachment_count(page)
         for attempt in range(1, _UPLOAD_ATTEMPTS + 1):
             attempts = attempt
+            if attempt > 1:
+                # The page moved on since the failed attempt; re-confirm the
+                # composer rather than setting files into a stale handle.
+                await _wait_composer_ready(page)
             baseline = await attachment_count(page)
             if attempt > 1 and baseline > initial:
                 # The previous attempt did land, we just missed it inside the
                 # detect window; setting the files again would duplicate them.
                 attached = len(paths)
                 break
-            selector = await find_first(page, selectors.FILE_INPUT, timeout_ms=UPLOAD_INPUT_TIMEOUT_MS)
+            # find_first waits the full timeout on EVERY candidate, so the
+            # composer-scoped ones get a short probe and only the bare fallback
+            # gets the real budget — otherwise adding candidates would add 5s
+            # each to the very page (freshly navigated) this is meant to help.
+            selector = await find_first(page, selectors.FILE_INPUT[:-1], timeout_ms=1000)
+            if not selector:
+                selector = await find_first(
+                    page, selectors.FILE_INPUT[-1:], timeout_ms=UPLOAD_INPUT_TIMEOUT_MS
+                )
             if not selector:
                 continue
             input_found = True
@@ -878,8 +942,10 @@ async def upload_images(page: Any, image_urls: list[str]) -> int:
                 attached = len(paths)
                 break
         log.info(
-            "upload_stages total=%.2fs files=%d attempts=%d input_found=%s attached=%d url=%s",
+            "upload_stages total=%.2fs ready=%.2fs/%s files=%d attempts=%d input_found=%s attached=%d url=%s",
             time.monotonic() - started,
+            ready_at - started,
+            ready,
             len(paths),
             attempts,
             input_found,
@@ -929,6 +995,37 @@ def _write_temp_images(resolved: list[tuple[bytes, str]]) -> list[str]:
         except OSError:
             continue
     return paths
+
+
+async def _wait_composer_ready(page: Any) -> bool:
+    """Wait for the composer to be usable, then focus it, before setting files.
+
+    Measured 2026-08-17 on the project page every `/新对话` lands on: at 1.4s the
+    page has NO `input[type=file]` at all, at 2.8s the editor, the send button and
+    three file inputs all appear together. The old code only waited for the input
+    to EXIST and set files immediately — which is why all 8 recorded `/project`
+    uploads needed a second attempt while every `/c/` upload landed first try.
+
+    Clicking the editor is the same wake-up paste_text performs for ProseMirror's
+    silent no-op. Best effort throughout: a page that never settles still falls
+    through to the attempt loop, which verifies the attachment count anyway."""
+    deadline = time.monotonic() + _COMPOSER_READY_TIMEOUT_SECONDS
+    editor = None
+    while time.monotonic() < deadline:
+        editor = await find_first(page, selectors.CHAT_INPUT, visible=True, timeout_ms=500)
+        if editor and await page.locator(selectors.FILE_INPUT[-1]).count() > 0:
+            break
+        await asyncio.sleep(0.2)
+    else:
+        return False
+    if not editor:
+        return False
+    try:
+        await page.locator(editor).first.click(timeout=2000)
+    except Exception as exc:
+        log.warning("composer focus before upload failed: %s", exc)
+        return False
+    return True
 
 
 async def _wait_uploads_ready(page: Any, has_documents: bool = False, baseline: int = 0) -> bool:

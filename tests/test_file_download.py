@@ -125,6 +125,8 @@ class _FakePillPage:
         return _Loc()
 
     async def evaluate(self, script: str, arg: object | None = None):
+        if "preview-layer-present" in script:
+            return self.flyout_visible
         if "arrayBuffer" in script:
             return self._b64
         if "clientWidth" in script:
@@ -386,3 +388,223 @@ def test_parse_rejects_non_download_button():
     ]
 
     assert parse_download_targets(raw) == []
+
+
+class _FirstClickMissesPage(_FakePillPage):
+    """2026-08-18 生产：第一次点 pill 什么也没发生——detector 在答案完成那一帧
+    就返回，页面还在收尾重渲，点击落到了即将被 React 替换的节点上，既没有
+    download 也没有预览层。旧代码直接去抓图，对着没开的层空转 5s，交付了一条
+    没有图的回复。第二次点击才把层点开。"""
+
+    opens_on_click = 2  # which pill click actually opens the layer
+
+    def __init__(self, payload: bytes) -> None:
+        super().__init__(payload)
+        self.flyout_visible = False
+        self.clicks = 0
+
+    def locator(self, selector: str):
+        page = self
+        page.selectors.append(selector)
+        is_pill = selector == "button"
+        is_close = "close-button" in selector or "Close" in selector
+
+        class _Loc:
+            def filter(self, has_text: str | None = None):
+                return self
+
+            @property
+            def first(self):
+                return self
+
+            async def click(self, timeout: int = 0) -> None:
+                if is_pill:
+                    page.clicks += 1
+                    page.clicked = True
+                    if page.opens_on_click and page.clicks >= page.opens_on_click:
+                        page.flyout_visible = True
+                    return
+                if is_close:
+                    page.flyout_visible = False
+                    return
+                # The lightbox carries no Download control — clicking it times out.
+                raise TimeoutError("Timeout waiting for locator")
+
+            async def is_visible(self, timeout: int = 0) -> bool:
+                return page.flyout_visible
+
+        return _Loc()
+
+    async def evaluate(self, script: str, arg: object | None = None):
+        if "inTurn" in script:  # the diagnostics scan, not the src probe
+            return []
+        if "clientWidth" in script and not self.flyout_visible:
+            self.image_preview_scans += 1
+            return None  # nothing to grab while the layer is closed
+        return await super().evaluate(script, arg)
+
+
+def test_image_pill_is_clicked_again_when_the_first_click_opened_nothing(monkeypatch):
+    monkeypatch.setattr("src.browser.file_download.PREVIEW_LAYER_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr("src.browser.file_download.PREVIEW_LAYER_TOTAL_BUDGET_SECONDS", 0.06)
+    monkeypatch.setattr("src.browser.file_download.PREVIEW_LAYER_POLL_SECONDS", 0.01)
+    payload = b"\x89PNG\r\n\x1a\n" + b"P" * 2048
+    page = _FirstClickMissesPage(payload)
+    target = DownloadTarget(kind="button", filename="下载 800×800 图片", href=None)
+
+    file = asyncio.run(_download_button(page, target))
+
+    assert page.clicks == 2, "第一次点击落空后必须再点一次，否则整轮回复丢图"
+    assert file is not None
+    assert file.data == payload
+
+
+class _NeverOpensPage(_FirstClickMissesPage):
+    """重点一次仍然打不开：这时必须留下取证行，别再静默丢图。"""
+
+    opens_on_click = 0  # no click ever opens the layer
+
+
+def test_capture_failure_is_logged_with_candidates(monkeypatch, caplog):
+    monkeypatch.setattr("src.browser.file_download.PREVIEW_LAYER_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr("src.browser.file_download.PREVIEW_LAYER_TOTAL_BUDGET_SECONDS", 0.06)
+    monkeypatch.setattr("src.browser.file_download.PREVIEW_LAYER_POLL_SECONDS", 0.01)
+    monkeypatch.setattr("src.browser.file_download.PREVIEW_LATE_LAYER_GRACE_SECONDS", 0)
+    page = _NeverOpensPage(b"\x89PNG\r\n\x1a\n" + b"P" * 2048)
+    target = DownloadTarget(kind="button", filename="下载 800×800 图片", href=None)
+
+    with caplog.at_level("WARNING"):
+        file = asyncio.run(_download_button(page, target))
+
+    assert file is None
+    assert any("preview image capture failed" in record.message for record in caplog.records)
+
+
+class _LateLayerPage(_FirstClickMissesPage):
+    """层在我们放弃之后才渲染出来：08-19 生产实测，用户发现页面停在全屏预览上，
+    而这一轮的回复里没有图。晚到的层既要救回这张图，也必须被关掉——留着会盖住
+    会话，下一轮永远等不到完成信号。"""
+
+    opens_on_click = 0  # clicking never opens it in time
+
+    def __init__(self, payload: bytes) -> None:
+        super().__init__(payload)
+        self._late_pending = False
+
+    async def evaluate(self, script: str, arg: object | None = None):
+        if "preview-layer-present" in script:
+            if self._late_pending:  # the layer finally renders, after we gave up
+                self._late_pending = False
+                self.flyout_visible = True
+            return self.flyout_visible
+        if "inTurn" in script:
+            return []
+        if "clientWidth" in script:
+            self.image_preview_scans += 1
+            if self.image_preview_scans <= 10:  # the whole first capture comes up empty
+                if self.image_preview_scans == 10:
+                    self._late_pending = True
+                return None
+            return "https://chatgpt.com/backend-api/estuary/content?id=file_PREVIEW"
+        return await super().evaluate(script, arg)
+
+
+def test_late_arriving_layer_is_captured_and_closed(monkeypatch, caplog):
+    monkeypatch.setattr("src.browser.file_download.PREVIEW_LAYER_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr("src.browser.file_download.PREVIEW_LAYER_TOTAL_BUDGET_SECONDS", 0.06)
+    monkeypatch.setattr("src.browser.file_download.PREVIEW_LAYER_POLL_SECONDS", 0.01)
+    monkeypatch.setattr("src.browser.file_download.PREVIEW_LATE_LAYER_GRACE_SECONDS", 0)
+    payload = b"\x89PNG\r\n\x1a\n" + b"P" * 2048
+    page = _LateLayerPage(payload)
+    target = DownloadTarget(kind="button", filename="下载 800×800 图片", href=None)
+
+    with caplog.at_level("WARNING"):
+        file = asyncio.run(_download_button(page, target))
+
+    assert file is not None and file.data == payload
+    assert any("arrived late" in record.message for record in caplog.records)
+    # 关层必须发生，否则下一轮被这张全屏预览盖死
+    assert any("close-button" in selector or "Close" in selector for selector in page.selectors)
+
+
+class _CardControlPage:
+    """The file card's own download button: this one really downloads."""
+
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+        self.clicked_index: int | None = None
+        self.dispatched = False
+        page = self
+
+        class _Download:
+            suggested_filename = "包装更新_800x800_最新版.pdf"
+
+            async def path(self):
+                return None
+
+            async def failure(self):
+                return None
+
+        self._download = _Download()
+
+    def locator(self, selector: str):
+        page = self
+
+        class _Loc:
+            def nth(self, index: int):
+                page.clicked_index = index
+                return self
+
+            @property
+            def first(self):
+                return self
+
+            async def click(self, timeout: int = 0) -> None:
+                raise AssertionError("must not use a real click: the control is pointer-events:none")
+
+            async def evaluate(self, script: str) -> None:
+                page.dispatched = True
+
+        return _Loc()
+
+    def expect_download(self, timeout: int = 0):
+        page = self
+
+        class _Ctx:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc) -> None:
+                return None
+
+            @property
+            def value(self):
+                async def _v():
+                    return page._download
+                return _v()
+
+        return _Ctx()
+
+
+def test_card_download_control_is_preferred_over_the_prose_link(monkeypatch):
+    """2026-08-19：整个月的丢图都是点错了控件。文件卡片右侧的 Download file 按钮
+    实测 4.96s 就产生真实 download 事件、文件名正确、且不会把标签页导航走；而它上面
+    那条带下划线的「下载 PDF 文件」只会打开预览层。有卡片控件时必须走它。"""
+    from src.browser.file_download import download_chatgpt_file
+
+    captured = {}
+
+    async def _fake_read(download, target):
+        captured["download"] = download
+        captured["target"] = target
+        return None
+
+    monkeypatch.setattr("src.browser.file_download._read_download", _fake_read)
+    page = _CardControlPage(b"P" * 2048)
+    target = DownloadTarget(kind="button", filename="包装更新.pdf", href=None, control_index=2)
+
+    asyncio.run(download_chatgpt_file(page, target))
+
+    assert page.clicked_index == 2, "必须点第 index 个卡片控件，而不是第一个"
+    assert page.dispatched, "必须在页面内派发 click：控件是 pointer-events:none，真实点击点不到"
+    assert captured["download"] is page._download

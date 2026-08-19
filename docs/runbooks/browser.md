@@ -56,8 +56,29 @@ ChatGPT 登录与 Cloudflare 验证必须人工在 noVNC 完成，自动化必�
   - 08-16 实测的后果：同一批 5 张图若被 OpenClaw **逐条**投递（间隔 20-25s，远超 bridge 0.5s 合并窗口），就会变成 **5 轮独立 ChatGPT 往返**，每轮 `upload_stages files=1`、inbound text 是"（已上传文件）"，ChatGPT 逐张回"这张图要怎么改？"。同一天另一次 `files=5` 合并成功，是因为 OpenClaw 那次一次性投了 5 张。**看到"发一批图却触发了 N 轮"先看 `upload_stages files=`，不是 bridge 合并坏了。**
 - 文件附件：捕获正则必须容忍 ` (image/*)`；context-summary 历史块要先剥离防死循环。
 - **生成文档 pill 点击 = 开预览飞出层，不触发 download**（07-27）。层是 `data-testid=stage-thread-flyout` / `screen-threadFlyOut`，自带 `aria-label=Download`；**Escape 关不掉它**（实测 width 751 扛过多次 Escape），必须点 `data-testid=close-button`。层不关会盖住会话，下一轮永远等不到完成信号 → 整条 lane 被 wedge。每轮发送前会清一次残留层。
+- **⛔ 先看这条：能下载的控件只有文件卡片里那个 `button[aria-label='Download file']`**（08-19 实测定案）。ChatGPT 给生成文件的是两个入口，指向同一个文件：
+  - 上面那条带虚线下划线的「下载 PDF 文件 / 下载 800×800 PNG 图片」——`class=behavior-btn`，**点了只开预览层，永远不会有 download 事件**。2026-08 整月的丢图丢文件全部来自点它。
+  - 文件卡片右侧的下载图标——`button[aria-label='Download file']`（无文本、无 testid，中文界面为「下载文件」）。实测：**4.96s 产生真实 download 事件，`suggested_filename` 就是真实文件名（包装更新_800x800_最新版.pdf，1,049,809 字节），且不会把标签页导航走**。走生产代码全程 11.24s 拿到 `application/pdf`。
+  - **⚠️ 这个按钮不能用真实点击，必须在页面内派发 `el.click()`**。实测它 `visible=True`、`opacity=1`、box 36×36，但 **`pointer-events: none`**（卡片被 hover 时才变 auto）——Playwright 的 actionability 里"receives events"这一项永远不成立，所以 `click()` 干等到超时（生产日志就是 `file card download control failed: Locator.click: Timeout 5000ms`），`hover()` 同样超时。`force=True` 也不行：那是真实鼠标事件，会**穿透**到下层元素。派发式点击实测 2.58-8.77s 稳定拿到文件。
+  - 因此 `generated_file_targets` 现在**卡片控件优先，有卡片就不再返回 pill**（两个入口指同一文件，混用会把每个文件投递两遍）。定位靠 `control_index`（该按钮在全页同类按钮中的序号）+ `locator.nth`，同一轮里多个文件各自对应各自的卡片。
+  - ⚠️ 下面 08-17/08-18/08-19 关于「点 pill → 等预览层 → 抓层里的图」那一整套仍然留着**只作为兜底**（卡片控件不存在时）。**它们记录的排查过程自 2026-08-19 起不再是主路径**——当时没找到这个按钮，才在预览层上绕了一个月。新情况以本条为准。
+
 - **图片走的是另一个预览层，且它没有 Download**（08-17）。⚠️ 上一条只覆盖文档；代码工具产出的图片点开的是 **`data-testid=modal-lightbox-new`**（同时也是 `role=dialog`），实测控件只有 `aria-label=Close` + 两个无 testid 无 aria-label 的按钮 `Save` / `Share`，**没有 `aria-label=Download`，也没有 `<a download>`**。旧代码只认飞出层那两个 testid，于是判成"没有预览层"，白等完整文档预算。
   - 取件顺序：预览层自带下载控件 → 拿不到就抓层里那张图（层里渲染的就是 484×484 的 `backend-api/estuary/content?id=file_...` 原图）→ **无论成败都关层**。关层走 `Close`，实测点一次即消失。
+  - ⛔ **`Save` 绝对不要点**（08-18 实测）。08-17 记的"Save 打开浏览器自己的保存流程"⚠️ 该说法自 2026-08-18 起确认误导——它听起来像"点了顶多弹个保存框、没有下载事件而已"，实际后果重得多：点 `Save` **不产生任何 download 事件，而是把当前 tab 导航到图片直链** `chatgpt.com/backend-api/estuary/content?id=file_...`，会话页当场没了，该 lane 后续每一轮都在对着一张图片文档作答。恢复要 `go_back` 回会话 URL 再清残留层。取图只走"抓层里那张 img"。
+  - **点 pill 可能什么都不发生，而且不止一次**（08-18 发现，08-19 加测）。detector 在答案完成那一帧就返回，页面还在收尾重渲，点击落到即将被 React 替换的节点上：既没有 download，层也没开。
+    - 08-18 17:37 丢图那轮：`_preview_flyout_visible` 判 False → 直接进抓图兜底 → 对着没开的层空轮询 5s → 关一个不存在的层 3s → `generated file download returned nothing`。事后对同一个 pill 重跑同一段生产代码，9.95s 就拿到 223KB 的 jpg，**pill 和选择器都没问题，只是时机不对**。
+    - 08-19 加了"重点一次"之后**又丢了一次**：日志显示重试点击执行了，8s 后仍 `preview image capture failed`，而 `candidates` 里唯一那张图是 **`blob:`** 开头、`inTurn=true`——正是页面把本轮 `blob:` 预览换成 `backend-api/estuary/…` 的那一刻。**两次点击都落在换节点的窗口里，一次重试不够。**
+    - 同一 pill 在页面闲下来之后点：**层 0.36s 就开，484×484 的图当场就在**。所以判据不是"等层慢"，是"点得中不中"。现在改成 `_open_preview_layer`：点完轮询等层（`PREVIEW_LAYER_WAIT_SECONDS`），没出现就再点，最多 `PREVIEW_LAYER_CLICK_ATTEMPTS` 次。
+    - **层还会在放弃之后才出现**（08-19 用户截图：页面停在全屏预览上，而那轮回复没有图）。所以抓图失败后再等 `PREVIEW_LATE_LAYER_GRACE_SECONDS` 看一眼——晚到的层既救回这张图，也必须被关掉，否则它盖住会话、下一轮永远等不到完成信号。
+    - 取证行：`preview layer never opened after N clicks`、`preview layer arrived late`、`preview image capture failed`（带 `src` 和页面所有 img 的尺寸/`inTurn`；**没有候选是 `inTurn=false` = 层压根没开**）。
+
+<!-- nav-check-python: src/browser/file_download.py:FILE_CARD_DOWNLOAD_BUTTON -->
+<!-- nav-check-python: src/browser/detector.py:generated_file_targets -->
+<!-- nav-check-python: src/browser/file_download.py:PREVIEW_LAYER_WAIT_SECONDS -->
+<!-- nav-check-python: src/browser/file_download.py:PREVIEW_LAYER_CLICK_ATTEMPTS -->
+<!-- nav-check-python: src/browser/file_download.py:PREVIEW_LATE_LAYER_GRACE_SECONDS -->
+
   - ⚠️ **已知文档扩展名不做抓图兜底**：PDF 预览同样渲染成 backend 图，抓了会把首页当图片发出去。
   - **pill 的标签可能根本没有扩展名**（实测 `下载 800×800 图片`）。旧代码按后缀判 `is_image`，无后缀 → 当成文档 → 10s 点击 + 50s 等剩余预算 + 5s 点一个不存在的下载控件 = **68 秒白烧且丢图**。现在只有**已知文档后缀**才吃长预算，图片和无后缀都走短探。
   - 抓到的图按魔数嗅探类型并补扩展名，否则无后缀会被 `_guess_content_type` 判成 `application/octet-stream`，投递成文件卡片而不是内联图。
@@ -77,7 +98,9 @@ ChatGPT 登录与 Cloudflare 验证必须人工在 noVNC 完成，自动化必�
 | 回复半截/只有开场白 | detector 完成判定是否被改动 | 见上方 stop 按钮红线 |
 | RESPONSE_TIMEOUT | 先看失败卡片的取证行（错误码/耗时/快照/设备）；耗时落在 ~173-190s 且请求是"生成文件"= idle 判定；落在 ~320s = failover-proxy 上限 | 长思考等即可；查 `logs/debug/<快照>/selector_report.json`，`STOP_BUTTON: true` 说明当时页面还在生成 |
 | 要求发文件却只回一个文件名 | 存档 `outbound.text` 有无 `FILE:` 标记 | 无标记=没提取到/没下载成功，查 api.log 的 `file pill click did not produce a download`；有标记=bridge 侧投递问题 |
-| ChatGPT 给了「下载 XX 图片」但飞书只收到文字 | `reply_stages` 的 `files=` 是不是几十秒；api.log 找 `preview layer download control unusable` | 新版 `modal-lightbox-new` 没有 Download 控件，兜底是抓层里的原图。见上「图片走的是另一个预览层」 |
+| 生成的文件/图片没回到飞书（任何形式） | 先看 api.log 有没有 `file card download control failed`；再看该轮 `reply_stages` 的 `files=` | 08-19 起主路径是文件卡片的 `Download file` 按钮；扫不到卡片才会退回预览层那套。见上「能下载的控件只有…」 |
+| ChatGPT 给了「下载 XX 图片」但飞书只收到文字 | `reply_stages` 的 `files=` 是不是几十秒；api.log 找 `preview layer download control unusable` / `preview image capture failed` | 新版 `modal-lightbox-new` 没有 Download 控件，兜底是抓层里的原图。见上「图片走的是另一个预览层」 |
+| 同上，但 api.log **只有** `file pill click did not produce a download`，没有后两条 warning，`files≈8s` | 层根本没开：`preview image capture failed` 的 `candidates` 里有没有 `inTurn=false` 的图 | 首次点击落空（08-18），现在会重点一次 pill；仍失败按上一行查 |
 | 带图的 `/新对话` 报 UPLOAD_FAILED | `upload_stages` 的 `ready=` 与 `attempts=`；`attached=0` = 三次都没落地 | 本次请求未发送，bridge 会自动改投备机重试一次；连续复现查 composer 结构是否又变了 |
 | 页面生成了 N 张图，飞书只收到几张 | archive 数 `outbound.text` 里 `MEDIA:` 行数；api.log 找 `generated images never returned to` | 判定不是判早了：图早就齐了，是完成帧撞上收尾重渲。见上「多图回复」节 |
 | 发了图，ChatGPT 却说"没收到图片/请重新上传" | `api.log` 查该轮 `upload_stages`（`attached=0` = 没进输入框）；bridge `image_count` 与 archive `inbound.images` 用来排除上游丢图 | 现在这种情况直接报 `UPLOAD_FAILED` 且不发送，用户重发即可；连续复现查 composer 是否又改了 `ATTACHMENT_PREVIEW` 结构 |

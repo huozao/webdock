@@ -8,7 +8,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.browser import selectors
-from src.browser.file_download import DownloadTarget, parse_download_targets
+from src.browser.file_download import (
+    DownloadTarget,
+    parse_download_targets,
+    _is_blocked_extension,
+)
 from src.browser.human import idle_mouse_movement
 from src.browser.response_lifecycle_probe import (
     observe_detector_state,
@@ -130,6 +134,39 @@ _MARK_EXISTING_REPLY_MEDIA_JS = """
   }
 }
 """
+# The file CARD's own download control — the one thing on the page that actually
+# downloads. 2026-08-19: measured, `button[aria-label='Download file']` fires a
+# real download event in 4.96s with the correct filename and does NOT navigate,
+# while the prose link above it ("下载 PDF 文件", class behavior-btn) only opens a
+# preview. Every failure this month came from clicking that link instead. The
+# index is the button's position among ALL such buttons on the page, so the
+# caller can address it with locator.nth without re-querying the DOM.
+_FILE_CARD_SCAN_JS = r"""
+() => {
+  const controls = [...document.querySelectorAll(
+    "button[aria-label='Download file'], button[aria-label='下载文件'], button[aria-label='下載檔案']")];
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn']");
+  const turn = turns.length ? turns[turns.length - 1] : null;
+  const out = [];
+  controls.forEach((btn, index) => {
+    if (turn && !turn.contains(btn)) return;
+    // The card holds the filename on a sibling button whose aria-label IS the name.
+    let filename = "";
+    let node = btn.parentElement;
+    for (let up = 0; up < 5 && node && !filename; up++, node = node.parentElement) {
+      for (const cand of node.querySelectorAll("button[aria-label]")) {
+        if (cand === btn) continue;
+        const label = (cand.getAttribute("aria-label") || "").trim();
+        if (/\.[A-Za-z0-9]{2,5}$/.test(label)) { filename = label; break; }
+      }
+    }
+    out.push({index, filename});
+  });
+  return out;
+}
+"""
+
+
 _DOWNLOAD_SCAN_JS = """
 () => {
   const turns = document.querySelectorAll("[data-testid^='conversation-turn']");
@@ -217,12 +254,49 @@ async def generation_error_text(page: Any) -> str | None:
 
 async def generated_file_targets(page: Any) -> list[DownloadTarget]:
     """ChatGPT-generated file download targets in the latest assistant reply.
-    Filtering lives in file_download.py so arbitrary external links are ignored."""
+    Filtering lives in file_download.py so arbitrary external links are ignored.
+
+    A file card's own download control wins outright when the turn has one: it
+    downloads, whereas the prose link beside it only opens a preview. They are two
+    doors to the SAME file, so mixing both would deliver everything twice."""
+    cards = await file_card_download_controls(page)
+    if cards:
+        return cards
     try:
         raw = await page.evaluate(_DOWNLOAD_SCAN_JS)
     except Exception:
         raw = []
     return parse_download_targets(raw)
+
+
+async def file_card_download_controls(page: Any) -> list[DownloadTarget]:
+    """Download controls belonging to file cards in the latest reply."""
+    try:
+        raw = await page.evaluate(_FILE_CARD_SCAN_JS)
+    except Exception:
+        return []
+    if not isinstance(raw, list):
+        return []
+    out: list[DownloadTarget] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        index = item.get("index")
+        if not isinstance(index, int):
+            continue
+        filename = str(item.get("filename") or "").strip()
+        if filename and _is_blocked_extension(filename):
+            continue
+        out.append(
+            DownloadTarget(
+                kind="button",
+                # The download event carries the authoritative name; this is only
+                # a label for logs when the card did not expose one.
+                filename=filename or f"generated-file-{index + 1}",
+                control_index=index,
+            )
+        )
+    return out
 
 
 # Every clickable-ish node in the latest turn, with the attributes a selector

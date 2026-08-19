@@ -5,6 +5,7 @@ import base64
 import logging
 import mimetypes
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -53,6 +54,34 @@ DOCUMENT_DOWNLOAD_TIMEOUT_MS = 60000
 # download a short first look; if the flyout is up, switch to it immediately, and
 # if it isn't, keep waiting out the rest of the budget for a genuinely slow file.
 DOCUMENT_PILL_DOWNLOAD_TIMEOUT_MS = 10000
+# Clicking the pill and looking once is not enough. 2026-08-19 probe on an idle
+# page: the layer is up 0.36s after the click. In production, on the frame the
+# answer completes, TWO clicks in a row opened nothing — the thread was still
+# swapping the turn's `blob:` preview for its `backend-api/estuary/…` URL, so the
+# click kept landing on nodes React was replacing. So: poll for the layer, and if
+# it does not show up, click again. Cheap either way — the happy path exits on the
+# first poll.
+PREVIEW_LAYER_WAIT_SECONDS = 3.0
+PREVIEW_LAYER_CLICK_ATTEMPTS = 3
+PREVIEW_LAYER_POLL_SECONDS = 0.25
+# ...and clicking more is not the answer either. 2026-08-19 production: three
+# clicks over 13s all reported "no layer", we gave up at 23s — and a dump taken
+# afterwards found the layer wide open (1365×646) with its 484×484 image loaded.
+# The layer does not fail to open, it opens LATE: it waits for the full-size
+# `estuary` image, which this device pulls through the proxy. That is the same
+# reason the document path was given a 60s budget in 2026-07-27, and exactly what
+# 2026-08-17 took away from prose-labelled image pills by routing them to a 4s
+# "short look". So keep clicking a few times, then simply keep waiting.
+PREVIEW_LAYER_TOTAL_BUDGET_SECONDS = 45.0
+# The layer can also arrive after we have given up (2026-08-19: the user found the
+# page parked on the full-screen preview). Take one late look — it both rescues
+# the picture and keeps a stray layer from covering the next turn.
+PREVIEW_LATE_LAYER_GRACE_SECONDS = 2.0
+# The in-page fetch of the layer's image can come back empty (2026-08-19: src
+# found, bytes=0, no reason logged). It goes through this device's proxy, so give
+# it another go before writing the reply off.
+PREVIEW_FETCH_ATTEMPTS = 3
+PREVIEW_FETCH_RETRY_SECONDS = 1.5
 # The document preview flyout ChatGPT opens when a generated-file pill is clicked.
 # Its own download control is what actually produces the file. Both the container
 # testid and the localized labels are matched — the UI language follows the
@@ -68,6 +97,16 @@ _PREVIEW_FLYOUT_CONTAINERS = (
     # the reply with no picture at all (68s burned, user got text only).
     "[data-testid='modal-lightbox-new']",
 )
+# The file card's own download control. Localized labels follow the account's UI
+# language; the English one is what this fleet's account renders.
+FILE_CARD_DOWNLOAD_BUTTON = (
+    "button[aria-label='Download file'], "
+    "button[aria-label='下载文件'], "
+    "button[aria-label='下載檔案']"
+)
+# It downloads promptly once ChatGPT has materialised the file (4.96s measured for
+# a 1MB PDF); this is headroom, not an expected wait.
+CARD_DOWNLOAD_TIMEOUT_MS = 45000
 _PREVIEW_DOWNLOAD_LABELS = ("Download", "下载")
 PREVIEW_DOWNLOAD_BUTTON = ", ".join(
     f"{container} button[aria-label='{label}']"
@@ -87,6 +126,9 @@ class DownloadTarget:
     kind: str
     filename: str
     href: str | None = None
+    # Position among the page's file-card download controls, when this target came
+    # from a card rather than from a prose link (see detector._FILE_CARD_SCAN_JS).
+    control_index: int | None = None
 
     @property
     def key(self) -> str:
@@ -138,9 +180,46 @@ def parse_download_targets(raw_targets: object) -> list[DownloadTarget]:
 
 
 async def download_chatgpt_file(page: object, target: DownloadTarget) -> DownloadedFile | None:
+    if target.control_index is not None:
+        file = await _download_via_card_control(page, target)
+        if file is not None:
+            return file
     if target.href:
         return await _download_link(page, target)
     return await _download_button(page, target)
+
+
+async def _download_via_card_control(page: object, target: DownloadTarget) -> DownloadedFile | None:
+    """Click a file card's own download button — the only control that downloads.
+
+    2026-08-19, measured on the live page: this fires a real download event in
+    ~5s carrying the true filename, and leaves the URL untouched. Everything else
+    we tried this month opens a preview (the prose link) or navigates the tab away
+    from the conversation (the lightbox's Save)."""
+    try:
+        control = page.locator(FILE_CARD_DOWNLOAD_BUTTON).nth(target.control_index)
+        async with page.expect_download(timeout=CARD_DOWNLOAD_TIMEOUT_MS) as download_info:
+            # Dispatch the click in-page rather than clicking for real. The control
+            # is rendered with `pointer-events: none` until its card is hovered
+            # (2026-08-19 measured: visible=True, opacity=1, box 36×36, but
+            # pointerEvents='none'), so a mouse click can never land on it —
+            # Playwright waits out its "receives events" check and gives up, which
+            # is exactly the 5s Locator.click timeout production hit. hover() fails
+            # for the same reason, and force=True would send a real click that
+            # passes THROUGH to whatever sits underneath. Dispatching downloads the
+            # file: measured 8.77s with the correct filename.
+            await control.evaluate("el => el.click()")
+        download = await download_info.value
+    except Exception as exc:
+        log.warning(
+            "file card download control failed: %s: %s (file=%r index=%s)",
+            type(exc).__name__,
+            str(exc).splitlines()[0][:160] if str(exc) else "",
+            target.filename,
+            target.control_index,
+        )
+        return None
+    return await _read_download(download, target)
 
 
 async def _download_link(page: object, target: DownloadTarget) -> DownloadedFile | None:
@@ -229,12 +308,18 @@ async def _download_button(page: object, target: DownloadTarget) -> DownloadedFi
         # image lightbox since 2026-08-17). Whatever the label said, the file is
         # in front of us: use the layer's own download control, else grab the
         # picture it is displaying.
-        if await _preview_flyout_visible(page):
+        # 2026-08-18/19: the click can land on nothing. detector returns the
+        # instant the answer is complete while the thread is still re-rendering,
+        # so the click hits a node React is about to replace — no download AND no
+        # layer. The old code fell straight through to the image fallback, which
+        # polled an unopened layer for 5s and delivered a reply with no picture.
+        # Keep clicking until the layer is actually there.
+        if await _open_preview_layer(page, target):
             return await _recover_from_preview(page, target, allow_image_fallback=not is_document)
         # An image pill can also fire the overlay slightly late — _capture_preview_image
         # polls for it (observed 2026-07-18).
         if not is_document:
-            return await _capture_preview_image(page, target)
+            return await _capture_preview_image_with_late_retry(page, target)
         # No preview: this pill is a direct download that is merely slow, so spend
         # the rest of the original budget on the event we already armed the click for.
         pending = await _await_pending_download(
@@ -246,6 +331,74 @@ async def _download_button(page: object, target: DownloadTarget) -> DownloadedFi
     return await _read_download(download, target)
 
 
+async def _open_preview_layer(page: object, target: DownloadTarget) -> bool:
+    """Wait for the pill's preview layer, re-clicking the pill until it shows up.
+
+    The caller has already clicked once, so the first pass only polls."""
+    started = time.monotonic()
+    deadline = started + PREVIEW_LAYER_TOTAL_BUDGET_SECONDS
+    extra_clicks = 0
+    next_click_at = started + PREVIEW_LAYER_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        if await _preview_layer_present(page):
+            log.info(
+                "preview layer opened after %.1fs and %d extra click(s) (file=%r)",
+                time.monotonic() - started,
+                extra_clicks,
+                target.filename,
+            )
+            return True
+        # A few re-clicks cover a click that landed on nothing; after that the
+        # layer is simply still loading its image, and clicking again won't help.
+        if extra_clicks + 1 < PREVIEW_LAYER_CLICK_ATTEMPTS and time.monotonic() >= next_click_at:
+            await _click_pill_again(page, target)
+            extra_clicks += 1
+            next_click_at = time.monotonic() + PREVIEW_LAYER_WAIT_SECONDS
+        await asyncio.sleep(PREVIEW_LAYER_POLL_SECONDS)
+    log.warning(
+        "preview layer never opened in %.1fs after %d extra click(s) (file=%r)",
+        time.monotonic() - started,
+        extra_clicks,
+        target.filename,
+    )
+    return False
+
+
+async def _click_pill_again(page: object, target: DownloadTarget) -> None:
+    """Click a file pill again after the previous click opened nothing.
+
+    No download is armed for this attempt: for a document the caller still spends
+    its remaining budget on `_await_pending_download`, which catches a download
+    event fired by this click too, and for an image the preview layer is what we
+    are after anyway."""
+    try:
+        await page.locator("button").filter(has_text=target.filename).first.click(timeout=5000)
+    except Exception as exc:
+        log.info(
+            "file pill re-click failed: %s (file=%r)",
+            type(exc).__name__,
+            target.filename,
+        )
+        return
+    log.info("file pill re-clicked after the previous click opened no preview (file=%r)", target.filename)
+
+
+async def _capture_preview_image_with_late_retry(
+    page: object, target: DownloadTarget
+) -> DownloadedFile | None:
+    """Grab the picture, then take one late look for a layer that arrived after
+    we stopped waiting — 2026-08-19 the layer showed up seconds later and stayed
+    on screen, so the user found the page parked on the full-screen preview."""
+    captured = await _capture_preview_image(page, target)
+    if captured is not None:
+        return captured
+    await asyncio.sleep(PREVIEW_LATE_LAYER_GRACE_SECONDS)
+    if not await _preview_layer_present(page):
+        return None
+    log.warning("preview layer arrived late; capturing after the fact (file=%r)", target.filename)
+    return await _capture_preview_image(page, target)
+
+
 async def _recover_from_preview(
     page: object, target: DownloadTarget, *, allow_image_fallback: bool
 ) -> DownloadedFile | None:
@@ -253,8 +406,12 @@ async def _recover_from_preview(
 
     Order matters: the layer's own download control is authoritative (it yields
     the real document), but the image lightbox has none — its Save/Share buttons
-    carry no aria-label and Save opens the browser's own save flow rather than a
-    download event, while the layer already renders the full-size backend image.
+    carry no aria-label, and the layer already renders the full-size backend image.
+
+    ⛔ Never click Save. 2026-08-18 measurement: it fires NO download event, it
+    NAVIGATES the tab to the raw file URL (backend-api/estuary/content?id=…), so
+    the conversation is gone and every following turn on that lane is answering
+    against an image document. Grab the rendered image instead.
 
     The image fallback is refused for a KNOWN document extension: a PDF preview
     also renders as a backend image, and capturing it would ship page one as a
@@ -269,6 +426,30 @@ async def _recover_from_preview(
         return await _capture_preview_image(page, target, close_layer=False)
     finally:
         await _close_preview_flyout(page)
+
+
+_PREVIEW_LAYER_PRESENT_JS = """
+(selectors) => {  // preview-layer-present
+  for (const sel of selectors) {
+    const el = document.querySelector(sel);
+    if (!el) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width >= 1 && r.height >= 1) return true;
+  }
+  return false;
+}
+"""
+
+
+async def _preview_layer_present(page: object) -> bool:
+    """Same question as _preview_flyout_visible, asked in one DOM round-trip.
+
+    The locator version costs a 1s timeout per container when nothing is open,
+    which is far too slow to poll with."""
+    try:
+        return bool(await page.evaluate(_PREVIEW_LAYER_PRESENT_JS, list(_PREVIEW_FLYOUT_CONTAINERS)))
+    except Exception:
+        return False
 
 
 async def _preview_flyout_visible(page: object) -> bool:
@@ -303,7 +484,20 @@ async def _click_preview_download_control(
     Clicking a generated-document pill opens ChatGPT's document preview instead of
     downloading, so the click resolves but no download event ever fires. Closing
     the layer is the caller's job (_recover_from_preview) — the image fallback
-    needs the layer still on screen."""
+    needs the layer still on screen.
+
+    2026-08-19: check the control EXISTS first. The image lightbox has none, and
+    arming expect_download for it burned the full 60s document budget on every
+    single image reply (measured 67.09s total for a turn that then failed)."""
+    try:
+        if await page.locator(PREVIEW_DOWNLOAD_BUTTON).count() == 0:
+            log.info(
+                "preview layer has no download control; going straight for the image (file=%r)",
+                target.filename,
+            )
+            return None
+    except Exception:
+        pass
     try:
         async with page.expect_download(timeout=DOCUMENT_DOWNLOAD_TIMEOUT_MS) as download_info:
             await page.locator(PREVIEW_DOWNLOAD_BUTTON).first.click(timeout=5000)
@@ -418,12 +612,30 @@ _PREVIEW_IMAGE_SRC_JS = """
   return null;
 }
 """
+# Why did the src probe come up empty? Report every image on the page with the
+# two facts the probe filters on (size and whether it sits inside a turn), so a
+# failure says "layer never opened" (no candidate outside a turn) apart from
+# "layer opened but the picture was filtered out".
+_PREVIEW_IMAGE_CANDIDATES_JS = """
+() => {
+  const out = [];
+  for (const im of document.querySelectorAll("img")) {
+    out.push({
+      src: (im.currentSrc || im.src || "").slice(0, 60),
+      w: im.clientWidth,
+      h: im.clientHeight,
+      inTurn: !!im.closest("[data-testid^='conversation-turn']"),
+    });
+  }
+  return out.slice(0, 8);
+}
+"""
 # In-page fetch so the logged-in session cookies apply (estuary URLs need them).
 _FETCH_PREVIEW_B64_JS = """
 async (src) => {
   try {
     const res = await fetch(src, { credentials: "include" });
-    if (!res.ok) return null;
+    if (!res.ok) return "!http " + res.status;
     const bytes = new Uint8Array(await res.arrayBuffer());
     let bin = "";
     for (let i = 0; i < bytes.length; i += 0x8000) {
@@ -431,10 +643,19 @@ async (src) => {
     }
     return btoa(bin);
   } catch (e) {
-    return null;
+    return "!err " + (e && e.name ? e.name : "unknown");
   }
 }
 """
+
+
+async def _preview_image_candidates_debug(page: object) -> list[dict[str, object]]:
+    """Diagnostics only — reads the DOM, never clicks."""
+    try:
+        raw = await page.evaluate(_PREVIEW_IMAGE_CANDIDATES_JS)
+    except Exception:
+        return []
+    return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
 
 
 async def _capture_preview_image(
@@ -454,16 +675,43 @@ async def _capture_preview_image(
         if src:
             break
         await asyncio.sleep(0.5)
+    # Collect the candidates BEFORE closing the layer — after the close there is
+    # nothing left to look at. This path used to fail with no log line at all,
+    # which is why the 2026-08-18 loss could only be explained by replaying it
+    # against the live page.
+    candidates = [] if src else await _preview_image_candidates_debug(page)
     data = None
+    fetch_error = None
     if src:
-        try:
-            b64 = await page.evaluate(_FETCH_PREVIEW_B64_JS, src)
-            data = base64.b64decode(b64) if b64 else None
-        except Exception:
-            data = None
+        for attempt in range(PREVIEW_FETCH_ATTEMPTS):
+            try:
+                b64 = await page.evaluate(_FETCH_PREVIEW_B64_JS, src)
+            except Exception as exc:
+                fetch_error, b64 = f"evaluate:{type(exc).__name__}", None
+            if isinstance(b64, str) and b64.startswith("!"):
+                # The page reported the failure itself (HTTP status or fetch error);
+                # without this the only symptom was "bytes=0" and no reason at all.
+                fetch_error, b64 = b64, None
+            if b64:
+                try:
+                    data = base64.b64decode(b64)
+                    fetch_error = None
+                    break
+                except Exception as exc:
+                    fetch_error = f"b64:{type(exc).__name__}"
+            if attempt + 1 < PREVIEW_FETCH_ATTEMPTS:
+                await asyncio.sleep(PREVIEW_FETCH_RETRY_SECONDS)
     if close_layer:
         await _close_preview_flyout(page)
     if not data or len(data) < 1024 or len(data) > MAX_DOWNLOAD_BYTES:
+        log.warning(
+            "preview image capture failed: src=%r bytes=%d fetch=%s (file=%r) candidates=%s",
+            (src or "")[:100] or None,
+            len(data) if data else 0,
+            fetch_error,
+            target.filename,
+            candidates,
+        )
         return None
     # A prose-labelled pill has no extension, so the guessed type would be
     # application/octet-stream and the picture would be delivered as a file card
@@ -552,6 +800,14 @@ _DOWNLOAD_INTENT_RE = re.compile(
 
 def _is_download_intent(label: str | None) -> bool:
     return bool(label and _DOWNLOAD_INTENT_RE.search(label))
+
+
+def mentions_download_intent(text: str | None) -> bool:
+    """Does this reply talk about a file the reader is meant to download?
+
+    Same vocabulary as the pill matcher — used to decide whether it is worth
+    waiting for a pill that has not rendered yet."""
+    return _is_download_intent(text)
 
 
 def _safe_filename(value: str | None) -> str | None:

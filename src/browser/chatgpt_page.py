@@ -33,7 +33,12 @@ from src.browser.detector import (
     wait_for_response_complete,
 )
 from src.browser.feishu_format import feishu_safe_markdown
-from src.browser.file_download import dismiss_stale_preview_flyout, download_chatgpt_file
+from src.browser.file_download import (
+    dismiss_stale_preview_flyout,
+    download_chatgpt_file,
+    DownloadTarget,
+    mentions_download_intent,
+)
 from src.browser.human import hover_and_click, paste_text, random_delay
 from src.browser.image_input import resolve_image_inputs
 from src.browser.response_lifecycle_probe import (
@@ -103,6 +108,16 @@ MAX_FILES_PER_REPLY = 4
 # mark, so the same bounded window is used to wait for it.
 IMAGE_RESCAN_SECONDS = 15.0
 _IMAGE_SETTLE_POLL_SECONDS = 0.5
+
+# The file pill is not in the DOM yet when the turn completes. 2026-08-19: two
+# replies that both ended up carrying a download pill ("下载 PNG 测试图片", and a
+# PDF the same day) shipped with `files=0.00` — the scan ran the instant the turn
+# was judged complete and matched nothing, while a dump taken afterwards found
+# the pill sitting right there, parsed correctly. So when the answer talks about
+# a file but the scan came up empty, keep looking for a bounded while. Costs
+# nothing on a plain-text reply: the intent check gates the wait.
+DOWNLOAD_TARGET_RESCAN_SECONDS = 12.0
+_DOWNLOAD_TARGET_POLL_SECONDS = 0.5
 
 # A reply that is nothing but a filename is the signature of an unrecognised file
 # pill: the turn has no .markdown body, so inner_text picks up the pill's label.
@@ -516,6 +531,29 @@ class ChatGPTPage:
         )
         return merged
 
+    async def _await_download_targets(self) -> list[DownloadTarget]:
+        """Keep scanning for a file pill the turn promised but has not rendered yet.
+
+        Called only when the answer itself mentions a file/download, so a plain
+        text reply never pays for this. Bounded by DOWNLOAD_TARGET_RESCAN_SECONDS."""
+        started = time.monotonic()
+        deadline = started + DOWNLOAD_TARGET_RESCAN_SECONDS
+        while time.monotonic() < deadline:
+            await asyncio.sleep(_DOWNLOAD_TARGET_POLL_SECONDS)
+            targets = await generated_file_targets(self.page)
+            if targets:
+                log.info(
+                    "file pill appeared %.1fs after the turn completed (%d target(s))",
+                    time.monotonic() - started,
+                    len(targets),
+                )
+                return targets
+        log.info(
+            "reply mentions a file but no pill showed up in %.0fs",
+            DOWNLOAD_TARGET_RESCAN_SECONDS,
+        )
+        return []
+
     async def _await_settling_generated_images(self, exclude_srcs: set[str]) -> list[str]:
         """Re-scan for the turn's picture while its imagegen scaffold is still empty.
 
@@ -677,6 +715,8 @@ class ChatGPTPage:
         emitted: set[str] = set()
         delivered_image_names: set[str] = set()
         targets = await generated_file_targets(self.page)
+        if not targets and mentions_download_intent(answer):
+            targets = await self._await_download_targets()
         if not targets and _looks_like_bare_filename(answer):
             # The reply's whole text is a filename, i.e. ChatGPT rendered a file
             # pill whose label leaked into inner_text while the download scan

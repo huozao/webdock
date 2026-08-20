@@ -599,17 +599,49 @@ async def _read_download(download: object, target: DownloadTarget) -> Downloaded
     return DownloadedFile(filename=filename, content_type=_guess_content_type(filename), data=data)
 
 
-# The preview overlay renders the file's backend image OUTSIDE any conversation
-# turn at a real size — that distinguishes it from the in-chat reply images.
+# Take the picture from INSIDE the preview layer, using the very same selectors
+# that decided the layer is open - so "the layer opened" and "found the image"
+# can never disagree.
+#
+# It used to scan the whole page for an image outside any conversation turn that
+# measured >= 300x300. That size gate stood in for "the big one in the layer",
+# and 2026-08-20 disproved it: a 400x800 portrait renders 242x484 inside the
+# layer, so the width gate dropped it and the turn shipped with no picture even
+# though the layer had opened in 0.0s. Size never belonged in this decision - the
+# in-chat image is not a thumbnail either, its src points at the same
+# full-resolution file and only CSS shrinks it.
 _PREVIEW_IMAGE_SRC_JS = """
-() => {
-  for (const im of document.querySelectorAll("img")) {
-    if (im.closest("[data-testid^='conversation-turn']")) continue;
-    const src = im.currentSrc || im.src || "";
-    if (!/backend-api\\/(estuary|files)\\/|oaiusercontent/.test(src)) continue;
-    if (im.clientWidth >= 300 && im.clientHeight >= 300) return src;
+(containers) => {
+  for (const sel of containers) {
+    for (const layer of document.querySelectorAll(sel)) {
+      const imgs = [...layer.querySelectorAll("img")].filter((im) =>
+        /backend-api\\/(estuary|files)\\/|oaiusercontent/.test(im.currentSrc || im.src || "")
+      );
+      // Normally the layer holds exactly one image; sort by rendered area so a
+      // future icon-sized <img> in the layer chrome cannot win over the picture.
+      imgs.sort((a, b) => b.clientWidth * b.clientHeight - a.clientWidth * a.clientHeight);
+      if (imgs.length) return imgs[0].currentSrc || imgs[0].src;
+    }
   }
   return null;
+}
+"""
+# Diagnostics for the near miss: the layer is open and holds an image, but every
+# candidate is still a `blob:` URL (2026-08-19 caught the frame where the page
+# swaps its blob preview for the estuary original). Not accepted as a source yet
+# - a blob may be a low-resolution placeholder and shipping a blurry picture is
+# worse than failing - but logged so that call can rest on evidence.
+_PREVIEW_BLOB_ONLY_JS = """
+(containers) => {
+  for (const sel of containers) {
+    for (const layer of document.querySelectorAll(sel)) {
+      const imgs = [...layer.querySelectorAll("img")];
+      if (imgs.length && imgs.every((im) => (im.currentSrc || im.src || "").startsWith("blob:"))) {
+        return imgs.length;
+      }
+    }
+  }
+  return 0;
 }
 """
 # Why did the src probe come up empty? Report every image on the page with the
@@ -658,6 +690,35 @@ async def _preview_image_candidates_debug(page: object) -> list[dict[str, object
     return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
 
 
+async def _preview_blob_only_count(page: object) -> int:
+    """Diagnostics only - how many images the open layer holds when every one of
+    them is still a blob: URL."""
+    try:
+        return int(await page.evaluate(_PREVIEW_BLOB_ONLY_JS, list(_PREVIEW_FLYOUT_CONTAINERS)) or 0)
+    except Exception:
+        return 0
+
+
+async def _fetch_via_context_request(page: object, src: str) -> tuple[bytes | None, str | None]:
+    """Fetch the preview image through the browser context's request API.
+
+    Backs up the in-page fetch: same cookies, but no page is involved, so a
+    broken page context cannot take it down with it. Returns (data, error)."""
+    try:
+        context = page.context
+        response = await context.request.get(src)
+    except Exception as exc:
+        return None, type(exc).__name__
+    try:
+        status = response.status
+        if status >= 400:
+            return None, f"http {status}"
+        data = await response.body()
+    except Exception as exc:
+        return None, f"body:{type(exc).__name__}"
+    return (data or None), (None if data else "empty")
+
+
 async def _capture_preview_image(
     page: object, target: DownloadTarget, *, close_layer: bool = True
 ) -> DownloadedFile | None:
@@ -669,7 +730,7 @@ async def _capture_preview_image(
     src = None
     for _ in range(10):  # the overlay renders async after the click
         try:
-            src = await page.evaluate(_PREVIEW_IMAGE_SRC_JS)
+            src = await page.evaluate(_PREVIEW_IMAGE_SRC_JS, list(_PREVIEW_FLYOUT_CONTAINERS))
         except Exception:
             src = None
         if src:
@@ -680,6 +741,14 @@ async def _capture_preview_image(
     # which is why the 2026-08-18 loss could only be explained by replaying it
     # against the live page.
     candidates = [] if src else await _preview_image_candidates_debug(page)
+    if not src:
+        blob_only = await _preview_blob_only_count(page)
+        if blob_only:
+            log.warning(
+                "preview layer holds %d image(s) but all of them are still blob: URLs (file=%r)",
+                blob_only,
+                target.filename,
+            )
     data = None
     fetch_error = None
     if src:
@@ -701,6 +770,14 @@ async def _capture_preview_image(
                     fetch_error = f"b64:{type(exc).__name__}"
             if attempt + 1 < PREVIEW_FETCH_ATTEMPTS:
                 await asyncio.sleep(PREVIEW_FETCH_RETRY_SECONDS)
+    if src and not data:
+        # Second, independent way to turn the URL into bytes: the browser
+        # context's own request API. It carries the session cookies without
+        # touching a page, so it survives what killed the in-page fetch on
+        # 2026-08-19 11:05 (src was fine, `fetch=!err TypeError`, no bytes).
+        data, api_error = await _fetch_via_context_request(page, src)
+        if api_error:
+            fetch_error = f"{fetch_error} | api:{api_error}"
     if close_layer:
         await _close_preview_flyout(page)
     if not data or len(data) < 1024 or len(data) > MAX_DOWNLOAD_BYTES:

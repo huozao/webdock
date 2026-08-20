@@ -5,7 +5,13 @@ import base64
 from pathlib import Path
 
 from src.browser.detector import _DOWNLOAD_SCAN_JS
-from src.browser.file_download import _download_button, DownloadTarget, parse_download_targets
+from src.browser.file_download import (
+    _download_button,
+    _PREVIEW_FLYOUT_CONTAINERS,
+    _PREVIEW_IMAGE_SRC_JS,
+    DownloadTarget,
+    parse_download_targets,
+)
 
 
 RAW_FIXTURE = Path(__file__).parent / "fixtures" / "feishu" / "raw" / "download_files.html"
@@ -608,3 +614,111 @@ def test_card_download_control_is_preferred_over_the_prose_link(monkeypatch):
     assert page.clicked_index == 2, "必须点第 index 个卡片控件，而不是第一个"
     assert page.dispatched, "必须在页面内派发 click：控件是 pointer-events:none，真实点击点不到"
     assert captured["download"] is page._download
+
+
+# 2026-08-20 生产 DOM 的最小复刻：会话里那张图 173×384（src 指向的就是原图，页面
+# 只是把它缩着显示，从来不是缩略图），预览层里那张 242×484——400×800 的竖图等比
+# 缩放后的样子。旧代码按 ">=300×300 且不在 turn 内" 找图，242 的宽度过不了门槛，
+# 于是层 0.0s 就开了、图也在 DOM 里，这一轮却交付了一条没有图的回复。
+_LAYER_DOM = """
+<div data-testid="conversation-turn-9">
+  <img src="https://chatgpt.com/backend-api/estuary/content?id=file_INCHAT&ts=1&sig=a"
+       style="width:173px;height:384px">
+</div>
+<div data-testid="modal-lightbox-new" role="dialog">
+  <img src="https://chatgpt.com/backend-api/estuary/content?id=file_LAYER&ts=1&sig=a"
+       style="width:242px;height:484px">
+</div>
+"""
+
+
+def test_portrait_preview_image_is_taken_from_inside_the_layer(rich_markdown_page):
+    rich_markdown_page.set_content(_LAYER_DOM)
+
+    src = rich_markdown_page.evaluate(_PREVIEW_IMAGE_SRC_JS, list(_PREVIEW_FLYOUT_CONTAINERS))
+
+    assert src and "file_LAYER" in src, "竖长图不该因为宽度不到 300 就被丢掉"
+
+
+def test_no_preview_image_when_the_layer_never_opened(rich_markdown_page):
+    """层没开时必须返回 None：会话里的图不是它的替身，抓错了会把上一张图重发一遍。"""
+    rich_markdown_page.set_content(_LAYER_DOM.split("<div data-testid=\"modal-lightbox-new\"")[0])
+
+    src = rich_markdown_page.evaluate(_PREVIEW_IMAGE_SRC_JS, list(_PREVIEW_FLYOUT_CONTAINERS))
+
+    assert src is None
+
+
+def test_layer_chrome_icon_never_wins_over_the_picture(rich_markdown_page):
+    """层里若还有别的 img（图标之类），按渲染面积取大的那张。"""
+    rich_markdown_page.set_content(
+        """
+        <div data-testid="modal-lightbox-new">
+          <img src="https://chatgpt.com/backend-api/files/icon/share.png"
+               style="width:20px;height:20px">
+          <img src="https://chatgpt.com/backend-api/estuary/content?id=file_LAYER&ts=1&sig=a"
+               style="width:242px;height:484px">
+        </div>
+        """
+    )
+
+    src = rich_markdown_page.evaluate(_PREVIEW_IMAGE_SRC_JS, list(_PREVIEW_FLYOUT_CONTAINERS))
+
+    assert src and "file_LAYER" in src
+
+
+class _InPageFetchBrokenPage(_FakePillPage):
+    """08-19 11:05 生产：src 已经拿到了完整的 estuary URL，页内 fetch 却报
+    `!err TypeError`，一个字节也没取到，整轮丢图。URL 是对的，坏的只是页内那条
+    取字节的路——所以还要有一条不碰页面的路。"""
+
+    def __init__(self, payload: bytes, *, api_ok: bool = True) -> None:
+        super().__init__(payload)
+        self.api_requests: list[str] = []
+        page = self
+
+        class _Response:
+            status = 200 if api_ok else 403
+
+            async def body(self) -> bytes:
+                return payload
+
+        class _Request:
+            async def get(self, url: str):
+                page.api_requests.append(url)
+                return _Response()
+
+        class _Context:
+            request = _Request()
+
+        self.context = _Context()
+
+    async def evaluate(self, script: str, arg: object | None = None):
+        if "arrayBuffer" in script:  # 页内 fetch：页面自己报错
+            return "!err TypeError"
+        return await super().evaluate(script, arg)
+
+
+def test_broken_in_page_fetch_falls_back_to_the_context_request(monkeypatch):
+    monkeypatch.setattr("src.browser.file_download.PREVIEW_FETCH_RETRY_SECONDS", 0)
+    payload = b"\x89PNG\r\n\x1a\n" + b"P" * 2048
+    page = _InPageFetchBrokenPage(payload)
+    target = DownloadTarget(kind="button", filename="⬇️ 下载图片（400×800）", href=None)
+
+    file = asyncio.run(_download_button(page, target))
+
+    assert page.api_requests, "页内 fetch 挂了以后必须再走一次 context.request"
+    assert file is not None and file.data == payload
+
+
+def test_both_fetch_routes_failing_names_both_in_the_log(monkeypatch, caplog):
+    monkeypatch.setattr("src.browser.file_download.PREVIEW_FETCH_RETRY_SECONDS", 0)
+    page = _InPageFetchBrokenPage(b"\x89PNG\r\n\x1a\n" + b"P" * 2048, api_ok=False)
+    target = DownloadTarget(kind="button", filename="⬇️ 下载图片（400×800）", href=None)
+
+    with caplog.at_level("WARNING"):
+        file = asyncio.run(_download_button(page, target))
+
+    assert file is None
+    failure = next(r.getMessage() for r in caplog.records if "preview image capture failed" in r.message)
+    assert "TypeError" in failure and "api:http 403" in failure, "两条路各自怎么挂的都得留在日志里"

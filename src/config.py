@@ -27,6 +27,12 @@ class Settings:
     # run far longer than text — image rendering has >idle_timeout quiet gaps that
     # would trip the text timeout. Kept under the bridge's WEB_DOCK_TIMEOUT (320s).
     chat_timeout_seconds_with_images: int = 300
+    # How long inbound attachments may take to reach ChatGPT's servers before the
+    # turn is abandoned. This is upload time only — it is spent BEFORE the text is
+    # sent, so it is not part of any reply timeout. 2026-08-24 production: 322s for
+    # one phone photo through the egress proxy, ~150s for three. Blowing it is an
+    # UPLOAD_FAILED (nothing sent, bridge re-routes to the standby).
+    upload_land_timeout_seconds: int = 300
     # Absolute wall-clock ceiling per request. NOT the soft timeout: a long but
     # actively-streaming reply runs until this cap.
     # Was 310 to sit just under the failover-proxy's 320s single-HTTP limit, so the
@@ -93,6 +99,7 @@ def get_settings() -> Settings:
         chatgpt_url=_get("CHATGPT_URL", "https://chatgpt.com/", env),
         chat_timeout_seconds=int(_get("CHAT_TIMEOUT_SECONDS", "120", env)),
         chat_timeout_seconds_with_images=int(_get("CHAT_TIMEOUT_SECONDS_WITH_IMAGES", "300", env)),
+        upload_land_timeout_seconds=int(_get("UPLOAD_LAND_TIMEOUT_SECONDS", "300", env)),
         request_hard_cap_seconds=int(_get("REQUEST_HARD_CAP_SECONDS", "1200", env)),
         response_stable_seconds=int(_get("RESPONSE_STABLE_SECONDS", "5", env)),
         response_idle_timeout_seconds=int(_get("RESPONSE_IDLE_TIMEOUT_SECONDS", "15", env)),
@@ -163,6 +170,7 @@ def _path_from_env(value: str) -> Path:
 _RUNTIME_OVERRIDE_INT_FIELDS = (
     "chat_timeout_seconds",
     "chat_timeout_seconds_with_images",
+    "upload_land_timeout_seconds",
     "request_hard_cap_seconds",
     "lane_tab_idle_seconds",
     "response_stable_seconds",

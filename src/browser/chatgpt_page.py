@@ -132,7 +132,14 @@ def _looks_like_bare_filename(text: str) -> bool:
 # to let an attachment finalize on ChatGPT's side before sending the text.
 UPLOAD_INPUT_TIMEOUT_MS = 5000
 _UPLOAD_DETECT_TIMEOUT_SECONDS = 8.0
-_UPLOAD_SETTLE_SECONDS = 2.0
+# How long the attachments may take to actually reach ChatGPT's servers, measured
+# from "the composer shows a chip" to "every chip carries a server file id".
+# 2026-08-24 production samples: 322s for one phone photo, ~150s for three — the
+# egress proxy's uplink, not the page. Overridable per device in runtime.json;
+# blowing the budget is a loud UPLOAD_FAILED (bridge re-routes to the standby),
+# never a turn sent without its pictures.
+_UPLOAD_LAND_TIMEOUT_SECONDS = 300.0
+_UPLOAD_POLL_SECONDS = 0.5
 # A freshly navigated composer can swallow the first set_input_files (React not
 # wired up yet) — same failure mode paste_text already guards against. The retry
 # only runs when the attachment count did not grow, so it cannot duplicate a
@@ -922,74 +929,92 @@ async def upload_images(page: Any, image_urls: list[str]) -> int:
     """Attach inbound WeChat files (images or documents) to the ChatGPT composer.
 
     Resolves each URL (base64 data URL or http(s)) to bytes, writes temp files,
-    and sets them on ChatGPT's hidden <input type="file">. For document uploads
-    (PDF, DOCX, XLSX…) ChatGPT disables the send button while processing; we wait
-    for it to re-enable before returning.
+    and sets them on ChatGPT's hidden <input type="file">, then waits until every
+    one of them has actually reached ChatGPT's servers before returning.
 
     VERIFIED, like paste_text: on a page that just navigated (every `/新对话`),
     set_input_files can silently no-op, and this used to report success anyway —
     the turn then went out text-only and ChatGPT answered "没有收到原图" ~40s
-    later (2026-08-15/16, three samples). We now compare the composer's
-    attachment count before/after, retry once, and return 0 when nothing landed
-    so the caller can fail loudly instead of sending a crippled turn."""
+    later (2026-08-15/16, three samples).
+
+    VERIFIED again 2026-08-24, because "a chip appeared" turned out to answer the
+    wrong question: the thumbnail AND its remove button are in the DOM while the
+    upload sits at 1%. Clicking send there is accepted — ChatGPT queues the
+    submit and fires it when the upload finishes (measured 322s later) — until an
+    attachment drops out mid-upload, at which point the queued submit is
+    cancelled and the composer sits there holding the text forever. So landing is
+    now judged per file, by name, against the server file id. Returns 0 (caller
+    fails loudly, bridge re-routes) whenever anything is missing or unfinished."""
     resolved = resolve_image_inputs(image_urls)
     if not resolved:
         return 0
     paths = _write_temp_images(resolved)
     if not paths:
         return 0
+    names = [os.path.basename(path) for path in paths]
+    total_bytes = sum(len(data) for data, _ in resolved)
     has_documents = any(ext.lower() not in _IMAGE_EXTENSIONS for _, ext in resolved)
     started = time.monotonic()
     attached = 0
     attempts = 0
     input_found = False
+    outcome = "no_attempt"
+    land_started = started
     try:
         ready = await _wait_composer_ready(page)
         ready_at = time.monotonic()
-        # Chips already on screen (images earlier in the thread) are NOT ours —
-        # every later check is against this count, never against zero.
-        initial = await attachment_count(page)
         for attempt in range(1, _UPLOAD_ATTEMPTS + 1):
             attempts = attempt
             if attempt > 1:
                 # The page moved on since the failed attempt; re-confirm the
                 # composer rather than setting files into a stale handle.
                 await _wait_composer_ready(page)
-            baseline = await attachment_count(page)
-            if attempt > 1 and baseline > initial:
-                # The previous attempt did land, we just missed it inside the
-                # detect window; setting the files again would duplicate them.
+            # Our own temp filenames are the key: chips from earlier turns carry
+            # other labels, so they can neither satisfy nor fail this upload.
+            if "missing" in await _attachment_states(page, names):
+                # find_first waits the full timeout on EVERY candidate, so the
+                # composer-scoped ones get a short probe and only the bare
+                # fallback gets the real budget — otherwise adding candidates
+                # would add 5s each to the very page this is meant to help.
+                selector = await find_first(page, selectors.FILE_INPUT[:-1], timeout_ms=1000)
+                if not selector:
+                    selector = await find_first(
+                        page, selectors.FILE_INPUT[-1:], timeout_ms=UPLOAD_INPUT_TIMEOUT_MS
+                    )
+                if not selector:
+                    outcome = "no_input"
+                    continue
+                input_found = True
+                try:
+                    await page.set_input_files(selector, paths)
+                except Exception as exc:
+                    log.warning("upload set_input_files failed on attempt %d: %s", attempt, exc)
+                    outcome = "set_failed"
+                    continue
+            land_started = time.monotonic()
+            outcome = await _wait_uploads_ready(page, names, has_documents=has_documents)
+            if outcome == "ok":
                 attached = len(paths)
                 break
-            # find_first waits the full timeout on EVERY candidate, so the
-            # composer-scoped ones get a short probe and only the bare fallback
-            # gets the real budget — otherwise adding candidates would add 5s
-            # each to the very page (freshly navigated) this is meant to help.
-            selector = await find_first(page, selectors.FILE_INPUT[:-1], timeout_ms=1000)
-            if not selector:
-                selector = await find_first(
-                    page, selectors.FILE_INPUT[-1:], timeout_ms=UPLOAD_INPUT_TIMEOUT_MS
-                )
-            if not selector:
-                continue
-            input_found = True
-            try:
-                await page.set_input_files(selector, paths)
-            except Exception as exc:
-                log.warning("upload set_input_files failed on attempt %d: %s", attempt, exc)
-                continue
-            if await _wait_uploads_ready(page, has_documents=has_documents, baseline=baseline):
-                attached = len(paths)
+            if outcome != "not_detected":
+                # The files DID enter the composer and then failed to finish or
+                # vanished. Setting them again would stack duplicates on top of
+                # whatever is still there, so this turn is over.
                 break
         log.info(
-            "upload_stages total=%.2fs ready=%.2fs/%s files=%d attempts=%d input_found=%s attached=%d url=%s",
+            "upload_stages total=%.2fs ready=%.2fs/%s files=%d bytes=%d attempts=%d "
+            "input_found=%s attached=%d land=%.2fs outcome=%s chips=%d url=%s",
             time.monotonic() - started,
             ready_at - started,
             ready,
             len(paths),
+            total_bytes,
             attempts,
             input_found,
             attached,
+            time.monotonic() - land_started,
+            outcome,
+            await attachment_count(page),
             _safe_page_url(page),
         )
         return attached
@@ -1009,12 +1034,70 @@ def _safe_page_url(page: Any) -> str:
         return "?"
 
 
+# One tile per attached file, keyed by OUR temp filename, in the state ChatGPT's
+# composer renders it. Structural only — no sizes, no percentages, no timings:
+#
+#   uploading  `cursor-wait` on the tile and/or the <svg viewBox="0 0 120 120">
+#              progress ring (two <circle>s, the second animating
+#              stroke-dashoffset). Present from 1% onward.
+#   done       ring gone AND the preview <img> switched from `blob:` to the
+#              server URL carrying `id=file_…` — that id IS the upload receipt.
+#              Documents render no <img>, so for them "ring gone" is the signal.
+#   missing    no tile with that filename: never landed, or dropped mid-upload.
+#
+# 2026-08-24 measured order: ring cleared at 09:11:17 with the src still `blob:`,
+# the file id appeared by 09:11:49. The ring alone would have sent up to ~30s
+# early, which is exactly the class of bug this replaces — hence both markers.
+_ATTACHMENT_STATES_JS = """
+(names) => {
+  const tiles = Array.from(document.querySelectorAll("[role='group'][aria-label]"));
+  return names.map((name) => {
+    const tile = tiles.find((t) => (t.getAttribute('aria-label') || '').includes(name));
+    if (!tile) return 'missing';
+    if (tile.querySelector('.cursor-wait') || tile.querySelector('svg circle')) return 'uploading';
+    const img = tile.querySelector('img');
+    if (!img) return 'done';
+    const src = img.getAttribute('src') || '';
+    if (/[?&]id=file_/.test(src)) return 'done';
+    return src.startsWith('blob:') ? 'uploading' : 'done';
+  });
+}
+"""
+
+
+def _upload_land_budget() -> float:
+    """Seconds allowed for the files to reach ChatGPT, runtime.json overridable."""
+    try:
+        value = float(get_settings().upload_land_timeout_seconds)
+    except Exception:
+        return _UPLOAD_LAND_TIMEOUT_SECONDS
+    return value if value > 0 else _UPLOAD_LAND_TIMEOUT_SECONDS
+
+
+async def _attachment_states(page: Any, names: list[str]) -> list[str]:
+    """Per-file upload state, in the order of `names`. Unreadable page = missing."""
+    try:
+        states = await page.evaluate(_ATTACHMENT_STATES_JS, names)
+    except Exception as exc:
+        log.warning("attachment state probe failed: %s", exc)
+        return ["missing"] * len(names)
+    if not isinstance(states, list) or len(states) != len(names):
+        return ["missing"] * len(names)
+    return [str(state) for state in states]
+
+
 async def attachment_count(page: Any) -> int:
     """How many attachment chips the composer shows.
 
+    ⚠️ Diagnostics only. Until 2026-08-24 this was the upload judge ("did the
+    count grow"); it is not, because the chip exists from 1% of the upload and a
+    count cannot notice 3 chips becoming 2. Landing is judged by
+    `_attachment_states`. Kept because "how many chips are on screen" is still
+    worth having in the log line.
+
     ATTACHMENT_PREVIEW selectors overlap (one chip can match several) and can
     also match images already in the thread, so this is only meaningful as a
-    "did it grow" signal, never as an exact file count."""
+    rough figure, never as an exact file count."""
     total = 0
     for selector in selectors.ATTACHMENT_PREVIEW:
         try:
@@ -1068,30 +1151,55 @@ async def _wait_composer_ready(page: Any) -> bool:
     return True
 
 
-async def _wait_uploads_ready(page: Any, has_documents: bool = False, baseline: int = 0) -> bool:
-    """Wait until the composer really holds the new attachment(s).
+async def _wait_uploads_ready(page: Any, names: list[str], *, has_documents: bool = False) -> str:
+    """Wait until ChatGPT really holds every file, then say what happened.
 
-    Phase 1 (all types): wait for the attachment-chip count to grow past
-    `baseline` — the browser registering the file. Growth (not "any chip found")
-    is the signal, so images already in the thread and chips left by an earlier
-    attempt cannot be mistaken for this upload. Returns False when it never
-    grows: the caller retries or fails, and no blind fallback sleep pretends the
-    file is there. Phase 2: for documents ChatGPT disables the send button while
-    processing; poll until it re-enables. Images only need the short settle."""
-    deadline = time.monotonic() + _UPLOAD_DETECT_TIMEOUT_SECONDS
-    detected = False
-    while time.monotonic() < deadline:
-        if await attachment_count(page) > baseline:
-            detected = True
-            break
-        await asyncio.sleep(0.3)
-    if not detected:
-        return False
-    if has_documents:
-        await _wait_send_button_enabled(page)
-    else:
-        await asyncio.sleep(_UPLOAD_SETTLE_SECONDS)
-    return True
+    Phase 1 — detection: every filename must show up as a tile. The browser
+    swallowing set_input_files (freshly navigated composer) shows up here as
+    `not_detected`, and only that outcome is safe to retry: nothing entered the
+    composer, so setting the files again cannot duplicate anything.
+
+    Phase 2 — landing: every tile must reach `done`. A tile that disappears after
+    being seen is `vanished` — 2026-08-24, one of three images dropped out
+    mid-upload and ChatGPT cancelled the already-queued submit with it. Running
+    out of budget is `incomplete`. Neither may be retried and neither may be sent:
+    a turn missing one of its pictures is a wrong turn, not a degraded one.
+
+    Phase 3 — documents additionally disable the send button while ChatGPT
+    processes them (PDF, DOCX…); poll until it re-enables. Images never disable
+    it: measured 2026-08-24, the button is clickable at 1% upload, which is
+    precisely why it can never be the judge here."""
+    detect_deadline = time.monotonic() + _UPLOAD_DETECT_TIMEOUT_SECONDS
+    land_deadline: float | None = None
+    seen: set[str] = set()
+    lost_twice = False
+    while True:
+        states = await _attachment_states(page, names)
+        present = {name for name, state in zip(names, states) if state != "missing"}
+        lost = seen - present
+        if lost:
+            # One unreadable probe (a navigation mid-poll) reports everything
+            # missing, so a single sighting is not enough to condemn the turn.
+            if lost_twice:
+                log.warning("upload attachment vanished mid-upload: %s", sorted(lost))
+                return "vanished"
+            lost_twice = True
+        else:
+            lost_twice = False
+            seen |= present
+        if land_deadline is None:
+            if len(present) == len(names):
+                land_deadline = time.monotonic() + _upload_land_budget()
+            elif time.monotonic() >= detect_deadline:
+                return "not_detected"
+        if land_deadline is not None and not lost:
+            if all(state == "done" for state in states):
+                if has_documents:
+                    await _wait_send_button_enabled(page)
+                return "ok"
+            if time.monotonic() >= land_deadline:
+                return "incomplete"
+        await asyncio.sleep(_UPLOAD_POLL_SECONDS)
 
 
 async def _wait_send_button_enabled(page: Any, timeout_seconds: float = _UPLOAD_SEND_READY_TIMEOUT_SECONDS) -> None:

@@ -24,7 +24,7 @@ ChatGPT 登录与 Cloudflare 验证必须人工在 noVNC 完成，自动化必�
 <!-- nav-check-python: src/browser/detector.py:rich_assistant_text -->
 <!-- nav-check-python: src/browser/chatgpt_page.py:IMAGE_RESCAN_SECONDS -->
 <!-- nav-check-python: src/browser/response_lifecycle_probe.py:completion_ready -->
-- **入站图片/文件的上传必须被证实，不能只看"set 完了"**（08-16）。`upload_images` 用 `set_input_files` 塞隐藏 `input[type=file]`（图片和文档同一条路，只在等待策略上分叉），但刚导航完的 composer 会**静默吞掉**这一次 set——和 `paste_text` 注释里记的 ProseMirror 静默 no-op 是同一类问题。判据是 `attachment_count()` **相对上传前变多**（不是"页面上有没有附件"：会话里的历史图也匹配 `ATTACHMENT_PREVIEW`）；没变多就重找 input 再 set 一次，仍不落地则返回 0，调用方报 `UPLOAD_FAILED` 且**不发这一轮**。
+- **入站图片/文件的上传必须被证实，不能只看"set 完了"**（08-16）。`upload_images` 用 `set_input_files` 塞隐藏 `input[type=file]`（图片和文档同一条路，只在等待策略上分叉），但刚导航完的 composer 会**静默吞掉**这一次 set——和 `paste_text` 注释里记的 ProseMirror 静默 no-op 是同一类问题。判据是 `attachment_count()` **相对上传前变多**（不是"页面上有没有附件"：会话里的历史图也匹配 `ATTACHMENT_PREVIEW`）；没变多就重找 input 再 set 一次，仍不落地则返回 0，调用方报 `UPLOAD_FAILED` 且**不发这一轮**。⚠️ **"计数变多=可以发送"这半句自 2026-08-24 起确认会误导**：缩略图连同它的删除按钮在上传进度 **1%** 时就已经在 DOM 里，计数早就变多了，而真正传完要几分钟；计数还有第二个盲区——**3 张变 2 张它也发现不了**。新判据见下面〈上传完成的判据是 file id〉。
   - 实测（08-15 06:21、07:25，08-16 05:42 三次失败 + 同期成功样本）：`api.log` 里"lane ready → send_stages"的空档，**11.5-13.3s = 上传打空**（8s 检测超时 + 3s 旧兜底 sleep），**2-3s = 附件已落地**。旧代码这里无任何日志，现在每次上传都有 `upload_stages total= files= attempts= input_found= attached= url=`。
   - 三次失败全部发生在 `force_new=True`（`/新对话` 新开 tab 刚导航到 project 页），紧接着在 `/c/` 会话页重发同样的图必成功；但 08-12 全天 8 次 `/新对话` 带图全成功，所以是**新页竞态，不是新页必错**——排查时别把 force_new 当充分条件。⚠️ **"不是新页必错"这句自 2026-08-17 起确认会误导**：翻完整段 `upload_stages` 历史后事实更硬——**project 页 8 条记录全是 `attempts=2`，即第一次 set 必打空**，只是第二次通常兜住了（总耗时稳定 11.0-11.3s = 8s 检测超时 + 3s 第二次）；`/c/` 会话页 6 条全是 `attempts=1`、2.6-3.0s。08-16 之所以看着"时好时坏"，是因为当时只有失败样本进了日志。新情况见下条。
   - **project 页第一次必打空的原因是抢跑，不是网络**（08-17 实测）：临时 tab 上量 project 页 TTFB 629ms、DOMContentLoaded 1.43s，**t=1.4s 时页面上连 `input[type=file]` 都不存在**，2.8s 时编辑器、发送按钮、三个 file input 一起出现。旧代码只等"input 出现"就立刻 set，正踩在 composer 刚挂载那一瞬。
@@ -33,11 +33,18 @@ ChatGPT 登录与 Cloudflare 验证必须人工在 noVNC 完成，自动化必�
     - `FILE_INPUT` 收窄成 composer 作用域优先、裸 `input[type='file']` 兜底。⚠️ 但 dump 证实 **project 页和会话页结构完全相同**（3 个 input 全在 composer 子树内：第一个在 `form.group/composer` 的 `div.hidden` 里、`accept=""` 通用口，另两个 `accept="image/*"`），所以**选择器从来没选错，也不存在把图传进项目文件的风险**——这条收窄是防御未来，不是根因。
     - ⚠️ `find_first` 对**每个**候选都等满 `timeout_ms`，加候选就是加超时。所以前两个 composer 候选各只探 1s，只有裸兜底吃满 5s。
   - 用户侧症状是 ChatGPT 花 40 秒回"当前这条消息里没有收到可处理的原图文件"。看到这句先查 `upload_stages`，别去查 bridge：bridge 的 `image_count` 和 archive 的 `inbound.images` 那时都是对的。
+- **上传完成的判据是 file id，不是缩略图，也不是进度环**（08-24 实测，CDP 逐 0.25s 采样）。`_attachment_states` 按**我们自己写的临时文件名**（`webdock-upload-*`）在 `[role=group][aria-label]` 上逐个认领 tile，三种状态：`uploading`（tile 上有 `cursor-wait` 或 `<svg viewBox="0 0 120 120">` 进度环）、`done`（环没了**且**预览 `img` 的 src 从 `blob:` 换成带 `id=file_…` 的服务端地址；文档 tile 没有 `img`，环没了就算完）、`missing`（没有这个文件名的 tile）。按文件名认领顺带解决了"历史图也匹配"和"数得到但认不出是谁"两个老问题。
+  - **两个标记都要，少一个就还是会早发**：实测环在 09:11:17 消失时 src 仍是 `blob:`，到 09:11:49 才换成 file id——只认环等于早发最多 ~30s。
+  - **发送按钮在这里帮不上忙**：进度 1% 时 `send-button` 是 enabled，实测点得下去；它变 `aria-disabled` 是在我们点击之后 86ms，那是"提交已排队"的状态。文档路径那条 `_wait_send_button_enabled` 只对文档有效（ChatGPT 只在处理文档时禁用按钮），不要拿它当图片的判据。
+  - 落地预算 `upload_land_timeout_seconds`（默认 300s，runtime.json 可覆盖）只花在**发送之前**，不占任何回复超时。超时 = `outcome=incomplete`，附件中途消失 = `outcome=vanished`，两者都**不重试**（再 set 一次只会叠出重复附件）、都报 `UPLOAD_FAILED` 不发送。只有 `not_detected`（压根没进 composer）才重试。
+  - 判据对真实 DOM 有断言：`tests/test_upload_attachment_states.py` + `tests/fixtures/feishu/raw/composer_attachments.html`（生产抓的两个状态），其中一个用例是拿旧判据对同一份 DOM 做反证。
+  - 08-24 那次的完整后果，解释了用户说的"经常卡着"：09:08:48 在 1% 点了发送 → ChatGPT **挂起提交**（`send` 转 `aria-disabled`）→ 09:10:49 三张图里一张 tile 消失，**排队的提交被取消**、按钮转回 enabled → 09:11:17 剩下两张传完 → 输入框里留着文字和 2 张图，`turns=0`，**页面再也不会自己发出去**，那一轮一路烧到硬顶。同类的另一次（08-24 07:26，单图）没丢图，提交在 322s 后如期发出，`reply_stages total=347.85s` 里 `chatgpt=36s`——**一轮 348 秒，ChatGPT 只干了 36 秒**。
 
 <!-- nav-check-python: src/browser/chatgpt_page.py:upload_images -->
 <!-- nav-check-python: src/browser/chatgpt_page.py:_wait_composer_ready -->
 <!-- nav-check-python: src/browser/file_download.py:_recover_from_preview -->
 <!-- nav-check-python: src/browser/chatgpt_page.py:attachment_count -->
+<!-- nav-check-python: src/config.py:upload_land_timeout_seconds -->
 <!-- nav-check-python: src/browser/human.py:paste_text -->
 <!-- nav-check-python: src/utils/errors.py:UPLOAD_FAILED -->
 - **多图回复：完成那一帧的图数不可信，必须等回本轮高水位**（08-16）。⚠️ 上面 08-14 那条"生成图 src 会 1→0→1 跳变"仍然成立，但**"stop 熄灭后页面就稳了"这个隐含前提自 2026-08-16 起确认会误导**——实测 stop 熄灭≈重排开始，不是结束。逐帧证据（5 图请求，探针 `auto-3ceb61b8ae325e3ad7565d2e`）：
@@ -107,9 +114,9 @@ ChatGPT 登录与 Cloudflare 验证必须人工在 noVNC 完成，自动化必�
 | 同上，但 api.log **只有** `file pill click did not produce a download`，没有后两条 warning，`files≈8s` | 层根本没开：`preview image capture failed` 的 `candidates` 里有没有 `inTurn=false` 的图 | 首次点击落空（08-18），现在会重点一次 pill；仍失败按上一行查 |
 | `preview layer opened after …` 有了，`preview image capture failed` 却 `src=None`，candidates 里**有** `inTurn=false` 的图 | 层开了、图也在，是选图规则把它挡了 | 08-20 尺寸门槛坑（竖图 242×484 卡在 300 宽）已改成按层容器定位；再犯说明层的 testid 又变了，核对 `_PREVIEW_FLYOUT_CONTAINERS` |
 | `src=` 有完整 URL 但 `bytes=0` | 看 `fetch=` 后面那串：`!err …` 是页内 fetch 挂了，`api:…` 是 `context.request` 也挂了 | 两条都挂才丢图（08-20 起）。只有前半 = 备用路救回来了，不用管 |
-| 带图的 `/新对话` 报 UPLOAD_FAILED | `upload_stages` 的 `ready=` 与 `attempts=`；`attached=0` = 三次都没落地 | 本次请求未发送，bridge 会自动改投备机重试一次；连续复现查 composer 结构是否又变了 |
+| 带图的 `/新对话` 报 UPLOAD_FAILED | 先看 `upload_stages` 的 `outcome=`：`not_detected` 看 `ready=`/`attempts=`（composer 竞态）、`incomplete` 看 `land=` 和 `bytes=`（上传没传完，多半是出口上行慢）、`vanished` = 附件进了 composer 又掉了 | 本次请求未发送，bridge 会自动改投备机重试一次；连续复现查 composer 结构是否又变了 |
 | 页面生成了 N 张图，飞书只收到几张 | archive 数 `outbound.text` 里 `MEDIA:` 行数；api.log 找 `generated images never returned to` | 判定不是判早了：图早就齐了，是完成帧撞上收尾重渲。见上「多图回复」节 |
-| 发了图，ChatGPT 却说"没收到图片/请重新上传" | `api.log` 查该轮 `upload_stages`（`attached=0` = 没进输入框）；bridge `image_count` 与 archive `inbound.images` 用来排除上游丢图 | 现在这种情况直接报 `UPLOAD_FAILED` 且不发送，用户重发即可；连续复现查 composer 是否又改了 `ATTACHMENT_PREVIEW` 结构 |
+| 发了图，ChatGPT 却说"没收到图片/请重新上传" | `api.log` 查该轮 `upload_stages`（`attached=0` = 没落地，`outcome=` 说明卡在哪一步）；bridge `image_count` 与 archive `inbound.images` 用来排除上游丢图 | 现在这种情况直接报 `UPLOAD_FAILED` 且不发送，用户重发即可；连续复现查 composer 是否又改了 `ATTACHMENT_PREVIEW` 结构 |
 | Cloudflare 无限验证循环 | 自动化是否 attach 着 | detach 后人工过验证 |
 | 多图请求后全线卡死 | 单 worker 被堵（142-153s/13图）；healthz 假绿 | 等释放或重启容器；车道隔离测试须测对车道 |
 | 同群后续消息很快收到 `LANE_BUSY` | archive 查同一 `lane.key` 的 active 请求和被拒请求 | 这是车道保护：被拒消息没有发进 ChatGPT。等待当前任务完成，或发送 `/新对话` 抢占重建 |
@@ -136,7 +143,7 @@ send_stages total=2.39s login=0.19 flyout=0.01 input=0.01 mode=0.03 snapshot=0.0
 跑满硬顶的请求以前在 `send_stages` 和 20 分钟后的超时之间**没有任何一行日志**，既分不清卡在判定还是卡在后处理，也说不出"用户等了 214s 而 ChatGPT 只说 Worked for 10s"差在哪。现在每轮固定产出：
 
 ```
-upload_stages total=12.57s ready=1.77s/True files=1 attempts=2 input_found=True attached=1 url=...
+upload_stages total=12.57s ready=1.77s/True files=1 bytes=2118342 attempts=2 input_found=True attached=1 land=9.9s outcome=ok chips=1 url=...
 send_stages   total=2.84s  login=.. flyout=.. input=.. mode=.. snapshot=.. type_delay=.. paste=.. send_btn=.. click=..
 wait_signals  t=61s stop=0 stream=0 count=0 text=0 imgs=0 new_img=0 img_loading=0 scaffold=0 status=False actions=1 widget=0 has_new=0 in_progress=0 stable=40 sig_age=61s
 reply_stages  total=179.10s images=0 chatgpt=10s wait=110.97 img_settle=0.01 text=0.01 media=0.05 files=68.06

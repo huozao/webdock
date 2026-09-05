@@ -169,6 +169,21 @@ reply_stages  total=179.10s images=0 chatgpt=10s wait=110.97 img_settle=0.01 tex
 - 存档：`/var/log/webdock/archive/<UTC日期>.jsonl`，查 `status` / `outbound.chars`。
 - webdock2 执行 Linux 命令：`ssh webdock2` 进的是 PowerShell，须 `wsl -d Ubuntu-24.04-WebDock -- <cmd>`；复杂 PS 用 `-EncodedCommand`。
 
+### WebDock2 双浏览器控制台（2026-09-05）
+
+WebDock2 的容器现在同时承载两个相互独立的 Chrome，但它们不是在同一个 noVNC 页面内切换，而是两个独立入口：
+
+| 用途 | 显示器 | noVNC | CDP | profile |
+|---|---:|---:|---:|---|
+| ChatGPT 生产浏览器 | `:99` | `6080` | `9222` | `/app/browser_data` |
+| Feishu 文档同步浏览器 | `:100` | `6081` | `9223` | `/app/browser_data/feishu-sync` |
+
+公网观察入口是 [WebDock2 Feishu 浏览器](https://hydwang.xyz/console/webdock2/feishu/vnc.html?autoconnect=1&resize=scale&path=console/webdock2/feishu/websockify)，统一控制台在 <https://hydwang.xyz/console/>；两者都先经过 Authelia。Windows TightVNC 桌面仍是第三个独立入口 `webdock2/desktop`，不与这两个 Chrome 合并。
+
+Feishu 同步脚本位于独立仓库 `feishu-obsidian-miner/deploy/webdock2/ensure-feishu-chrome.sh`，只按 Feishu profile + CDP `9223` 匹配进程。容器实际进程名是 `chrome`，虽然启动路径是 `webdock-chrome`；不能用 `pgrep -x webdock-chrome` 作为唯一判据。容器重建后若只剩 Feishu profile 的 `SingletonLock`、`SingletonCookie`、`SingletonSocket` 残留，确认没有该 profile 的活进程后才可清理这三个锁，不能删除 profile 或触碰 ChatGPT 的 `/app/browser_data`。
+
+本轮部署证据：WebDock 镜像 `sha-8e7b86cf818dffbb108b2d3dedb72582db0de139`，容器 `healthy`；9222/9223、6080/6081 均已就绪；txecs `16090`（ChatGPT）、`16091`（Windows 桌面）、`16092`（Feishu）均返回 noVNC 页面。升级镜像会重建整个容器并短暂重启两个 Chrome，profile 挂载数据保留；日常 Feishu 定时同步不会重启 ChatGPT。
+
 ## 超时三层与异步 job（改任何一层前先读完这节）
 
 同步 `/v1/chat/completions` 仍要穿过三个独立上限，**最小的那个说了算**：

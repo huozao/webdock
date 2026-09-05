@@ -250,7 +250,7 @@ _OVERLAY_CONTROLS_JS = """
 () => {
   const out = [];
   for (const node of document.querySelectorAll("button, [role='button'], a[href], [data-testid]")) {
-    if (node.closest("[data-testid^='conversation-turn']")) continue;
+    if (node.closest("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])")) continue;
     // The sidebar is always outside the turns and would fill the whole budget.
     if (node.closest("nav")) continue;
     if ((node.getAttribute("class") || "").includes("__menu-item")) continue;
@@ -656,7 +656,7 @@ _PREVIEW_IMAGE_CANDIDATES_JS = """
       src: (im.currentSrc || im.src || "").slice(0, 60),
       w: im.clientWidth,
       h: im.clientHeight,
-      inTurn: !!im.closest("[data-testid^='conversation-turn']"),
+      inTurn: !!im.closest("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])"),
     });
   }
   return out.slice(0, 8);

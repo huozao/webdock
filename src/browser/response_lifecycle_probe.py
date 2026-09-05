@@ -683,7 +683,7 @@ def _sanitize_value(value: Any) -> Any:
 
 _DOM_STRUCTURE_SCRIPT = r"""
 () => {
-  const turns = Array.from(document.querySelectorAll("[data-testid^='conversation-turn']"));
+  const turns = Array.from(document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])"));
   const turn = [...turns].reverse().find((node) => !node.querySelector("[data-message-author-role='user']"));
   if (!turn) return {assistant_turn_present: false, turn_signature: {}, animated_candidates: []};
   const visible = (el) => {

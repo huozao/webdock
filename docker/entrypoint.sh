@@ -13,8 +13,10 @@ x11vnc -storepasswd "${VNC_PASSWORD}" /app/.vnc/passwd >/dev/null 2>&1
 echo "webdock starting"
 echo "API:   http://localhost:${API_PORT:-8000}"
 echo "noVNC: http://localhost:${NOVNC_PORT:-6080}/vnc.html"
+echo "Feishu noVNC: http://localhost:${FEISHU_NOVNC_PORT:-6081}/vnc.html"
 echo "API_TOKEN is used only for HTTP Authorization. VNC_PASSWORD is used only for noVNC login."
 echo "Chrome runs as a normal supervised process and exposes local CDP on 127.0.0.1:9222."
+echo "Feishu synchronization uses an independent Chrome/display when its companion process is enabled."
 echo "Open noVNC manually if ChatGPT needs login, CAPTCHA, or two-factor verification."
 
 exec /usr/bin/supervisord -c /app/docker/supervisord.conf

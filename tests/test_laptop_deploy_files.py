@@ -9,6 +9,7 @@ def test_laptop_compose_keeps_ports_private_by_default():
 
     assert "${HOST_API_BIND:-127.0.0.1}:${HOST_API_PORT:-18000}:8000" in compose
     assert "${HOST_NOVNC_BIND:-127.0.0.1}:${HOST_NOVNC_PORT:-6080}:6080" in compose
+    assert "${HOST_FEISHU_NOVNC_BIND:-127.0.0.1}:${HOST_FEISHU_NOVNC_PORT:-6081}:6081" in compose
     assert "ATTACH_ON_START: ${ATTACH_ON_START:-false}" in compose
     assert "${HOST_BROWSER_DATA_DIR:-/var/lib/webdock/browser_data}:/app/browser_data" in compose
     assert "${HOST_LOGS_DIR:-/var/log/webdock}:/app/logs" in compose
@@ -24,6 +25,8 @@ def test_laptop_env_example_uses_safe_defaults():
         "HOST_API_PORT=18000",
         "HOST_NOVNC_BIND=127.0.0.1",
         "HOST_NOVNC_PORT=6080",
+        "HOST_FEISHU_NOVNC_BIND=127.0.0.1",
+        "HOST_FEISHU_NOVNC_PORT=6081",
         "ATTACH_ON_START=false",
     ):
         assert key in example
@@ -34,6 +37,19 @@ def test_scripts_target_laptop_compose_project():
         text = (ROOT / f"scripts/{name}").read_text(encoding="utf-8")
         assert "deploy/laptop/compose.yml" in text
         assert "-p webdock" in text
+
+
+def test_supervisor_exposes_independent_feishu_display():
+    supervisor = (ROOT / "docker/supervisord.conf").read_text(encoding="utf-8")
+
+    assert "[program:xvfb]" in supervisor
+    assert "command=/usr/bin/Xvfb :99" in supervisor
+    assert "[program:feishu-xvfb]" in supervisor
+    assert "command=/usr/bin/Xvfb :100" in supervisor
+    assert "-rfbport 5900" in supervisor
+    assert "-rfbport 5901" in supervisor
+    assert "6080 localhost:5900" in supervisor
+    assert "6081 localhost:5901" in supervisor
 
 
 def test_ecs_tunnel_files_keep_webdock_private():

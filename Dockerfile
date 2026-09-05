@@ -50,7 +50,7 @@ RUN mkdir -p /app/browser_data /app/logs/debug /app/.vnc \
     && install -m 644 /app/docker/chrome-managed-policy.json /etc/opt/chrome/policies/managed/webdock.json \
     && chmod +x /app/docker/entrypoint.sh
 
-EXPOSE 8000 6080
+EXPOSE 8000 6080 6081
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -fsS http://localhost:8000/healthz || exit 1

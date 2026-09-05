@@ -17,7 +17,7 @@ The first service is a ChatGPT browser relay:
 message channel -> OpenClaw/bridge -> failover proxy -> selected WebDock worker -> browser ChatGPT
 ```
 
-Keep `18000` and `6080` private. Prefer Tailscale between ECS and the laptop. Do not expose noVNC to the public internet.
+Keep `18000`, `6080`, and `6081` private. Prefer Tailscale between ECS and the laptop. Do not expose noVNC to the public internet.
 
 Couple Memory photos are stored under `HOST_PHOTO_STORAGE_DIR` on the laptop and are accessed by AliECS through the private WebDock API token, not by direct public laptop URLs.
 
@@ -43,6 +43,15 @@ Open noVNC from the laptop:
 ```text
 http://127.0.0.1:6080/vnc.html
 ```
+
+The Feishu synchronization browser has a separate display and noVNC endpoint:
+
+```text
+http://127.0.0.1:6081/vnc.html
+```
+
+It uses CDP port `9223` and an independent profile. The production ChatGPT browser
+remains on display `:99`, noVNC `6080`, and CDP port `9222`.
 
 After logging in to ChatGPT:
 

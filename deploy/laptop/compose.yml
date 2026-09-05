@@ -22,6 +22,7 @@ services:
       API_TOKEN: ${API_TOKEN}
       VNC_PASSWORD: ${VNC_PASSWORD}
       NOVNC_PORT: "6080"
+      FEISHU_NOVNC_PORT: "6081"
       DISPLAY: ":99"
       DISPLAY_WIDTH: ${DISPLAY_WIDTH:-1366}
       DISPLAY_HEIGHT: ${DISPLAY_HEIGHT:-768}
@@ -53,6 +54,7 @@ services:
     ports:
       - "${HOST_API_BIND:-127.0.0.1}:${HOST_API_PORT:-18000}:8000"
       - "${HOST_NOVNC_BIND:-127.0.0.1}:${HOST_NOVNC_PORT:-6080}:6080"
+      - "${HOST_FEISHU_NOVNC_BIND:-127.0.0.1}:${HOST_FEISHU_NOVNC_PORT:-6081}:6081"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

@@ -227,6 +227,11 @@ Feishu 同步脚本位于独立仓库 `feishu-obsidian-miner/deploy/webdock2/ens
 ## 部署
 
 - 换镜像：在 infra `secrets/webdock<N>.enc.env` 更新 `WEBDOCK_IMAGE`，推送并在设备执行 `render.sh webdock<N>` + restart。`.env` 是渲染产物，禁止直接长期修改；机型化 unit 从同一渲染流程生成。
+- 镜像来源：`webdock/.github/workflows/release.yml` 仍先构建并推送 GHCR；配置
+  `WEBDOCK_TCR_MIRROR_ENABLED=true` 且提供 `TCR_BASE`、`TCR_USERNAME`、`TCR_PASSWORD`
+  后，Actions 额外把同一 OCI digest 的 `sha-<commit>` 镜像同步到 TCR。切到 TCR 前先在
+  两台设备分别 `docker pull <TCR_BASE>/webdock:sha-<commit>`，确认成功后再更新 SOPS 中
+  的 `WEBDOCK_IMAGE`；不要让运行时同时依赖 GHCR 与 TCR 两个可变 `latest`。
 - 设备侧两条命令就够（2026-08-14 在 webdock2 实跑）：
 
 ```bash
@@ -248,7 +253,7 @@ sudo -u webdock git -C /home/webdock/infra pull --ff-only /mnt/c/temp/<file>.bun
 - 验证顺序：设备 `docker ps` 看 tag 变新 + healthy → 从当前 business-cn 主机 `curl -i http://127.0.0.1:11800/healthz`，看 `X-Webdock-Device` / `X-Webdock-Route` 是否还是预期主机（重启不该改变主备，若变了说明 failover 切走了）。
 - ⛔ restart 会**重建容器、Chrome 随之重启**，中断生产链路 1-2 分钟（登录态在 `browser_data` 卷不会丢）。动手前先与用户确认时机。
 - ⛔ **切镜像前先在设备上 `docker pull <新 tag>` 确认落地，pull 成功再 render+restart**（2026-08-20 血的教训）。`systemctl restart` 的顺序是**先停旧容器、删掉，再创建新的**；`ExecStartPre=-pull` 前面那个 `-` 意味着拉取失败被忽略，于是流程照走到 create 才报 `No such image`——**旧容器已经没了，新容器起不来，这台机器上没有 webdock**。当天 webdock1 就是这样一度空缺（备机，主力没受影响；换成主力就是生产中断）。先 pull 的话，拉不动只是没变化，容器还在跑。
-- ⚠️ **webdock1 拉 ghcr 当前不通**（2026-08-20 实测）：宿主代理 `172.17.0.1:7897` 端口连得上，但到 `ghcr.io:443` 的 TLS 握手被中断——`curl` 报 `SSL_ERROR_SYSCALL`，docker 报 `EOF`。所以 webdock1 暂时切不了新镜像，`secrets/webdock1.enc.env` 的 `WEBDOCK_IMAGE` 留在 `sha-420c488e`，靠热补丁跟上 main。通路修好后切回与 webdock2 同 tag。⚠️ `../AliECS/docs/fleet.md`「拉 GHCR」那张表里没有 webdock1 行，别把 webdock2 的 3.7 MB/s 当成两机通用。
+- ⚠️ **历史记录（2026-08-20）**：webdock1 直拉 GHCR 曾出现 TLS/EOF，导致无法切新镜像；现在保留该证据用于解释为何引入 TCR。若启用 TCR，仍须按上一条逐机 `docker pull` 验证，不能仅凭 Actions 绿灯判断设备可拉取。
 - ⚠️ **容器一重建，热补丁就没了**（同日实证：webdock1 restart 后 `/app/src/browser/file_download.py` 的 md5 从热补版回到镜像版）。所以热补丁只是"等镜像"的临时态，重启后要立刻重打并重启 `python -m src`，验活看 md5。**比对时注意行尾**：仓库里是 LF，从 Windows devbox `cat` 过去的是 CRLF，两者 md5 不同但内容一致——用 `b.replace(b"\r\n", b"\n")` 归一化后再比，别误判成"补丁没生效"。
 - `webdock.service` 已加 `ExecStartPre=-pull`（自愈拉镜像）；新机装 `install-ubuntu.sh` 自带。**webdock2 出网可达 ghcr**（2026-08-14 实测，08-20 复测仍可用），换镜像不需要从 devbox 递镜像；要走 bundle 的只有 infra 仓本身，见 `infra/AGENTS.md`「webdock2 同步链路」。
 - ⚠️ CI 只在 PR 跑 pytest，直推 main 不跑 → 直推前必须本地 `pytest -q`。

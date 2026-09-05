@@ -86,3 +86,39 @@ jobs:
           output-file: sbom-webdock.spdx.json
           upload-artifact-retention: 30
           upload-release-assets: false
+
+  # TCR 是 WebDock 在中国大陆节点的可选镜像源。先用仓库变量显式开启，避免在
+  # TCR 凭据尚未配置时把现有 GHCR 发布链路变成必失败；开启后只同步不可变 sha 标签，
+  # 运行时按该标签部署，latest/tag 仍由 GHCR 保持人类可读别名。
+  mirror-to-tcr:
+    needs: build-push
+    if: ${{ vars.WEBDOCK_TCR_MIRROR_ENABLED == 'true' && vars.TCR_BASE != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Install skopeo
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq skopeo
+
+      - name: Mirror immutable image to TCR
+        env:
+          TCR_BASE: ${{ vars.TCR_BASE }}
+          TCR_USERNAME: ${{ secrets.TCR_USERNAME }}
+          TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          : "${TCR_USERNAME:?missing TCR_USERNAME}"
+          : "${TCR_PASSWORD:?missing TCR_PASSWORD}"
+          auth_dir="$(mktemp -d)"
+          auth_file="$auth_dir/auth.json"
+          trap 'rm -rf "$auth_dir"' EXIT
+          printf '%s' "$GHCR_TOKEN" | skopeo login --authfile "$auth_file" \
+            -u "${{ github.actor }}" --password-stdin ghcr.io
+          printf '%s' "$TCR_PASSWORD" | skopeo login --authfile "$auth_file" \
+            -u "$TCR_USERNAME" --password-stdin "${TCR_BASE%%/*}"
+          source="docker://ghcr.io/${{ github.repository_owner }}/webdock:sha-${GITHUB_SHA}"
+          target="docker://${TCR_BASE}/webdock:sha-${GITHUB_SHA}"
+          timeout 25m skopeo copy --all --preserve-digests --retry-times 3 \
+            --authfile "$auth_file" "$source" "$target"

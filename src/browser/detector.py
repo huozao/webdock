@@ -72,7 +72,7 @@ _GENERATED_IMG_SRCS_JS = """
   const out = [];
   const seen = new Set();
   for (const im of document.querySelectorAll('img')) {
-    const turn = im.closest("[data-testid^='conversation-turn']");
+    const turn = im.closest("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])");
     if (turn && turn.querySelector("[data-message-author-role='user']")) continue;
     // ask() marks every pre-send assistant turn.  Excluding by the turn marker,
     // rather than only by URL, keeps an old generated image out even when
@@ -104,7 +104,7 @@ _GENERATED_IMG_SRCS_JS = """
 # "still generating" signal (the 2026-07-17 "Edit"-only reply bug).
 _IMAGEGEN_PENDING_JS = """
 () => {
-  const turns = document.querySelectorAll("[data-testid^='conversation-turn']");
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])");
   const turn = turns[turns.length - 1];
   if (!turn) return false;
   if (turn.querySelector("[data-message-author-role='user']")) return false;
@@ -120,7 +120,7 @@ _IMAGEGEN_PENDING_JS = """
 """
 _MARK_EXISTING_REPLY_MEDIA_JS = """
 () => {
-  for (const turn of document.querySelectorAll("[data-testid^='conversation-turn']")) {
+  for (const turn of document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])")) {
     if (turn.querySelector("[data-message-author-role='user']")) continue;
     turn.setAttribute("data-webdock-existing-turn", "1");
   }
@@ -145,7 +145,7 @@ _FILE_CARD_SCAN_JS = r"""
 () => {
   const controls = [...document.querySelectorAll(
     "button[aria-label='Download file'], button[aria-label='下载文件'], button[aria-label='下載檔案']")];
-  const turns = document.querySelectorAll("[data-testid^='conversation-turn']");
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])");
   const turn = turns.length ? turns[turns.length - 1] : null;
   const out = [];
   controls.forEach((btn, index) => {
@@ -169,7 +169,7 @@ _FILE_CARD_SCAN_JS = r"""
 
 _DOWNLOAD_SCAN_JS = """
 () => {
-  const turns = document.querySelectorAll("[data-testid^='conversation-turn']");
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])");
   const el = turns.length ? turns[turns.length - 1] : document;
   if (!el) return [];
   if (el.querySelector && el.querySelector("[data-message-author-role='user']")) return [];
@@ -223,7 +223,7 @@ async def mark_existing_reply_media(page: Any) -> None:
 # request if matched.
 _GENERATION_ERROR_JS = """
 (needles) => {
-  const turns = document.querySelectorAll("[data-testid^='conversation-turn']");
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])");
   const last = turns.length ? turns[turns.length - 1] : null;
   const nodes = document.querySelectorAll(
     "[data-testid='regenerate-thread-error-button'], div[class*='text-token-text-error'], div[role='alert']"
@@ -306,7 +306,7 @@ async def file_card_download_controls(page: Any) -> list[DownloadTarget]:
 # there so the selector can be fixed from a log line instead of a live session.
 _DOWNLOAD_CANDIDATES_JS = """
 () => {
-  const turns = document.querySelectorAll("[data-testid^='conversation-turn']");
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])");
   const el = turns.length ? turns[turns.length - 1] : document;
   if (!el || !el.querySelectorAll) return [];
   const out = [];
@@ -354,7 +354,7 @@ async def image_generating(page: Any) -> bool:
 
 _TURN_ACTIONS_READY_JS = """
 () => {
-  const turns = document.querySelectorAll("[data-testid^='conversation-turn']");
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])");
   const turn = turns[turns.length - 1];
   if (!turn) return true;
   if (turn.querySelector("[data-message-author-role='user']")) return true;
@@ -404,7 +404,7 @@ _RICH_TEXT_JS = r"""
   // real answer in SEPARATE .markdown blocks inside the same turn, so we must walk
   // EVERY .markdown (not just the first) or we drop the answer and return only the
   // preamble.
-  const turns = document.querySelectorAll("[data-testid^='conversation-turn']");
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])");
   const el = turns[turns.length - 1];
   if (!el) return "";
   if (el.querySelector("[data-message-author-role='user']")) return "";
@@ -464,7 +464,7 @@ _RICH_TEXT_JS = r"""
 # (delivered as screenshots separately). Pure read; falls back to plain rich text.
 _RICH_MARKDOWN_JS = r"""
 () => {
-  const turns = document.querySelectorAll("[data-testid^='conversation-turn']");
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])");
   const el = turns[turns.length - 1];
   if (!el) return "";
   if (el.querySelector("[data-message-author-role='user']")) return "";
@@ -660,7 +660,7 @@ async def rich_assistant_text(page: Any) -> str:
 SLOT_PLACEHOLDER_RE = re.compile(r"@@WEBDOCK_SLOT_(\d+)@@")
 _ORDERED_MARKDOWN_JS = r"""
 () => {
-  const turns = document.querySelectorAll("[data-testid^='conversation-turn']");
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])");
   const el = turns[turns.length - 1];
   if (!el) return "";
   if (el.querySelector("[data-message-author-role='user']")) return "";
@@ -889,7 +889,7 @@ _WORK_SUMMARY_PATTERNS = (
 )
 _TURN_RAW_TEXT_JS = """
 () => {
-  const turns = document.querySelectorAll("[data-testid^='conversation-turn']");
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])");
   const turn = turns[turns.length - 1];
   if (!turn) return "";
   if (turn.querySelector("[data-message-author-role='user']")) return "";
@@ -921,7 +921,7 @@ async def latest_message_has_widget(page: Any) -> bool:
     etc card). Such replies can have NO markdown text — rich_assistant_text skips
     widget content — so completion detection can't rely on text alone."""
     try:
-        turn = page.locator("[data-testid^='conversation-turn']").last
+        turn = page.locator("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])").last
         if await turn.locator("[data-message-author-role='user']").count() > 0:
             return False  # latest turn is the user's message, not an assistant reply
         return await turn.locator("[class*='WidgetRenderer']").count() > 0

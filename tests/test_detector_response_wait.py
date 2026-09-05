@@ -65,13 +65,22 @@ class FakePage:
         self.streaming = streaming
         self.widget_count = widget_count
         self.stop_button = stop_button
+        self.locator_selectors: list[str] = []
 
     def locator(self, selector: str) -> FakeLocator:
+        self.locator_selectors.append(selector)
         return FakeLocator(self, selector)
 
     async def evaluate(self, script: str, arg: object | None = None):
         # No JS engine in tests -> force rich_assistant_text to fall back to inner_text.
         raise RuntimeError("no evaluate in fake page")
+
+
+def test_latest_widget_locator_excludes_location_footer():
+    page = FakePage([""], widget_count=1)
+
+    assert asyncio.run(detector.latest_message_has_widget(page)) is True
+    assert "conversation-turn-location-footer" in page.locator_selectors[0]
 
 
 class FakeClock:
@@ -484,7 +493,8 @@ def test_generated_image_srcs_excludes_user_turn_images():
 
     asyncio.run(detector.generated_image_srcs(page))
 
-    assert "[data-testid^='conversation-turn']" in page.script
+    assert "[data-testid^='conversation-turn-']" in page.script
+    assert "conversation-turn-location-footer" in page.script
     assert "[data-message-author-role='user']" in page.script
     assert "data-webdock-existing-turn" in page.script
     assert "data-webdock-existing-image" in page.script
@@ -606,7 +616,8 @@ def test_imagegen_pending_js_scopes_to_last_assistant_turn():
     asyncio.run(detector.imagegen_pending(page))
 
     assert "imagegen-image" in page.script
-    assert "[data-testid^='conversation-turn']" in page.script
+    assert "[data-testid^='conversation-turn-']" in page.script
+    assert "conversation-turn-location-footer" in page.script
     assert "[data-message-author-role='user']" in page.script
     assert "estuary" in page.script
 
@@ -674,7 +685,8 @@ def test_turn_actions_ready_js_targets_copy_button():
     asyncio.run(detector.turn_actions_ready(page))
 
     assert "copy-turn-action-button" in page.script
-    assert "[data-testid^='conversation-turn']" in page.script
+    assert "[data-testid^='conversation-turn-']" in page.script
+    assert "conversation-turn-location-footer" in page.script
 
 
 def test_wait_holds_for_stopped_thinking_ui_state():

@@ -9,6 +9,12 @@ ChatGPT 登录与 Cloudflare 验证必须人工在 noVNC 完成，自动化必�
 - **完成判定权威信号 = stop 按钮**（`data-testid='stop-button'`，选择器已收窄）。按钮在 = 没结束，绝不提前返回；别改回以 `.result-streaming` 为准，否则"只收开场白"截断 bug 回归。
 - 回复取全部 `.markdown` 块拼接（开场白和正文可能是同 turn 两个独立块）。
 - detector 锚 `conversation-turn`；CDP 连接用 patchright（非原版 playwright）。
+- **不要把 `conversation-turn-location-footer` 当成最新回答**（2026-09-05）。真实
+  webdock2 DOM 在 assistant 的 `WidgetRenderer` 之后还会追加这个位置确认 footer；
+  旧的 `[data-testid^='conversation-turn']`.last 因此读到 footer，widget 回复被判成
+  `widget=0`，最终 `RESPONSE_TIMEOUT`，飞书看不到回程。所有“最后一个 turn”选择器都
+  必须使用 `[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])`；
+  回归断言见 `tests/test_ordered_feishu_markdown.py` 的真实 Chromium fixture。
 - 长思考超时链：cloud-provider idle watchdog 是 B 根因，`baseUrl→172.17.0.1` 判 local 禁 watchdog。
 - 登录态在 `browser_data/` 卷；重建容器登录态可存活（卷保住，无需重登），但**改浏览器启动逻辑的重建必须先问用户**。
 - 图改图：图片文件 pill 点击=开预览层非下载；预览层兜底抓图按 MEDIA 投递；copy 按钮=正向完成信号（生成中不出现），缺失时 +8s 宽限。

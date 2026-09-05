@@ -623,7 +623,7 @@ class ChatGPTPage:
             return None
         text = feishu_safe_markdown(text)
         try:
-            assistant = self.page.locator("[data-testid^='conversation-turn']").last
+            assistant = self.page.locator("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])").last
         except Exception:
             return None
         captured = 0
@@ -651,7 +651,7 @@ class ChatGPTPage:
         try:
             # Anchor on the latest conversation-turn: image/widget replies no longer
             # carry data-message-author-role, so the old selector found nothing.
-            assistant = self.page.locator("[data-testid^='conversation-turn']").last
+            assistant = self.page.locator("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])").last
         except Exception:
             return tokens
         # WeChat: widgets only. Feishu/WeCom: widgets + tables (their rich cards can't
@@ -873,7 +873,7 @@ async def _clone_render_screenshot(page: Any, widget: Any) -> bytes | None:
 # don't control and could change).
 _SCROLL_TO_BOTTOM_JS = r"""
 () => {
-  const turns = document.querySelectorAll("[data-testid^='conversation-turn']");
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])");
   let el = turns[turns.length - 1];
   while (el) {
     const cs = getComputedStyle(el);

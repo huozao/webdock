@@ -99,3 +99,19 @@ def test_generated_image_scan_is_limited_to_turns_created_after_mark(rich_markdo
     )
 
     assert rich_markdown_page.evaluate(_GENERATED_IMG_SRCS_JS, 200) == [new_src]
+
+
+def test_latest_widget_is_not_hidden_by_location_footer(rich_markdown_page) -> None:
+    rich_markdown_page.set_content(
+        "<div data-testid='conversation-turn-2' data-turn='assistant'>"
+        "<div class='WidgetRenderer'>weather</div>"
+        "</div>"
+        "<div data-testid='conversation-turn-location-footer'>"
+        "<button>使用精确位置</button>"
+        "</div>"
+    )
+    turn = rich_markdown_page.locator(
+        "[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])"
+    ).last
+    assert turn.locator("[class*='WidgetRenderer']").count() == 1
+    assert rich_markdown_page.evaluate(_ORDERED_MARKDOWN_JS).strip() == "@@WEBDOCK_SLOT_0@@"

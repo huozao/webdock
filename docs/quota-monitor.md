@@ -37,3 +37,8 @@
 - Xvfb 与 x11vnc 必须有启动等待：直接并行启动会出现 `XOpenDisplay(":101") failed`，
   随后 websockify 反复报 `localhost:5902 connection refused`。当前 entrypoint 会等待
   `/tmp/.X11-unix/X101` 就绪后才启动 x11vnc。
+
+## 发布
+
+quota-monitor 随 webdock GitHub `main` 的不可变镜像发布；生产 compose 不再绑定本地源码，
+设备只运行 GitHub Actions 构建出的镜像版本。

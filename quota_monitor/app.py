@@ -10,15 +10,24 @@ import re
 import sqlite3
 import time
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from patchright.async_api import async_playwright
 
-from .core import event_key, record_event_once, weekly_reset_candidate
+from .core import (
+    claude_reset_sections,
+    codex_reset_sections,
+    event_key,
+    normalize_reset,
+    percent,
+    record_event_once,
+    weekly_reset_candidate,
+)
 
 LOG = logging.getLogger("quota-monitor")
 DATA_DIR = Path(os.getenv("QUOTA_DATA_DIR", "/app/quota_data"))
@@ -29,6 +38,9 @@ SCREENSHOT_DIR = DATA_DIR / "screenshots"
 POLL_MIN = float(os.getenv("QUOTA_POLL_MINUTES_MIN", "20"))
 POLL_MAX = float(os.getenv("QUOTA_POLL_MINUTES_MAX", "30"))
 PAGE_SETTLE_SECONDS = float(os.getenv("QUOTA_PAGE_SETTLE_SECONDS", "5"))
+# 容器跑在 UTC（页面也就按 UTC 渲染），但卡片是在 CST 里读的。展示时区只影响文案，
+# 判定一律用归一化后的绝对时间。
+DISPLAY_TZ = os.getenv("QUOTA_DISPLAY_TZ", "Asia/Shanghai")
 
 PROVIDERS = {
     "codex": "https://chatgpt.com/codex/cloud/settings/usage",
@@ -71,7 +83,9 @@ def _parse(provider: str, text: str) -> tuple[dict[str, Any], float, str]:
         five_hour = re.search(r"5\s*hour\s*usage\s*limit\s*([\d,.]+\s*%)\s*remaining", text, flags=re.I | re.S)
         weekly = re.search(r"weekly\s*usage\s*limit\s*([\d,.]+\s*%)\s*remaining", text, flags=re.I | re.S)
         credits = re.search(r"credits\s*remaining\s*([\d,.]+)", text, flags=re.I | re.S)
-        reset = re.search(r"resets?\s+([^\n]{1,80})", text, flags=re.I)
+        # 重置时间按小节边界取。页面在某个窗口还没用满时不渲染该窗口的 Resets 行，
+        # 全页第一条 Resets 因此可能属于任何一个窗口。
+        resets = codex_reset_sections(text)
         if five_hour:
             remaining = five_hour.group(1).strip()
             try:
@@ -89,21 +103,31 @@ def _parse(provider: str, text: str) -> tuple[dict[str, Any], float, str]:
                 pass
         if credits:
             fields["credits_remaining"] = credits.group(1).strip()
-        if reset:
-            fields["reset_at"] = reset.group(1).strip()
-            # 页面当前只在周额度块下展示一个明确的 Codex 重置时间。
-            fields["weekly_reset_at"] = fields["reset_at"]
+        # ⚠️ 该写法自 2026-09-07 起改正：此前把周重置时间同时写进 reset_at，看板「5 小时
+        # 限额」格子于是显示的是周重置时间，读起来像 5 小时窗口要等到那一刻。
+        if resets["five_hour_reset"]:
+            fields["reset_at"] = resets["five_hour_reset"]
+        if resets["weekly_reset"]:
+            fields["weekly_reset_at"] = resets["weekly_reset"]
         return fields, min(1.0, 0.6 + 0.1 * len(fields)) if fields else 0.0, "healthy" if fields else "schema_changed"
     fields: dict[str, Any] = {}
     patterns = {
         "used": r"(?:used|已用)\s*[:：]?\s*([\d,.]+\s*%?)",
         "remaining": r"(?:remaining|left|剩余)\s*[:：]?\s*([\d,.]+\s*%?)",
-        "reset_at": r"(?:resets?|reset|重置)\s*(?:at|in|时间)?\s*[:：]?\s*([^\n]{1,80})",
     }
     for key, pattern in patterns.items():
         match = re.search(pattern, text, flags=re.I)
         if match:
             fields[key] = match.group(1).strip()
+    # 重置时间只按小节边界取：全页第一条 Resets 在会话未开始时属于周额度块，
+    # 第二条属于与额度窗口无关的 Usage credits。
+    sections = claude_reset_sections(text)
+    if sections["session_reset"]:
+        fields["reset_at"] = sections["session_reset"]
+    if sections["weekly_reset"]:
+        fields["weekly_reset_at"] = sections["weekly_reset"]
+    if sections["session_idle"]:
+        fields["session_state"] = "idle"
     confidence = min(1.0, 0.35 + 0.25 * len(fields))
     status = "healthy" if fields else "schema_changed"
     if provider == "codex" and "usage" in lowered and fields:
@@ -111,14 +135,118 @@ def _parse(provider: str, text: str) -> tuple[dict[str, Any], float, str]:
     return fields, confidence, status
 
 
-async def _notify(event: str, title: str, summary: str, *, screenshot_paths: list[Path] = None,
-                  dedup_key: str = "") -> None:
+PROVIDER_LABELS = {
+    "codex": {"name": "Codex", "icon": "🤖", "color": "blue", "tag_color": "blue"},
+    "claude": {"name": "Claude", "icon": "🟣", "color": "violet", "tag_color": "violet"},
+}
+STATUS_LABELS = {
+    "healthy": "正常", "stale": "数据过期", "auth_required": "需重新登录",
+    "blocked": "访问受限", "schema_changed": "页面结构变化", "network_error": "网络错误",
+}
+
+
+def _display_tz() -> tzinfo:
+    try:
+        return ZoneInfo(DISPLAY_TZ)
+    except Exception:  # noqa: BLE001 - 时区库缺失不该让日报发不出去
+        return timezone.utc
+
+
+def _with_absolute_resets(fields: dict[str, Any]) -> dict[str, Any]:
+    """把两个重置文案换算成绝对时间存下来，下游不再各自猜时区。"""
+    now = datetime.now().astimezone()
+    for source, target in (("reset_at", "reset_at_iso"), ("weekly_reset_at", "weekly_reset_at_iso")):
+        moment = normalize_reset(fields.get(source), now)
+        if moment is not None:
+            fields[target] = moment.isoformat()
+    return fields
+
+
+def _reset_phrase(fields: dict[str, Any], key: str) -> str:
+    """渲染成「9/7 10:24（约 3 小时 40 分钟后）」；认不出来就原样回显，不猜。"""
+    raw = str(fields.get(key) or "").strip()
+    iso = fields.get(f"{key}_iso")
+    if not iso:
+        return raw
+    try:
+        moment = datetime.fromisoformat(str(iso)).astimezone(_display_tz())
+    except ValueError:
+        return raw
+    now = datetime.now(tz=_display_tz())
+    minutes = int((moment - now).total_seconds() // 60)
+    if minutes <= 0:
+        return f"{moment:%-m/%-d %H:%M}（应已重置）"
+    days, hours, mins = minutes // 1440, minutes % 1440 // 60, minutes % 60
+    ahead = "".join(part for part in (f"{days}天" if days else "", f"{hours}小时" if hours else "", f"{mins}分钟" if not days else "") if part)
+    return f"{moment:%-m/%-d %H:%M}（约 {ahead}后）"
+
+
+def _provider_section(item: dict[str, Any]) -> dict[str, Any]:
+    """一个平台一个区块：左列平台名，右侧两列是指标名和指标值（与流量日报同排版）。"""
+    provider = item["provider"]
+    label = PROVIDER_LABELS.get(provider, {"name": provider, "icon": "•", "color": "grey"})
+    fields = item.get("fields") or {}
+    status = item.get("status", "stale")
+    captured = datetime.fromisoformat(item["captured_at"]).astimezone(_display_tz())
+    rows: list[dict[str, str]] = []
+
+    weekly_remaining = fields.get("weekly_remaining")
+    weekly_left = percent(weekly_remaining)
+    five_remaining = fields.get("remaining")
+    five_left = percent(five_remaining)
+    # 页面在窗口没用满时不给它自己的重置时间，这不是缺数据。周额度耗尽时 5 小时窗口
+    # 有额度也用不了，那一行要说清楚在等谁。
+    if fields.get("session_state") == "idle":
+        five_note = "会话未开始"
+    elif fields.get("reset_at"):
+        five_note = _reset_phrase(fields, "reset_at")
+    elif weekly_left is not None and weekly_left <= 0:
+        five_note = "等待周额度重置"
+    elif five_left is not None and five_left >= 100:
+        five_note = "额度充足"
+    else:
+        five_note = ""
+    rows.append({
+        "name": "5 小时",
+        "value": f"**{five_remaining}** 剩余" + (f" · {five_note}" if five_note else "") if five_remaining else "暂无数据",
+    })
+
+    weekly_note = _reset_phrase(fields, "weekly_reset_at")
+    if weekly_remaining is None:
+        weekly_value = "暂无数据"
+    else:
+        color = "red" if weekly_left is not None and weekly_left <= 0 else "green"
+        weekly_value = f"<font color='{color}'>**{weekly_remaining}**</font> 剩余" + (f" · {weekly_note}" if weekly_note else "")
+    rows.append({"name": "周额度", "value": weekly_value})
+
+    if fields.get("credits_remaining"):
+        rows.append({"name": "Credits", "value": str(fields["credits_remaining"])})
+    if status != "healthy":
+        rows.append({"name": "状态", "value": f"<font color='red'>{STATUS_LABELS.get(status, status)}</font>"})
+
+    return {
+        "kind": "section",
+        "section_title": label["name"],
+        "section_icon": label["icon"],
+        "section_color": label["color"],
+        "section_subtitle": f"{captured:%H:%M} 采集",
+        "fields": rows,
+    }
+
+
+async def _notify(event: str, title: str, *, summary: str = "", subtitle: str = "",
+                  theme: str = "", level: str = "info", tags: list[dict[str, str]] | None = None,
+                  segments: list[dict[str, Any]] | None = None,
+                  screenshot_paths: list[Path] | None = None, dedup_key: str = "") -> None:
     endpoint = os.getenv("NOTIFY_ENDPOINT", "").strip()
     token = os.getenv("NOTIFY_SOURCE_TOKEN", "").strip()
     if not endpoint or not token:
         return
     images: list[dict[str, str]] = []
-    segments: list[dict[str, Any]] = [{"kind": "text", "text": summary}]
+    # ⚠️ summary 和 segments 会被飞书卡片**依次**渲染：同一段文字既传 summary 又传一个
+    # text segment，卡片里就会出现两遍（2026-09-07 实测的日报重复就是这么来的）。
+    # 明细一律走 segments，summary 只留一句概述或留空。
+    body_segments: list[dict[str, Any]] = list(segments or [])
     for index, path in enumerate(screenshot_paths or []):
         try:
             raw = path.read_bytes()
@@ -126,14 +254,20 @@ async def _notify(event: str, title: str, summary: str, *, screenshot_paths: lis
                 LOG.warning("notification image too large path=%s", path)
                 continue
             ref = f"screen-{index}"
-            images.append({"ref": ref, "caption": path.stem, "png_base64": __import__("base64").b64encode(raw).decode()})
-            segments.append({"kind": "image", "image_ref": ref})
+            caption = PROVIDER_LABELS.get(path.stem.split("-")[0], {}).get("name", path.stem)
+            images.append({"ref": ref, "caption": f"{caption} 页面截图", "png_base64": __import__("base64").b64encode(raw).decode()})
+            body_segments.append({"kind": "image", "image_ref": ref})
         except OSError:
             continue
-    payload = {"source": "quota-monitor", "event": event, "level": "warn" if event == "quota.reset" else "info",
-               "title": title, "summary": summary, "segments": segments, "images": images,
+    payload = {"source": "quota-monitor", "event": event, "level": level,
+               "title": title, "subtitle": subtitle, "summary": summary,
+               "segments": body_segments, "images": images,
                "link": {"text": "查看额度历史", "url": "https://hydwang.xyz/console/quota/"},
                "dedup_key": dedup_key or f"quota:{event}:{int(time.time())}"}
+    if theme:
+        payload["theme"] = theme
+    if tags:
+        payload["tags"] = tags
     body = json.dumps(payload, ensure_ascii=False).encode()
     request = urllib.request.Request(endpoint, data=body, method="POST", headers={
         "Content-Type": "application/json", "X-Notify-Source": "quota-monitor", "X-Notify-Token": token,
@@ -173,9 +307,6 @@ async def _capture(page: Any, provider: str) -> dict[str, Any]:
                     weekly_used = float(numeric_meters[1]["value"])
                     fields["weekly_used_percent"] = f"{weekly_used:g}%"
                     fields["weekly_remaining"] = f"{100.0 - weekly_used:g}%"
-                resets = re.findall(r"resets?\s+([^\n]{1,80})", text, flags=re.I)
-                if len(resets) > 1:
-                    fields["weekly_reset_at"] = resets[1].strip()
                 confidence = max(confidence, 0.9)
                 status = "healthy"
         screenshot_path = SCREENSHOT_DIR / f"{provider}-{int(time.time())}.png"
@@ -183,6 +314,7 @@ async def _capture(page: Any, provider: str) -> dict[str, Any]:
     except Exception as exc:  # 保留失败记录，不能静默丢失截图/错误
         error = type(exc).__name__ + ": " + str(exc)[:500]
         status = "network_error"
+    fields = _with_absolute_resets(fields)
     digest = ""
     if screenshot_path and screenshot_path.exists():
         digest = hashlib.sha256(screenshot_path.read_bytes()).hexdigest()
@@ -192,6 +324,7 @@ async def _capture(page: Any, provider: str) -> dict[str, Any]:
     ).fetchone()
     reset_key = f"{provider}:{fields.get('reset_at','')}" if fields.get("reset_at") else None
     reset_detected = False
+    old_fields: dict[str, Any] = {}
     if previous and status == "healthy" and previous["status"] == "healthy":
         try:
             old_fields = json.loads(previous["fields_json"] or "{}")
@@ -217,10 +350,27 @@ async def _capture(page: Any, provider: str) -> dict[str, Any]:
     result = {"provider": provider, "status": status, "fields": fields, "screenshot_path": screenshot_path,
               "captured_at": captured_at, "reset_detected": reset_detected}
     if reset_detected:
-        weekly_summary = {key: fields.get(key) for key in ("weekly_remaining", "weekly_used_percent", "weekly_reset_at")}
-        await _notify("quota.reset", f"{provider} 周额度已重置", json.dumps(weekly_summary, ensure_ascii=False),
-                       screenshot_paths=[screenshot_path] if screenshot_path else [],
-                       dedup_key=f"quota:weekly_reset:{provider}:{fields.get('weekly_reset_at','')}" )
+        label = PROVIDER_LABELS.get(provider, {"name": provider, "icon": "•", "color": "grey"})
+        rows = [{"name": "剩余", "value": f"<font color='green'>**{fields.get('weekly_remaining', '未知')}**</font>"}]
+        if old_fields.get("weekly_remaining"):
+            rows.append({"name": "重置前", "value": str(old_fields["weekly_remaining"])})
+        next_reset = _reset_phrase(fields, "weekly_reset_at")
+        if next_reset:
+            rows.append({"name": "下次重置", "value": next_reset})
+        moment = datetime.fromisoformat(captured_at).astimezone(_display_tz())
+        await _notify(
+            "quota.reset",
+            f"{label['name']} 周额度已重置",
+            subtitle=f"检测于 {moment:%Y年%-m月%-d日 %H:%M} (CST)",
+            level="warn",
+            tags=[{"text": "周额度", "color": label.get("tag_color", "blue")}],
+            segments=[{
+                "kind": "section", "section_title": "周额度", "section_icon": "♻️",
+                "section_color": "green", "section_subtitle": label["name"], "fields": rows,
+            }],
+            screenshot_paths=[screenshot_path] if screenshot_path else [],
+            dedup_key=f"quota:weekly_reset:{provider}:{fields.get('weekly_reset_at','')}",
+        )
     return result
 
 
@@ -279,9 +429,28 @@ async def _maybe_daily_report(captured: list[dict[str, Any]]) -> None:
         return
     _last_report_key = key
     paths = [item["screenshot_path"] for item in captured if item.get("screenshot_path")]
-    summary = "\n".join(f"{item['provider']}: {item['status']} {item['fields']}" for item in captured)
-    await _notify("quota.daily_report", "AI 额度日报", summary, screenshot_paths=paths,
-                   dedup_key=f"quota:daily_report:{now.date()}:{slot}")
+    stamp = datetime.now(tz=_display_tz())
+    segments = [_provider_section(item) for item in captured]
+    unhealthy = [item["provider"] for item in captured if item.get("status") != "healthy"]
+    if unhealthy:
+        segments.append({
+            "kind": "text",
+            "text": f"<font color='red'>⚠️</font> 采集异常：{'、'.join(unhealthy)}，以截图为准。",
+        })
+    tags = [
+        {"text": PROVIDER_LABELS.get(item["provider"], {}).get("name", item["provider"]),
+         "color": PROVIDER_LABELS.get(item["provider"], {}).get("tag_color", "blue")}
+        for item in captured
+    ][:3]
+    await _notify(
+        "quota.daily_report",
+        "AI 额度日报",
+        subtitle=f"统计截至 {stamp:%Y年%-m月%-d日 %H:%M} (CST)",
+        tags=tags,
+        segments=segments,
+        screenshot_paths=paths,
+        dedup_key=f"quota:daily_report:{now.date()}:{slot}",
+    )
 
 
 @app.on_event("startup")
@@ -327,6 +496,10 @@ def _quota_public(fields: dict[str, Any]) -> dict[str, Any]:
         "window": fields.get("window", ""),
         "reset_at": fields.get("reset_at"),
         "weekly_reset_at": fields.get("weekly_reset_at"),
+        # 归一化后的绝对时间；前端优先用它，拿不到时才回退显示原始字符串。
+        "reset_at_iso": fields.get("reset_at_iso"),
+        "weekly_reset_at_iso": fields.get("weekly_reset_at_iso"),
+        "session_state": fields.get("session_state"),
     }
 
 

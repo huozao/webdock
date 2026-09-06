@@ -1,8 +1,19 @@
 from __future__ import annotations
 
+import re
 import sqlite3
+from datetime import datetime, timezone
 
-from quota_monitor.core import event_key, record_event_once, reset_candidate, screenshot_url, weekly_reset_candidate
+from quota_monitor.core import (
+    claude_reset_sections,
+    codex_reset_sections,
+    event_key,
+    normalize_reset,
+    record_event_once,
+    reset_candidate,
+    screenshot_url,
+    weekly_reset_candidate,
+)
 
 
 def test_reset_requires_healthy_previous_and_large_jump():
@@ -26,3 +37,128 @@ def test_only_weekly_window_can_trigger_reset_alert():
 
     five_hour_only = {"status": "healthy", "fields": {"remaining": "100%", "weekly_remaining": "10%", "weekly_reset_at": "tomorrow"}}
     assert not weekly_reset_candidate(five_hour_only, old)
+
+
+# 以下三份样本逐字取自 2026-09-07 webdock2 生产采集（captures id=48/44/47）的额度面板，
+# 只删掉与判定无关的侧栏会话标题。合成样本测不出这类坑：错位只在「某个窗口不渲染
+# Resets 行」时出现，而那正是真实页面才有的形状。
+CLAUDE_IDLE_SESSION = """Plan usage limits
+Pro
+Current session
+Starts when a message is sent
+0% used
+Weekly limits
+
+Your limits are temporarily boosted. Your weekly Claude Code limit is 50% higher through September 13.
+Learn more about usage limits
+All models
+Resets Sat 10:00 AM
+25% used
+Last updated: just now
+
+Usage credits
+Turn on usage credits to keep using Claude if you hit a plan limit. Learn more
+$0.00 spent
+Resets Oct 1
+Unlimited
+"""
+
+CLAUDE_ACTIVE_SESSION = """Plan usage limits
+Pro
+Current session
+Resets in 5 min
+9% used
+Weekly limits
+
+Your limits are temporarily boosted. Your weekly Claude Code limit is 50% higher through September 13.
+Learn more about usage limits
+All models
+Resets Sat 10:00 AM
+25% used
+Last updated: just now
+
+Usage credits
+Turn on usage credits to keep using Claude if you hit a plan limit. Learn more
+$0.00 spent
+Resets Oct 1
+Unlimited
+"""
+
+CODEX_FULL_FIVE_HOUR = """Codex and Work Analytics
+Usage
+Code review
+Balance
+
+Codex and Work share the same usage limit.
+
+5 hour usage limit
+
+100%
+remaining
+
+Weekly usage limit
+
+0%
+remaining
+Resets Sep 7, 2026 2:24 AM
+
+Credits remaining
+
+441
+Credits extend usage beyond your plan limits.
+Usage limit resets
+
+Use a reset to restore your 5-hour limit, weekly limit, or both.
+"""
+
+
+def test_claude_reset_times_are_anchored_to_their_own_section():
+    idle = claude_reset_sections(CLAUDE_IDLE_SESSION)
+    assert idle["anchored"] and idle["session_idle"]
+    assert idle["session_reset"] is None
+    assert idle["weekly_reset"] == "Sat 10:00 AM"
+
+    active = claude_reset_sections(CLAUDE_ACTIVE_SESSION)
+    assert active["session_reset"] == "5 min"
+    assert active["weekly_reset"] == "Sat 10:00 AM"
+    assert not active["session_idle"]
+
+
+def test_positional_extraction_puts_the_credits_reset_in_the_weekly_slot():
+    """反证：喂旧判据（全页 findall 后按下标取）会在同一份样本上错位一格。"""
+    resets = re.findall(r"resets?\s+([^\n]{1,80})", CLAUDE_IDLE_SESSION, flags=re.I)
+    assert resets[0] == "Sat 10:00 AM"  # 旧代码当成 5 小时重置
+    assert resets[1] == "Oct 1"  # 旧代码当成周重置，实际是 Usage credits 的每月重置
+    assert claude_reset_sections(CLAUDE_IDLE_SESSION)["weekly_reset"] != "Oct 1"
+
+
+def test_codex_reset_belongs_to_the_weekly_block_only():
+    resets = codex_reset_sections(CODEX_FULL_FIVE_HOUR)
+    assert resets["anchored"]
+    assert resets["five_hour_reset"] is None  # 100% 剩余时页面不渲染这一行
+    assert resets["weekly_reset"] == "Sep 7, 2026 2:24 AM"
+
+
+def test_reset_text_is_normalised_against_the_capture_timezone():
+    now = datetime(2026, 9, 7, 6, 44, tzinfo=timezone.utc)
+    absolute = normalize_reset("Sep 7, 2026 2:24 AM", now)
+    # 页面按浏览器时区渲染，容器是 UTC：这一刻在 CST 是 10:24，不是当天凌晨。
+    assert absolute == datetime(2026, 9, 7, 2, 24, tzinfo=timezone.utc)
+    assert normalize_reset("5 min", now) == datetime(2026, 9, 7, 6, 49, tzinfo=timezone.utc)
+    assert normalize_reset("1 hr 29 min", now) == datetime(2026, 9, 7, 8, 13, tzinfo=timezone.utc)
+    # 2026-09-07 是周一，下一个周六是 09-12。
+    assert normalize_reset("Sat 10:00 AM", now) == datetime(2026, 9, 12, 10, 0, tzinfo=timezone.utc)
+    assert normalize_reset("Oct 1", now) == datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc)
+    assert normalize_reset("当页面改版之后", now) is None
+    assert normalize_reset("", now) is None
+
+
+def test_weekly_reset_alert_requires_the_remaining_quota_to_recover():
+    """重置时间字符串变了但剩余额度没动，是文案漂移，不是重置（2026-09-07 误报的形状）。"""
+    old = {"status": "healthy", "fields": {"weekly_remaining": "75%", "weekly_reset_at": "Sat 10:00 AM"}}
+    drifted = {"status": "healthy", "fields": {"weekly_remaining": "75%", "weekly_reset_at": "Oct 1"}}
+    assert not weekly_reset_candidate(drifted, old)
+
+    exhausted = {"status": "healthy", "fields": {"weekly_remaining": "0%", "weekly_reset_at": "Sep 7, 2026 2:24 AM"}}
+    recovered = {"status": "healthy", "fields": {"weekly_remaining": "100%", "weekly_reset_at": "Sep 14, 2026 2:24 AM"}}
+    assert weekly_reset_candidate(recovered, exhausted)

@@ -6,7 +6,8 @@
     "docs/ubuntu-laptop-setup.md",
     "docs/tailscale-network.md",
     "docs/openclaw-integration.md",
-    "docs/operations.md"
+    "docs/operations.md",
+    "docs/quota-monitor.md"
   ],
   "paths": [
     "src/main.py",

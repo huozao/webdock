@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -32,19 +34,180 @@ def reset_candidate(current: dict[str, Any], previous: dict[str, Any] | None) ->
     return remaining > old_remaining and remaining - old_remaining >= max(10.0, limit * 0.2)
 
 
+def percent(value: Any) -> float | None:
+    try:
+        return float(str(value).replace(",", "").rstrip("%").strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def weekly_reset_candidate(current: dict[str, Any], previous: dict[str, Any] | None) -> bool:
-    """Only detect weekly-window resets; 5-hour window changes are not alerts."""
+    """Only detect weekly-window resets; 5-hour window changes are not alerts.
+
+    ⚠️ 重置时间字符串变了**不足以**判定重置。2026-09-07 实测：Claude 页面在会话未开始时
+    不渲染 session 的 Resets 行，按出现顺序取值就把「Usage credits 每月重置」当成了周重置，
+    ``weekly_reset_at`` 从 "Sat 10:00 AM" 变成 "Oct 1"，于是发出一条「周额度已重置」——
+    而 ``weekly_remaining`` 全程 75% 没动过。真正的重置一定伴随剩余额度回升，判据落在剩余
+    额度上，重置时间变化只作为附加条件。
+    """
     if not previous or current.get("status") != "healthy" or previous.get("status") != "healthy":
         return False
     now, old = current.get("fields", {}), previous.get("fields", {})
-    if now.get("weekly_reset_at") and old.get("weekly_reset_at") and now["weekly_reset_at"] != old["weekly_reset_at"]:
-        return True
-    try:
-        remaining = float(str(now["weekly_remaining"]).replace(",", "").rstrip("%"))
-        old_remaining = float(str(old["weekly_remaining"]).replace(",", "").rstrip("%"))
-    except (KeyError, TypeError, ValueError):
+    remaining, old_remaining = percent(now.get("weekly_remaining")), percent(old.get("weekly_remaining"))
+    if remaining is None or old_remaining is None:
         return False
-    return remaining > old_remaining and remaining - old_remaining >= 20.0
+    delta = remaining - old_remaining
+    reset_changed = bool(
+        now.get("weekly_reset_at")
+        and old.get("weekly_reset_at")
+        and now["weekly_reset_at"] != old["weekly_reset_at"]
+    )
+    return (reset_changed and delta > 0) or delta >= 20.0
+
+
+_RESET_LINE = re.compile(r"resets?\s+(?:in\s+|at\s+)?([^\n]{1,80})", re.I)
+_SESSION_IDLE = "starts when a message is sent"
+# 小节边界。最后一项只当边界用（credits 的重置与额度窗口无关，必须被切在外面）。
+CLAUDE_SECTIONS = (("session", "current session"), ("weekly", "weekly limits"), ("", "usage credits"))
+CODEX_SECTIONS = (("five_hour", "5 hour usage limit"), ("weekly", "weekly usage limit"), ("", "credits remaining"))
+
+
+def section_resets(text: str, sections: tuple[tuple[str, str], ...]) -> dict[str, Any]:
+    """按小节边界取各窗口的重置时间，不按出现顺序取。
+
+    ⚠️ 位置取值（``findall`` 之后 ``[0]`` 当 5 小时、``[1]`` 当周）在**某个窗口不渲染
+    Resets 行**时会整体错位一格。2026-09-07 capture id=48 实证：Claude 会话未开始时显示
+    "Starts when a message is sent"、没有 Resets 行，于是周重置被当成会话重置、与额度窗口
+    无关的 "Usage credits" 每月重置被当成周重置，看板和飞书卡片上两个格子全错。Codex 侧
+    5 小时用满前不显示自己的重置行，是同一个形状的坑。
+
+    返回 ``{"anchored": bool, "<key>": "重置文案或 None", "blocks": {...}}``。
+    """
+    lowered = text.lower()
+    positions: list[tuple[str, int]] = []
+    cursor = 0
+    for key, marker in sections:
+        index = lowered.find(marker, cursor)
+        if index < 0:
+            continue
+        positions.append((key, index))
+        cursor = index + len(marker)
+    result: dict[str, Any] = {"anchored": False, "blocks": {}}
+    for key, _ in sections:
+        if key:
+            result[key] = None
+    named = [item for item in positions if item[0]]
+    if len(named) < len([key for key, _ in sections if key]):
+        return result
+    result["anchored"] = True
+    ends = [index for _, index in positions[1:]] + [len(text)]
+    for (key, start), end in zip(positions, ends):
+        if not key:
+            continue
+        block = text[start:end]
+        result["blocks"][key] = block
+        match = _RESET_LINE.search(block)
+        result[key] = match.group(1).strip() if match else None
+    return result
+
+
+def claude_reset_sections(text: str) -> dict[str, Any]:
+    """Claude 的会话/周重置时间，外加「会话尚未开始」这个状态。"""
+    result = section_resets(text, CLAUDE_SECTIONS)
+    session_block = result.get("blocks", {}).get("session", "")
+    return {
+        "anchored": result["anchored"],
+        "session_reset": result.get("session"),
+        "weekly_reset": result.get("weekly"),
+        "session_idle": _SESSION_IDLE in session_block.lower(),
+    }
+
+
+def codex_reset_sections(text: str) -> dict[str, Any]:
+    """Codex 的 5 小时/周重置时间。页面在窗口未用满时不渲染该窗口的 Resets 行。"""
+    result = section_resets(text, CODEX_SECTIONS)
+    return {
+        "anchored": result["anchored"],
+        "five_hour_reset": result.get("five_hour"),
+        "weekly_reset": result.get("weekly"),
+    }
+
+
+_RELATIVE_UNITS = (
+    (re.compile(r"(\d+)\s*d(?:ays?)?\b", re.I), "days"),
+    (re.compile(r"(\d+)\s*h(?:r|rs|our|ours)?\b", re.I), "hours"),
+    (re.compile(r"(\d+)\s*m(?:in|ins|inute|inutes)?\b", re.I), "minutes"),
+)
+_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+_ABSOLUTE_FORMATS = ("%b %d, %Y %I:%M %p", "%b %d, %Y %H:%M", "%B %d, %Y %I:%M %p", "%b %d, %Y")
+
+
+def _parse_clock(value: str) -> tuple[int, int] | None:
+    match = re.match(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", value.strip(), flags=re.I)
+    if not match:
+        return None
+    hour, minute = int(match.group(1)), int(match.group(2) or 0)
+    meridiem = (match.group(3) or "").lower()
+    if meridiem == "pm" and hour < 12:
+        hour += 12
+    if meridiem == "am" and hour == 12:
+        hour = 0
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return hour, minute
+
+
+def normalize_reset(raw: Any, now: datetime) -> datetime | None:
+    """把页面上的重置文案换算成带时区的绝对时间。
+
+    页面按**浏览器所在时区**渲染，采集容器跑在 UTC，而 console 和飞书卡片在 CST 里读——
+    裸字符串每往下游传一层就再猜一次时区，"Sep 7, 2026 2:24 AM" 因此在看板上被当成 CST，
+    整整早了 8 小时，显示成「已过期」（2026-09-07 实测）。归一化只在采集侧做一次。
+
+    ``now`` 必须带 tzinfo（容器本地时区），返回值沿用同一时区；认不出来返回 ``None``，
+    由调用方保留原始字符串，不猜。
+    """
+    if not raw:
+        return None
+    value = str(raw).strip()
+    if not value:
+        return None
+    delta: dict[str, int] = {}
+    for pattern, unit in _RELATIVE_UNITS:
+        match = pattern.search(value)
+        if match:
+            delta[unit] = int(match.group(1))
+    if delta:
+        return now + timedelta(**delta)
+    cleaned = value.rstrip(".")
+    for fmt in _ABSOLUTE_FORMATS:
+        try:
+            return datetime.strptime(cleaned, fmt).replace(tzinfo=now.tzinfo)
+        except ValueError:
+            continue
+    weekday_match = re.match(r"(mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?\s+(.+)$", cleaned, flags=re.I)
+    if weekday_match:
+        prefix = weekday_match.group(1).lower()
+        target = next(index for index, name in enumerate(_WEEKDAYS) if name.startswith(prefix))
+        clock = _parse_clock(weekday_match.group(2))
+        if clock is None:
+            return None
+        candidate = now.replace(hour=clock[0], minute=clock[1], second=0, microsecond=0)
+        ahead = (target - now.weekday()) % 7
+        if ahead == 0 and candidate <= now:
+            ahead = 7
+        return candidate + timedelta(days=ahead)
+    month_day = re.match(r"([A-Za-z]{3,9})\s+(\d{1,2})$", cleaned)
+    if month_day:
+        for fmt in ("%b %d %Y", "%B %d %Y"):
+            try:
+                parsed = datetime.strptime(
+                    f"{month_day.group(1)} {month_day.group(2)} {now.year}", fmt
+                ).replace(tzinfo=now.tzinfo)
+            except ValueError:
+                continue
+            return parsed if parsed >= now else parsed.replace(year=now.year + 1)
+    return None
 
 
 def event_key(provider: str, fields: dict[str, Any]) -> str:

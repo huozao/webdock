@@ -41,6 +41,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/ src/
+COPY quota_monitor/ quota_monitor/
 COPY scripts/ scripts/
 COPY docker/ docker/
 COPY deploy/laptop/.env.example .env.example

@@ -24,10 +24,12 @@ from .core import (
     codex_reset_sections,
     event_key,
     countdown_label,
+    get_meta,
     normalize_reset,
     percent,
     pick_report_slot,
     record_event_once,
+    set_meta,
     weekly_reset_candidate,
 )
 
@@ -441,11 +443,10 @@ async def _run() -> None:
         await asyncio.sleep(delay)
 
 
-_last_report_key = ""
+REPORT_META_KEY = "last_daily_report"
 
 
 async def _maybe_daily_report(captured: list[dict[str, Any]]) -> None:
-    global _last_report_key
     slots = [item.strip() for item in os.getenv("QUOTA_REPORT_TIMES", "08:00,13:00,20:00").split(",")]
     # ⚠️ 该写法自 2026-09-07 起改正：这里原本取 datetime.now().astimezone()，容器没设 TZ
     # 就是 UTC，于是 08:00/13:00/20:00 三档实际落在 16:00/21:00/04:00 (SGT)——文档写的
@@ -454,9 +455,16 @@ async def _maybe_daily_report(captured: list[dict[str, Any]]) -> None:
     now = datetime.now(tz=_display_tz())
     slot = pick_report_slot(now, slots)
     key = f"{now.date()}:{slot}" if slot else ""
-    if not slot or key == _last_report_key:
+    if not slot:
         return
-    _last_report_key = key
+    # 「本日已发到哪一档」落库：只放进程内的话，容器每重启一次就补发一遍。
+    conn = _db()
+    try:
+        if get_meta(conn, REPORT_META_KEY) == key:
+            return
+        set_meta(conn, REPORT_META_KEY, key)
+    finally:
+        conn.close()
     paths = [item["screenshot_path"] for item in captured if item.get("screenshot_path")]
     stamp = now
     segments = [seg for item in captured for seg in _provider_segments(item)]

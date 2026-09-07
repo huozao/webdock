@@ -278,6 +278,26 @@ def record_event_once(conn: sqlite3.Connection, key: str, provider: str, detecte
     return cursor.rowcount == 1
 
 
+def get_meta(conn: sqlite3.Connection, key: str) -> str:
+    """读一条跨重启的小状态。表不存在时返回空串，不抛。"""
+    conn.execute("CREATE TABLE IF NOT EXISTS quota_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    row = conn.execute("SELECT value FROM quota_meta WHERE key=?", (key,)).fetchone()
+    return "" if row is None else str(row[0])
+
+
+def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+    """写一条跨重启的小状态。
+
+    ⚠️ 日报的「本日已发到哪一档」必须落库，不能只放在进程内。放在模块级变量里时，
+    容器每重启一次就会把当天最近一档重发一遍——2026-09-07 一天之内因为连续换镜像，
+    同一档日报补发了好几次。
+    """
+    conn.execute("CREATE TABLE IF NOT EXISTS quota_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    conn.execute("INSERT INTO quota_meta(key,value) VALUES(?,?) "
+                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+    conn.commit()
+
+
 def screenshot_url(capture_id: int, *, prefix: str = "/v1/quota/captures") -> str:
     """Return a same-origin URL; callers should expose it behind Authelia."""
     return f"{prefix}/{int(capture_id)}/screenshot"

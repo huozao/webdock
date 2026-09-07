@@ -74,7 +74,11 @@
 
 ## 通知规则
 
-- 早/中/晚日报照常发送。
+- 早/中/晚日报照常发送。⚠️ **「本日已发到哪一档」落在 sqlite 的 `quota_meta` 表**，不是
+  进程内变量。放进程内时容器每重启一次就把当天最近一档补发一遍——2026-09-07 因为连续换
+  镜像，同一档补发了好几次。判据：重启容器后查
+  `SELECT value FROM quota_meta WHERE key='last_daily_report'`，再看 `notify_outbox`
+  有没有多出同 dedup_key 的行。
 - `quota.reset` **只由周额度变化触发**；5 小时窗口恢复不发送飞书通知。
 - 周额度判定使用 `weekly_remaining` / `weekly_reset_at`，要求前后均为健康采集，
   并通过 `quota_events` 去重。

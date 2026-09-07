@@ -9,10 +9,12 @@ from quota_monitor.core import (
     codex_reset_sections,
     countdown_label,
     event_key,
+    get_meta,
     normalize_reset,
     pick_report_slot,
     record_event_once,
     reset_candidate,
+    set_meta,
     screenshot_url,
     weekly_reset_candidate,
 )
@@ -242,3 +244,13 @@ def test_countdown_uses_english_units_and_never_bare_m():
     assert countdown_label(3 * 1440) == "3d"
     # 分钟不得写成单个 m —— 时间语境里会被读成 month
     assert not re.search(r"\d+m(?!in)\b", countdown_label(3 * 60 + 47))
+
+
+def test_daily_report_slot_survives_a_restart():
+    """「本日已发到哪一档」必须落库：只放进程内的话，重启一次就补发一遍。"""
+    conn = sqlite3.connect(":memory:")
+    assert get_meta(conn, "last_daily_report") == ""
+    set_meta(conn, "last_daily_report", "2026-09-07:13:00")
+    assert get_meta(conn, "last_daily_report") == "2026-09-07:13:00"
+    set_meta(conn, "last_daily_report", "2026-09-07:20:00")
+    assert get_meta(conn, "last_daily_report") == "2026-09-07:20:00"

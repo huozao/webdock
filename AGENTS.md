@@ -36,6 +36,10 @@ ChatGPT 登录与 Cloudflare 验证必须人工在 noVNC 完成，完成前自�
 ## 排障入口
 
 - 浏览器/登录态/回复截断/图改图 → `docs/runbooks/browser.md`
+- AI 额度监控（console 卡片 / 飞书额度日报 / 重置告警）→ `docs/quota-monitor.md`，
+  该文顶部〈排障入口〉先判断落在采集/时区/看板/卡片哪一段，并附只读取证命令。
+  ⚠️ 采集容器**不设 TZ、跑在 UTC**，页面上的 `Resets …` 因此是 UTC；绝对时间只用采集侧
+  归一化出的 `*_iso`，下游不得再解析原始字符串。
 - 主备判定：先从 `../AliECS/docs/fleet.md` 确认当前 business-cn 主机，再核对该机 `/etc/default/webdock-failover-proxy` 与 `127.0.0.1:11800/healthz` 的 `X-Webdock-Device`；不得固定写死服务器名。
 - 消息存档：各机 `/var/log/webdock/archive/<UTC日期>.jsonl`，每对话一行。
 

@@ -1,5 +1,31 @@
 # AI 额度监控运行说明
 
+## 排障入口（先读这段）
+
+三条链路，出问题先判断落在哪一段：
+
+| 现象 | 落在哪 | 看本文哪节 |
+|---|---|---|
+| 数值本身不对 / 两个窗口的重置时间互串 | 采集（webdock2 `quota-monitor` 容器） | 〈重置时间按小节锚定〉 |
+| 数值对但时间早/晚 8 小时、倒计时是 0 | 时区归一化 | 〈时区〉 |
+| console 页面不显示倒计时、重置显示成 2001 年 | 看板（txecs 静态页） | 〈时区〉末段 + `infra/console/README.md` |
+| 飞书卡片排版错位、内容重复、字挤成两行 | 卡片渲染（AliECS 中枢） | 〈卡片排版〉 |
+| 卡片没收到 | 中枢投递，**判据看 `notify_deliveries` 不看 `notify_outbox`** | `AliECS/docs/runbooks/notify.md` |
+
+只读取证命令（都不改状态）：
+
+```bash
+# 采集是否新鲜、字段对不对（captured_at 是 UTC）
+ssh webdock2 "wsl -d Ubuntu-24.04-WebDock -- bash -lc 'docker exec quota-monitor python -c \"import sqlite3;[print(r) for r in sqlite3.connect(\\\"/app/quota_data/quota.sqlite3\\\").execute(\\\"SELECT id,provider,captured_at,status,fields_json FROM captures ORDER BY id DESC LIMIT 4\\\")]\"'"
+# 看板拿到的对外字段
+ssh webdock2 "wsl -d Ubuntu-24.04-WebDock -- bash -lc 'curl -sS http://127.0.0.1:18002/v1/quota/latest'"
+# 发了哪些通知、有没有真送达
+ssh txecs "sudo docker exec business-cn-postgres-1 psql -U app -d app -c \"select o.id,o.event,o.dedup_key,o.created_at,d.status from notify_outbox o left join notify_deliveries d on d.outbox_id=o.id where o.source_key='quota-monitor' order by o.id desc limit 8;\""
+```
+
+原始页面文字整段存在 `captures.text` 里，截图存在 `captures.screenshot_path`——**判断页面是不是
+改版了，一定去读这两样，不要凭代码默认值推断**。
+
 ## 运行边界
 
 - quota-monitor 使用独立 Chrome profile、独立 `DISPLAY=:101`、独立 CDP `9224` 和 noVNC `6082`。
@@ -134,3 +160,26 @@ column，折行只让那一格变高，不牵动邻格；顺带每格宽度从 5
 
 quota-monitor 随 webdock GitHub `main` 的不可变镜像发布；生产 compose 不再绑定本地源码，
 设备只运行 GitHub Actions 构建出的镜像版本。
+
+完整一轮（2026-09-07 走过六次，每一步都有判据）：
+
+1. webdock 直推 `main`（**推前本地 `pytest` 必须过**，本仓 CI 不拦直推）。
+2. 等 **release** run 出镜像。⚠️ 同一个 commit 会同时触发 `ci` 和 `release` 两个 run，
+   `gh run list --limit 1` 常常给的是 `ci`——它只有 `test` 一个 job，绿了也**没有镜像**。
+   判据：`gh run view <id> --json jobs` 里必须看到 `build-push: success`
+   （`mirror-to-tcr: skipped` 属常态）。
+3. `sops set secrets/webdock2.enc.env '["WEBDOCK_IMAGE"]' '"ghcr.io/huozao/webdock:sha-<完整40位>"'`。
+   ⚠️ 用完整 SHA，别照着短 SHA 手拼——拼错了会 pin 到一个不存在的 tag。
+4. infra 推 origin + 三个 device bare，然后设备上
+   `sudo -u webdock git -C /home/webdock/infra pull --ff-only origin main`
+   （webdock2 已改直拉 GitHub，见 `infra/roles/webdock/README.md`〈设备直拉 GitHub〉）。
+5. `sudo /home/webdock/infra/scripts/render.sh webdock2` → 只应看到
+   `UPDATED: /opt/webdock/deploy/laptop/.env`。
+6. `docker compose -p webdock --env-file … pull quota-monitor` 后
+   `up -d --no-build quota-monitor`——**只重建这一个容器，别动 webdock 主容器**。
+7. 判据三件套：`docker inspect --format '{{.Config.Image}}' quota-monitor` 的 tag 变了、
+   容器内 `grep` 到本次新增的函数名、等一轮采集看 `captures` 里新行的字段。
+
+⚠️ **跨仓发版顺序**：卡片用到中枢的新字段时（如 `NotifyField.note`），必须
+**AliECS backend 先上线**。旧模型对多余字段是 pydantic 默认的静默忽略，先上 webdock
+的后果不是「样式没生效」而是**那一行整个消失**（2026-09-07 在生产容器里实测过）。

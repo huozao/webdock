@@ -193,12 +193,20 @@ def _quota_color(left: float | None) -> str:
     return "red" if left is not None and left <= 0 else "green"
 
 
-def _metric_cell(remaining: Any, note: str, color: str = "") -> str:
-    """一格里三行：指标名（由 fields 渲染）、数值、灰色副信息。"""
+def _metric_cell(name: str, remaining: Any, note: str, color: str = "") -> dict[str, str]:
+    """一格：指标名、数值，副信息走 ``note``。
+
+    副信息**必须**放 note 不能拼进 value——飞书 markdown 不支持行内字号，同一个 markdown
+    元素里的字只能一样大；中枢把 note 单独渲染成 notation 号，窄屏下正好省出那点宽度，
+    「重置 9/14 10:33 · 6d 21h」才不折行。
+    """
     if remaining is None:
-        return "暂无数据"
+        return {"name": name, "value": "暂无数据"}
     head = f"<font color='{color}'>**{remaining}**</font>" if color else f"**{remaining}**"
-    return head + f"\n<font color='grey'>{note}</font>" if note else head
+    cell = {"name": name, "value": head}
+    if note:
+        cell["note"] = f"<font color='grey'>{note}</font>"
+    return cell
 
 
 def _provider_segments(item: dict[str, Any]) -> list[dict[str, Any]]:
@@ -248,18 +256,13 @@ def _provider_segments(item: dict[str, Any]) -> list[dict[str, Any]]:
         {
             "kind": "fields",
             "fields": [
-                {
-                    "name": "5h",
-                    "value": _metric_cell(five_remaining, five_note, _quota_color(five_left)),
-                },
-                {
-                    "name": "周额度",
-                    "value": _metric_cell(
-                        weekly_remaining,
-                        f"重置 {weekly_reset}" if weekly_reset else "",
-                        _quota_color(weekly_left),
-                    ),
-                },
+                _metric_cell("5h", five_remaining, five_note, _quota_color(five_left)),
+                _metric_cell(
+                    "周额度",
+                    weekly_remaining,
+                    f"重置 {weekly_reset}" if weekly_reset else "",
+                    _quota_color(weekly_left),
+                ),
             ],
         },
     ]
@@ -383,12 +386,12 @@ async def _capture(page: Any, provider: str) -> dict[str, Any]:
     if reset_detected:
         label = PROVIDER_LABELS.get(provider, {"name": provider, "icon": "•", "color": "grey"})
         # 与日报同样的理由：值会折行，不能用靠行数对齐的 section 三列。
-        cells = [{
+        cells: list[dict[str, str]] = [{
             "name": "剩余",
-            "value": f"<font color='green'>**{fields.get('weekly_remaining', '未知')}**</font>"
-                     + (f"\n<font color='grey'>重置前 {old_fields['weekly_remaining']}</font>"
-                        if old_fields.get("weekly_remaining") else ""),
+            "value": f"<font color='green'>**{fields.get('weekly_remaining', '未知')}**</font>",
         }]
+        if old_fields.get("weekly_remaining"):
+            cells[0]["note"] = f"<font color='grey'>重置前 {old_fields['weekly_remaining']}</font>"
         next_reset = _reset_phrase(fields, "weekly_reset_at")
         if next_reset:
             cells.append({"name": "下次重置", "value": f"**{next_reset}**"})

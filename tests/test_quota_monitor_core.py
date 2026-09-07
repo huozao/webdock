@@ -162,3 +162,53 @@ def test_weekly_reset_alert_requires_the_remaining_quota_to_recover():
     exhausted = {"status": "healthy", "fields": {"weekly_remaining": "0%", "weekly_reset_at": "Sep 7, 2026 2:24 AM"}}
     recovered = {"status": "healthy", "fields": {"weekly_remaining": "100%", "weekly_reset_at": "Sep 14, 2026 2:24 AM"}}
     assert weekly_reset_candidate(recovered, exhausted)
+
+
+# 2026-09-07 上线后第一轮生产采集（capture id=61）：5 小时窗口用掉一部分之后，Codex 把
+# 两个窗口的重置时间都渲染成裸时钟，页面顶部还多了一条带 "reset after" 的横幅。
+CODEX_PARTIAL_FIVE_HOUR = """Your limit will reset after 2:24 AM.
+Upgrade
+Add credits
+Balance
+
+Codex and Work share the same usage limit.
+
+5 hour usage limit
+
+91%
+remaining
+Resets 3:59 AM
+
+Weekly usage limit
+
+0%
+remaining
+Resets 2:24 AM
+
+Credits remaining
+
+0
+Credits extend usage beyond your plan limits.
+Usage limit resets
+
+Use a reset to restore your 5-hour limit, weekly limit, or both.
+"""
+
+
+def test_codex_banner_outside_the_sections_never_becomes_a_reset_time():
+    resets = codex_reset_sections(CODEX_PARTIAL_FIVE_HOUR)
+    assert resets["five_hour_reset"] == "3:59 AM"
+    assert resets["weekly_reset"] == "2:24 AM"
+    # 反证：旧判据取全页第一条，命中的是横幅那句，两个格子会一起变成 "after 2:24 AM."
+    stale = re.search(r"resets?\s+([^\n]{1,80})", CODEX_PARTIAL_FIVE_HOUR, flags=re.I)
+    assert stale.group(1).strip() == "after 2:24 AM."
+
+
+def test_bare_clock_reset_resolves_to_the_next_occurrence():
+    now = datetime(2026, 9, 7, 1, 9, tzinfo=timezone.utc)
+    assert normalize_reset("3:59 AM", now) == datetime(2026, 9, 7, 3, 59, tzinfo=timezone.utc)
+    assert normalize_reset("2:24 AM", now) == datetime(2026, 9, 7, 2, 24, tzinfo=timezone.utc)
+    # 已经过去的时刻落到明天
+    assert normalize_reset("12:30 AM", now) == datetime(2026, 9, 8, 0, 30, tzinfo=timezone.utc)
+    # "Oct 1" 不能被当成 1 点
+    assert normalize_reset("Oct 1", now) == datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc)

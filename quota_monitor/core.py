@@ -65,7 +65,9 @@ def weekly_reset_candidate(current: dict[str, Any], previous: dict[str, Any] | N
     return (reset_changed and delta > 0) or delta >= 20.0
 
 
-_RESET_LINE = re.compile(r"resets?\s+(?:in\s+|at\s+)?([^\n]{1,80})", re.I)
+# 「Resets in 5 min」「Resets at 3:59 AM」「will reset after 2:24 AM.」三种前缀都出现过，
+# 引导词不属于时间本身，跟着进字段会让归一化认不出来。
+_RESET_LINE = re.compile(r"resets?\s+(?:in\s+|at\s+|after\s+)?([^\n]{1,80})", re.I)
 _SESSION_IDLE = "starts when a message is sent"
 # 小节边界。最后一项只当边界用（credits 的重置与额度窗口无关，必须被切在外面）。
 CLAUDE_SECTIONS = (("session", "current session"), ("weekly", "weekly limits"), ("", "usage credits"))
@@ -107,7 +109,7 @@ def section_resets(text: str, sections: tuple[tuple[str, str], ...]) -> dict[str
         block = text[start:end]
         result["blocks"][key] = block
         match = _RESET_LINE.search(block)
-        result[key] = match.group(1).strip() if match else None
+        result[key] = match.group(1).strip().rstrip(".") if match else None
     return result
 
 
@@ -157,6 +159,13 @@ def _parse_clock(value: str) -> tuple[int, int] | None:
     return hour, minute
 
 
+def _parse_clock_exact(value: str) -> tuple[int, int] | None:
+    """整串就是一个时钟时间时才返回；"Oct 1" 这类必须落空，否则会被当成 1 点。"""
+    if not re.fullmatch(r"\d{1,2}(?::\d{2})?\s*(?:am|pm)", value.strip(), flags=re.I):
+        return None
+    return _parse_clock(value)
+
+
 def normalize_reset(raw: Any, now: datetime) -> datetime | None:
     """把页面上的重置文案换算成带时区的绝对时间。
 
@@ -197,6 +206,13 @@ def normalize_reset(raw: Any, now: datetime) -> datetime | None:
         if ahead == 0 and candidate <= now:
             ahead = 7
         return candidate + timedelta(days=ahead)
+    # ⚠️ 2026-09-07 生产实测：5 小时窗口用掉一部分后，页面把重置时间渲染成裸时钟
+    # （"Resets 3:59 AM"），既没有日期也没有星期。认不出来就没有 iso，看板会退回原文
+    # 且不显示倒计时——这一格因此看着像坏了。按「下一次出现该时刻」解析。
+    clock_only = _parse_clock_exact(cleaned)
+    if clock_only is not None:
+        candidate = now.replace(hour=clock_only[0], minute=clock_only[1], second=0, microsecond=0)
+        return candidate if candidate > now else candidate + timedelta(days=1)
     month_day = re.match(r"([A-Za-z]{3,9})\s+(\d{1,2})$", cleaned)
     if month_day:
         for fmt in ("%b %d %Y", "%B %d %Y"):

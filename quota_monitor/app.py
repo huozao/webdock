@@ -23,6 +23,7 @@ from .core import (
     claude_reset_sections,
     codex_reset_sections,
     event_key,
+    countdown_label,
     normalize_reset,
     percent,
     pick_report_slot,
@@ -165,10 +166,10 @@ def _with_absolute_resets(fields: dict[str, Any]) -> dict[str, Any]:
 
 
 def _reset_phrase(fields: dict[str, Any], key: str) -> str:
-    """渲染成「16:40 · 4小时22分后」；认不出来就原样回显，不猜。
+    """渲染成「重置 16:40 · 3h 47min」；认不出来就原样回显，不猜。
 
-    移动端卡片一格只有半屏宽，文案每长一个字就更容易折行，所以同一天省掉日期、
-    括号和「约」字都省掉。
+    移动端卡片一格只有半屏宽，文案每长一个字就更容易折行：同一天省掉日期，倒计时用
+    英文单位，且**不带「后」**——这一行的语境已经是重置倒计时，那个字纯占宽度。
     """
     raw = str(fields.get(key) or "").strip()
     iso = fields.get(f"{key}_iso")
@@ -182,15 +183,12 @@ def _reset_phrase(fields: dict[str, Any], key: str) -> str:
     stamp = f"{moment:%H:%M}" if moment.date() == now.date() else f"{moment:%-m/%-d %H:%M}"
     minutes = int((moment - now).total_seconds() // 60)
     if minutes <= 0:
-        return f"{stamp} · 应已重置"
-    days, hours, mins = minutes // 1440, minutes % 1440 // 60, minutes % 60
-    if days:
-        ahead = f"{days}天{hours}小时" if hours else f"{days}天"
-    elif hours:
-        ahead = f"{hours}小时{mins}分" if mins else f"{hours}小时"
-    else:
-        ahead = f"{mins}分"
-    return f"{stamp} · {ahead}后"
+        return f"{stamp} · 已过"
+    return f"{stamp} · {countdown_label(minutes)}"
+
+
+def _quota_color(left: float | None) -> str:
+    return "red" if left is not None and left <= 0 else "green"
 
 
 def _metric_cell(remaining: Any, note: str, color: str = "") -> str:
@@ -222,10 +220,11 @@ def _provider_segments(item: dict[str, Any]) -> list[dict[str, Any]]:
     five_left = percent(five_remaining)
     # 页面在窗口没用满时不给它自己的重置时间，这不是缺数据。周额度耗尽时 5 小时窗口
     # 有额度也用不了，那一行要说清楚在等谁。
+    # 只有真拿到重置时间才写「重置 …」；拿不到就说明页面这一格没给，不人为推算。
     if fields.get("session_state") == "idle":
         five_note = "会话未开始"
     elif fields.get("reset_at"):
-        five_note = _reset_phrase(fields, "reset_at")
+        five_note = f"重置 {_reset_phrase(fields, 'reset_at')}"
     elif weekly_left is not None and weekly_left <= 0:
         five_note = "等待周额度重置"
     elif five_left is not None and five_left >= 100:
@@ -238,6 +237,7 @@ def _provider_segments(item: dict[str, Any]) -> list[dict[str, Any]]:
         meta.append(f"Credits {fields['credits_remaining']}")
     if status != "healthy":
         meta.append(STATUS_LABELS.get(status, status))
+    weekly_reset = _reset_phrase(fields, "weekly_reset_at")
     return [
         {
             "kind": "text",
@@ -246,13 +246,16 @@ def _provider_segments(item: dict[str, Any]) -> list[dict[str, Any]]:
         {
             "kind": "fields",
             "fields": [
-                {"name": "5 小时", "value": _metric_cell(five_remaining, five_note)},
+                {
+                    "name": "5h",
+                    "value": _metric_cell(five_remaining, five_note, _quota_color(five_left)),
+                },
                 {
                     "name": "周额度",
                     "value": _metric_cell(
                         weekly_remaining,
-                        _reset_phrase(fields, "weekly_reset_at"),
-                        "red" if weekly_left is not None and weekly_left <= 0 else "green",
+                        f"重置 {weekly_reset}" if weekly_reset else "",
+                        _quota_color(weekly_left),
                     ),
                 },
             ],
@@ -391,7 +394,7 @@ async def _capture(page: Any, provider: str) -> dict[str, Any]:
         await _notify(
             "quota.reset",
             f"{label['name']} 周额度已重置",
-            subtitle=f"检测于 {moment:%Y年%-m月%-d日 %H:%M} ({TZ_LABEL})",
+            subtitle=f"检测于 {moment:%Y/%m/%d %H:%M} · {TZ_LABEL}",
             level="warn",
             tags=[{"text": "周额度", "color": label.get("tag_color", "blue")}],
             segments=[
@@ -471,7 +474,7 @@ async def _maybe_daily_report(captured: list[dict[str, Any]]) -> None:
     await _notify(
         "quota.daily_report",
         "AI 额度日报",
-        subtitle=f"统计截至 {stamp:%Y年%-m月%-d日 %H:%M} ({TZ_LABEL})",
+        subtitle=f"截至 {stamp:%Y/%m/%d %H:%M} · {TZ_LABEL}",
         tags=tags,
         segments=segments,
         screenshot_paths=paths,

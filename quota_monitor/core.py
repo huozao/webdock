@@ -226,6 +226,20 @@ def normalize_reset(raw: Any, now: datetime) -> datetime | None:
     return None
 
 
+def countdown_label(minutes: int) -> str:
+    """倒计时文案，英文单位：``6d 21h`` / ``3h 47min`` / ``47min``。
+
+    分钟一律写 ``min`` 不写 ``m``——单个 m 在时间语境里会被读成 month。卡片一格只有半屏
+    宽，中文单位（「6天21小时」）比英文长一半，容易把这一行挤到折行。
+    """
+    days, hours, mins = minutes // 1440, minutes % 1440 // 60, minutes % 60
+    if days:
+        return f"{days}d {hours}h" if hours else f"{days}d"
+    if hours:
+        return f"{hours}h {mins}min" if mins else f"{hours}h"
+    return f"{mins}min"
+
+
 def pick_report_slot(now: datetime, slots: list[str]) -> str | None:
     """选出 ``now`` 所在这一天已经走过的最后一档报表时刻。
 

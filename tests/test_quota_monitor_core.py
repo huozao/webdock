@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from quota_monitor.core import (
     claude_reset_sections,
     codex_reset_sections,
+    countdown_label,
     event_key,
     normalize_reset,
     pick_report_slot,
@@ -230,3 +231,14 @@ def test_report_slots_are_judged_in_the_display_timezone():
     assert pick_report_slot(datetime(2026, 9, 7, 23, 59, tzinfo=sgt), slots) == "20:00"
     assert pick_report_slot(datetime(2026, 9, 7, 7, 59, tzinfo=sgt), slots) is None
     assert pick_report_slot(datetime(2026, 9, 7, 12, 0, tzinfo=sgt), ["nonsense"]) is None
+
+
+def test_countdown_uses_english_units_and_never_bare_m():
+    assert countdown_label(6 * 1440 + 21 * 60) == "6d 21h"
+    assert countdown_label(5 * 1440 + 5 * 60) == "5d 5h"
+    assert countdown_label(3 * 60 + 47) == "3h 47min"
+    assert countdown_label(47) == "47min"
+    assert countdown_label(2 * 60) == "2h"
+    assert countdown_label(3 * 1440) == "3d"
+    # 分钟不得写成单个 m —— 时间语境里会被读成 month
+    assert not re.search(r"\d+m(?!in)\b", countdown_label(3 * 60 + 47))

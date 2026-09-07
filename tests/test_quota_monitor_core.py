@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from quota_monitor.core import (
     claude_reset_sections,
     codex_reset_sections,
     event_key,
     normalize_reset,
+    pick_report_slot,
     record_event_once,
     reset_candidate,
     screenshot_url,
@@ -212,3 +213,20 @@ def test_bare_clock_reset_resolves_to_the_next_occurrence():
     assert normalize_reset("12:30 AM", now) == datetime(2026, 9, 8, 0, 30, tzinfo=timezone.utc)
     # "Oct 1" 不能被当成 1 点
     assert normalize_reset("Oct 1", now) == datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc)
+
+
+def test_report_slots_are_judged_in_the_display_timezone():
+    """08:00/13:00/20:00 必须按展示时区判，不是容器的 UTC。"""
+    slots = ["08:00", "13:00", "20:00"]
+    sgt = timezone(timedelta(hours=8))
+    # 2026-09-06 20:21 UTC —— 按 UTC 判是「晚报」，但那一刻在 SGT 已经是次日 04:21，
+    # 一档都不该发（用户实测收到的就是这条错位的「早报」）。
+    utc_evening = datetime(2026, 9, 6, 20, 21, tzinfo=timezone.utc)
+    assert pick_report_slot(utc_evening, slots) == "20:00"
+    assert pick_report_slot(utc_evening.astimezone(sgt), slots) is None
+
+    assert pick_report_slot(datetime(2026, 9, 7, 8, 5, tzinfo=sgt), slots) == "08:00"
+    assert pick_report_slot(datetime(2026, 9, 7, 13, 0, tzinfo=sgt), slots) == "13:00"
+    assert pick_report_slot(datetime(2026, 9, 7, 23, 59, tzinfo=sgt), slots) == "20:00"
+    assert pick_report_slot(datetime(2026, 9, 7, 7, 59, tzinfo=sgt), slots) is None
+    assert pick_report_slot(datetime(2026, 9, 7, 12, 0, tzinfo=sgt), ["nonsense"]) is None

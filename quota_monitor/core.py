@@ -226,6 +226,24 @@ def normalize_reset(raw: Any, now: datetime) -> datetime | None:
     return None
 
 
+def pick_report_slot(now: datetime, slots: list[str]) -> str | None:
+    """选出 ``now`` 所在这一天已经走过的最后一档报表时刻。
+
+    ⚠️ ``now`` 必须带**展示时区**。容器跑在 UTC，按容器本地时间判会让 08:00/13:00/20:00
+    三档落到 16:00/21:00/04:00 (SGT)——2026-09-06 那条「早报」是次日 04:21 才到的。
+    """
+    slot = None
+    for item in slots:
+        try:
+            hour, minute = (int(value) for value in item.split(":", 1))
+            candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        except (TypeError, ValueError):
+            continue
+        if now >= candidate:
+            slot = item
+    return slot
+
+
 def event_key(provider: str, fields: dict[str, Any]) -> str:
     marker = (fields.get("weekly_reset_at") or fields.get("reset_at") or
               fields.get("weekly_remaining") or fields.get("remaining") or "unknown")

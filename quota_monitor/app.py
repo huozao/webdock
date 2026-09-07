@@ -25,6 +25,7 @@ from .core import (
     event_key,
     normalize_reset,
     percent,
+    pick_report_slot,
     record_event_once,
     weekly_reset_candidate,
 )
@@ -38,9 +39,10 @@ SCREENSHOT_DIR = DATA_DIR / "screenshots"
 POLL_MIN = float(os.getenv("QUOTA_POLL_MINUTES_MIN", "20"))
 POLL_MAX = float(os.getenv("QUOTA_POLL_MINUTES_MAX", "30"))
 PAGE_SETTLE_SECONDS = float(os.getenv("QUOTA_PAGE_SETTLE_SECONDS", "5"))
-# 容器跑在 UTC（页面也就按 UTC 渲染），但卡片是在 CST 里读的。展示时区只影响文案，
-# 判定一律用归一化后的绝对时间。
-DISPLAY_TZ = os.getenv("QUOTA_DISPLAY_TZ", "Asia/Shanghai")
+# 容器跑在 UTC（页面也就按 UTC 渲染），但卡片和报表时刻都按这个时区走。
+# 值的判定一律用归一化后的绝对时间，展示时区只决定「几点算早报」和文案怎么写。
+DISPLAY_TZ = os.getenv("QUOTA_DISPLAY_TZ", "Asia/Singapore")
+TZ_LABEL = os.getenv("QUOTA_TZ_LABEL", "SGT")
 
 PROVIDERS = {
     "codex": "https://chatgpt.com/codex/cloud/settings/usage",
@@ -361,7 +363,7 @@ async def _capture(page: Any, provider: str) -> dict[str, Any]:
         await _notify(
             "quota.reset",
             f"{label['name']} 周额度已重置",
-            subtitle=f"检测于 {moment:%Y年%-m月%-d日 %H:%M} (CST)",
+            subtitle=f"检测于 {moment:%Y年%-m月%-d日 %H:%M} ({TZ_LABEL})",
             level="warn",
             tags=[{"text": "周额度", "color": label.get("tag_color", "blue")}],
             segments=[{
@@ -414,22 +416,18 @@ _last_report_key = ""
 async def _maybe_daily_report(captured: list[dict[str, Any]]) -> None:
     global _last_report_key
     slots = [item.strip() for item in os.getenv("QUOTA_REPORT_TIMES", "08:00,13:00,20:00").split(",")]
-    now = datetime.now().astimezone()
-    slot = None
-    for item in slots:
-        try:
-            hour, minute = (int(value) for value in item.split(":", 1))
-            candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        except (TypeError, ValueError):
-            continue
-        if now >= candidate:
-            slot = item
+    # ⚠️ 该写法自 2026-09-07 起改正：这里原本取 datetime.now().astimezone()，容器没设 TZ
+    # 就是 UTC，于是 08:00/13:00/20:00 三档实际落在 16:00/21:00/04:00 (SGT)——文档写的
+    # 「早/中/晚」，收到的却是下午、深夜和凌晨（09-06 那条日报 20:00 档 04:21 才到）。
+    # 报表时刻必须按展示时区判，日期键同理，否则跨零点还会多发一次。
+    now = datetime.now(tz=_display_tz())
+    slot = pick_report_slot(now, slots)
     key = f"{now.date()}:{slot}" if slot else ""
     if not slot or key == _last_report_key:
         return
     _last_report_key = key
     paths = [item["screenshot_path"] for item in captured if item.get("screenshot_path")]
-    stamp = datetime.now(tz=_display_tz())
+    stamp = now
     segments = [_provider_section(item) for item in captured]
     unhealthy = [item["provider"] for item in captured if item.get("status") != "healthy"]
     if unhealthy:
@@ -445,7 +443,7 @@ async def _maybe_daily_report(captured: list[dict[str, Any]]) -> None:
     await _notify(
         "quota.daily_report",
         "AI 额度日报",
-        subtitle=f"统计截至 {stamp:%Y年%-m月%-d日 %H:%M} (CST)",
+        subtitle=f"统计截至 {stamp:%Y年%-m月%-d日 %H:%M} ({TZ_LABEL})",
         tags=tags,
         segments=segments,
         screenshot_paths=paths,

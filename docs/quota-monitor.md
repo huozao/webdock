@@ -60,7 +60,17 @@
 
 <!-- nav-check-python: quota_monitor/core.py:normalize_reset -->
 
-`QUOTA_DISPLAY_TZ`（默认 `Asia/Shanghai`）只影响飞书卡片里的文案渲染，不参与任何判定。
+`QUOTA_DISPLAY_TZ`（默认 `Asia/Singapore`）决定卡片文案和**报表时刻按哪个时区判**，
+`QUOTA_TZ_LABEL`（默认 `SGT`）只是副标题里那个括号。两者都不参与额度判定——判定一律用
+归一化后的绝对时间。
+
+⚠️ **`QUOTA_REPORT_TIMES` 的三档必须按展示时区判，不能按容器本地时间。** 该写法自
+2026-09-07 起改正：此前取 `datetime.now().astimezone()`，容器没设 `TZ` 就是 UTC，
+于是 `08:00,13:00,20:00` 实际落在 **16:00 / 21:00 / 04:00 (SGT)**——文档写的「早/中/晚」，
+收到的却是下午、深夜和凌晨（`notify_outbox` 里 `quota:daily_report:2026-09-06:20:00`
+那条是次日 04:21 才发出的）。判据抽在 `pick_report_slot`，`now` 必须带展示时区。
+
+<!-- nav-check-python: quota_monitor/core.py:pick_report_slot -->
 
 ## 通知规则
 

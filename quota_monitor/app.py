@@ -165,7 +165,11 @@ def _with_absolute_resets(fields: dict[str, Any]) -> dict[str, Any]:
 
 
 def _reset_phrase(fields: dict[str, Any], key: str) -> str:
-    """渲染成「9/7 10:24（约 3 小时 40 分钟后）」；认不出来就原样回显，不猜。"""
+    """渲染成「16:40 · 4小时22分后」；认不出来就原样回显，不猜。
+
+    移动端卡片一格只有半屏宽，文案每长一个字就更容易折行，所以同一天省掉日期、
+    括号和「约」字都省掉。
+    """
     raw = str(fields.get(key) or "").strip()
     iso = fields.get(f"{key}_iso")
     if not iso:
@@ -175,22 +179,42 @@ def _reset_phrase(fields: dict[str, Any], key: str) -> str:
     except ValueError:
         return raw
     now = datetime.now(tz=_display_tz())
+    stamp = f"{moment:%H:%M}" if moment.date() == now.date() else f"{moment:%-m/%-d %H:%M}"
     minutes = int((moment - now).total_seconds() // 60)
     if minutes <= 0:
-        return f"{moment:%-m/%-d %H:%M}（应已重置）"
+        return f"{stamp} · 应已重置"
     days, hours, mins = minutes // 1440, minutes % 1440 // 60, minutes % 60
-    ahead = "".join(part for part in (f"{days}天" if days else "", f"{hours}小时" if hours else "", f"{mins}分钟" if not days else "") if part)
-    return f"{moment:%-m/%-d %H:%M}（约 {ahead}后）"
+    if days:
+        ahead = f"{days}天{hours}小时" if hours else f"{days}天"
+    elif hours:
+        ahead = f"{hours}小时{mins}分" if mins else f"{hours}小时"
+    else:
+        ahead = f"{mins}分"
+    return f"{stamp} · {ahead}后"
 
 
-def _provider_section(item: dict[str, Any]) -> dict[str, Any]:
-    """一个平台一个区块：左列平台名，右侧两列是指标名和指标值（与流量日报同排版）。"""
+def _metric_cell(remaining: Any, note: str, color: str = "") -> str:
+    """一格里三行：指标名（由 fields 渲染）、数值、灰色副信息。"""
+    if remaining is None:
+        return "暂无数据"
+    head = f"<font color='{color}'>**{remaining}**</font>" if color else f"**{remaining}**"
+    return head + f"\n<font color='grey'>{note}</font>" if note else head
+
+
+def _provider_segments(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """一个平台两段：一行标题 + 一行两格指标。
+
+    ⚠️ 不要用 ``section`` 三列排这个。中枢的 section 把指标名和指标值各拼成**一个**
+    markdown 块靠行数对齐，值一旦折行两列就整体错位——2026-09-07 实测卡片里
+    「Credits」对到了上一行的值上。流量日报不出问题是因为它的值短到不折行，而额度
+    这边「85% 剩余 · 9/14 10:33 · 6天22小时后」在半屏宽下必然折行。``fields`` 的每一
+    格是独立 column，折行只会让那一格变高，不会牵动邻格。
+    """
     provider = item["provider"]
     label = PROVIDER_LABELS.get(provider, {"name": provider, "icon": "•", "color": "grey"})
     fields = item.get("fields") or {}
     status = item.get("status", "stale")
     captured = datetime.fromisoformat(item["captured_at"]).astimezone(_display_tz())
-    rows: list[dict[str, str]] = []
 
     weekly_remaining = fields.get("weekly_remaining")
     weekly_left = percent(weekly_remaining)
@@ -208,32 +232,32 @@ def _provider_section(item: dict[str, Any]) -> dict[str, Any]:
         five_note = "额度充足"
     else:
         five_note = ""
-    rows.append({
-        "name": "5 小时",
-        "value": f"**{five_remaining}** 剩余" + (f" · {five_note}" if five_note else "") if five_remaining else "暂无数据",
-    })
 
-    weekly_note = _reset_phrase(fields, "weekly_reset_at")
-    if weekly_remaining is None:
-        weekly_value = "暂无数据"
-    else:
-        color = "red" if weekly_left is not None and weekly_left <= 0 else "green"
-        weekly_value = f"<font color='{color}'>**{weekly_remaining}**</font> 剩余" + (f" · {weekly_note}" if weekly_note else "")
-    rows.append({"name": "周额度", "value": weekly_value})
-
-    if fields.get("credits_remaining"):
-        rows.append({"name": "Credits", "value": str(fields["credits_remaining"])})
+    meta = [f"{captured:%H:%M} 采集"]
+    if fields.get("credits_remaining") is not None:
+        meta.append(f"Credits {fields['credits_remaining']}")
     if status != "healthy":
-        rows.append({"name": "状态", "value": f"<font color='red'>{STATUS_LABELS.get(status, status)}</font>"})
-
-    return {
-        "kind": "section",
-        "section_title": label["name"],
-        "section_icon": label["icon"],
-        "section_color": label["color"],
-        "section_subtitle": f"{captured:%H:%M} 采集",
-        "fields": rows,
-    }
+        meta.append(STATUS_LABELS.get(status, status))
+    return [
+        {
+            "kind": "text",
+            "text": f"**{label['icon']} {label['name']}**　<font color='grey'>{' · '.join(meta)}</font>",
+        },
+        {
+            "kind": "fields",
+            "fields": [
+                {"name": "5 小时", "value": _metric_cell(five_remaining, five_note)},
+                {
+                    "name": "周额度",
+                    "value": _metric_cell(
+                        weekly_remaining,
+                        _reset_phrase(fields, "weekly_reset_at"),
+                        "red" if weekly_left is not None and weekly_left <= 0 else "green",
+                    ),
+                },
+            ],
+        },
+    ]
 
 
 async def _notify(event: str, title: str, *, summary: str = "", subtitle: str = "",
@@ -353,12 +377,16 @@ async def _capture(page: Any, provider: str) -> dict[str, Any]:
               "captured_at": captured_at, "reset_detected": reset_detected}
     if reset_detected:
         label = PROVIDER_LABELS.get(provider, {"name": provider, "icon": "•", "color": "grey"})
-        rows = [{"name": "剩余", "value": f"<font color='green'>**{fields.get('weekly_remaining', '未知')}**</font>"}]
-        if old_fields.get("weekly_remaining"):
-            rows.append({"name": "重置前", "value": str(old_fields["weekly_remaining"])})
+        # 与日报同样的理由：值会折行，不能用靠行数对齐的 section 三列。
+        cells = [{
+            "name": "剩余",
+            "value": f"<font color='green'>**{fields.get('weekly_remaining', '未知')}**</font>"
+                     + (f"\n<font color='grey'>重置前 {old_fields['weekly_remaining']}</font>"
+                        if old_fields.get("weekly_remaining") else ""),
+        }]
         next_reset = _reset_phrase(fields, "weekly_reset_at")
         if next_reset:
-            rows.append({"name": "下次重置", "value": next_reset})
+            cells.append({"name": "下次重置", "value": f"**{next_reset}**"})
         moment = datetime.fromisoformat(captured_at).astimezone(_display_tz())
         await _notify(
             "quota.reset",
@@ -366,10 +394,10 @@ async def _capture(page: Any, provider: str) -> dict[str, Any]:
             subtitle=f"检测于 {moment:%Y年%-m月%-d日 %H:%M} ({TZ_LABEL})",
             level="warn",
             tags=[{"text": "周额度", "color": label.get("tag_color", "blue")}],
-            segments=[{
-                "kind": "section", "section_title": "周额度", "section_icon": "♻️",
-                "section_color": "green", "section_subtitle": label["name"], "fields": rows,
-            }],
+            segments=[
+                {"kind": "text", "text": f"**♻️ {label['name']} 周额度**"},
+                {"kind": "fields", "fields": cells},
+            ],
             screenshot_paths=[screenshot_path] if screenshot_path else [],
             dedup_key=f"quota:weekly_reset:{provider}:{fields.get('weekly_reset_at','')}",
         )
@@ -428,7 +456,7 @@ async def _maybe_daily_report(captured: list[dict[str, Any]]) -> None:
     _last_report_key = key
     paths = [item["screenshot_path"] for item in captured if item.get("screenshot_path")]
     stamp = now
-    segments = [_provider_section(item) for item in captured]
+    segments = [seg for item in captured for seg in _provider_segments(item)]
     unhealthy = [item["provider"] for item in captured if item.get("status") != "healthy"]
     if unhealthy:
         segments.append({

@@ -94,3 +94,28 @@ curl -X POST http://127.0.0.1:18000/browser/attach \
 ```bash
 sudo systemctl stop webdock
 ```
+
+## Windows 桌面 TightVNC 光标不可见
+
+适用入口：`webdock2` Windows 桌面（Windows TightVNC :5900，经 WSL
+websockify/noVNC 暴露）。2026-09-04 实测症状是远程点击和右键菜单均正常，但
+noVNC 画面看不到鼠标；`tvnserver` 2.8.85、服务状态和 1920x1080 桌面均正常。
+物理鼠标插入后设备枚举出现 `HID\VID_10C4&PID_0005` 且状态为 `OK`；同时仍有若干
+旧 HID 项为 `Unknown`、ACPI PS/2 项为 `Error`，可作为设备侧异常线索。
+
+先区分“光标不可见”和“鼠标输入失效”：在桌面空白处右键能弹出菜单，说明远程
+输入链路仍通。该次最终恢复原因是**插入物理鼠标后光标立即显示**，因此根因归为
+Windows 侧物理输入设备/指针呈现状态，而不是 WebDock 容器或 TightVNC 隧道。
+
+排障时可只读检查：
+
+```powershell
+Get-Service tvnserver
+Get-PnpDevice -Class Mouse
+```
+
+本次还观察到 Admin 用户的光标注册表路径曾为空、桌面背景为纯黑；曾尝试恢复
+标准 `aero_*.cur/.ani`、放大白色箭头并执行 TightVNC `-reload`，但这些措施不能
+作为已确认根因或必需修复。若要尝试注册表修复，先导出当前键并保留回滚文件；
+不要为此重启 WebDock 容器。确认方案仍是检查/重新插拔物理鼠标或接收器，再重新
+连接桌面验证光标。

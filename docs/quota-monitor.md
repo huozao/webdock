@@ -184,3 +184,36 @@ quota-monitor 随独立仓库 `huozao/ai-quota-monitor` 的 `main` 不可变镜�
 ⚠️ **跨仓发版顺序**：卡片用到中枢的新字段时（如 `NotifyField.note`），必须
 **AliECS backend 先上线**。旧模型对多余字段是 pydantic 默认的静默忽略，先上 webdock
 的后果不是「样式没生效」而是**那一行整个消失**（2026-09-07 在生产容器里实测过）。
+
+## 交接快照（2026-09-08）
+
+- 采集器源码、Dockerfile、测试和独立 compose 已迁至公开仓库
+  `https://github.com/huozao/ai-quota-monitor`，当前 main=`1ef318f`；CI 与 release
+  均成功，生产镜像为 `ghcr.io/huozao/ai-quota-monitor:sha-1ef318f5aaa8eb13ed8393dee4e9f9a720ff3aca`。
+- webdock2 当前 `quota-monitor` 使用上述独立镜像，状态 `healthy`；复用
+  `/var/lib/webdock/quota_browser_data`（登录态）、`/var/lib/webdock/quota_data`
+  （SQLite 与 screenshots）和 `/var/log/webdock/quota-monitor`。现场回读为 210 条采集，
+  时间范围 2026-09-06 至 2026-09-08，未有数据需要清理。
+- `QUOTA_RETENTION_DAYS=7` 已在生产容器生效；清理在每轮采集后执行，删除过期
+  `captures` 行及其截图，不删除浏览器 profile、`quota_events` 或 `quota_meta`。
+- `/console/quota/` 曾因 txecs 静态页为 `root:root 0640` 返回 403；已修为
+  `root:www-data 0640`，`www-data` 可读，未登录探测返回预期 Authelia 302。对应
+  infra 提交为 `f00b69b`，现场已直接修复；之后若重新渲染，依赖
+  `roles/server/tencent/apply.sh` 中的 `chown root:www-data`。
+- WebDock 集成清单提交 `71a8f35`：保留 `quota-monitor` 兼容 service，但镜像改为
+  `QUOTA_IMAGE`，不再从 WebDock Dockerfile 构建。webdock2 的 `/opt/webdock` 是无 Git
+  的部署副本，已用该提交的 raw 文件更新；不要对它执行 git pull/reset。
+- 生产切换未重建主 `webdock` 容器，未清空数据或要求重新登录。后续升级只替换
+  `quota-monitor`，执行前先 pull 独立仓库镜像，再 `docker compose ... up -d --no-build quota-monitor`。
+
+### 交接时先核验
+
+```bash
+ssh webdock2 "wsl -d Ubuntu-24.04-WebDock -- docker inspect quota-monitor --format '{{.Config.Image}} {{.State.Health.Status}}'"
+ssh webdock2 "wsl -d Ubuntu-24.04-WebDock -- docker exec quota-monitor python -c 'import sqlite3; c=sqlite3.connect(\"/app/quota_data/quota.sqlite3\"); print(c.execute(\"select count(*),min(captured_at),max(captured_at) from captures\").fetchone())'"
+ssh txecs "sudo stat -c '%A %a %U:%G %n' /usr/local/share/site-entry/console-quota.html"
+```
+
+认证页面的无 cookie `curl` 只能证明 Authelia 302；要证明用户界面，需在已登录浏览器
+中打开 `/console/quota/`，或核对 nginx access log 中的 200。不要把真实 SQLite、截图、
+浏览器 profile、Token 或生产 `.env` 放入公开仓库。

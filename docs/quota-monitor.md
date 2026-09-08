@@ -101,6 +101,28 @@ ssh txecs "sudo docker exec business-cn-postgres-1 psql -U app -d app -c \"selec
 那条是次日 04:21 才发出的）。判据抽在 `pick_report_slot`，`now` 必须带展示时区。
 
 
+## 观察位：X @thsottiaux（2026-09-08 起）
+
+Codex 的重置常在这个账号先放出来，比额度页早。观察位与两个额度页**共用同一轮采集**，
+provider 名是 `x-<账号>`，页面文字、帖子列表和截图一起进 `captures`，沿用同一套 7 天保留。
+
+- 帖子逐条取自 `article[data-testid='tweet']`。⚠️ **不要从 body 文本里切**：时间线是虚拟
+  列表，正文、转发说明、引用卡片和「显示更多」在纯文本里连成一片，既切不出边界也拿不到
+  永久链接。
+- 去重键是 **status id**，不是整条 URL——同一条帖子的链接会带 `/photo/1`、`/analytics`
+  等后缀，按 URL 去重会重复推送。事件落在 `quota_events`，采集明细过期被清也不会重推。
+- 推送口径：命中 `QUOTA_X_KEYWORDS`（默认 `reset,limit,quota,credit`）**且**在
+  `QUOTA_X_MAX_AGE_HOURS`（默认 24）内的新帖才发飞书。⚠️ 缺年龄闸门时首次上线会把整条
+  时间线的历史帖一次性推出来。不命中的帖子照样入库，在 console 卡片上看得到。
+- `QUOTA_X_ACCOUNT` 置空即关闭该采集；这三个键都有代码默认值，compose 里不需要显式给。
+- 标签匹配对观察位单独写（`_find_page`）：provider 名里的单字母 `x` 会命中任何含 x 的 URL，
+  观察位按 `x.com` 域名找已开着的标签页，找不到才新开。
+- 日报里观察位是**单独一行**，不进 `_provider_segments`（那是 5h+周额度两格排版，
+  传一条没有额度字段的记录进去会渲染成两格「暂无数据」）。24h 内没有命中时也会写一句
+  「无重置相关动态」——完全不渲染的话，采集挂了在日报上看不出来。
+- console 第三张卡片只渲染**最新一次采集**里的帖子：每轮采集都会重复同样几条，按采集
+  堆叠会把同一条帖子刷成几十遍。
+
 ## 通知规则
 
 - 早/中/晚日报照常发送。⚠️ **「本日已发到哪一档」落在 sqlite 的 `quota_meta` 表**，不是
@@ -109,6 +131,7 @@ ssh txecs "sudo docker exec business-cn-postgres-1 psql -U app -d app -c \"selec
   `SELECT value FROM quota_meta WHERE key='last_daily_report'`，再看 `notify_outbox`
   有没有多出同 dedup_key 的行。
 - `quota.reset` **只由周额度变化触发**；5 小时窗口恢复不发送飞书通知。
+- `quota.x_post` 一条帖子一张卡，`dedup_key` 用 status id；正文按 300 字截断，看全文点原帖。
 - 周额度判定使用 `weekly_remaining` / `weekly_reset_at`，要求前后均为健康采集，
   并通过 `quota_events` 去重。
 - ⚠️ **重置时间字符串变了不足以判重置**，必须同时看到剩余额度回升。2026-09-07 因为上面那个

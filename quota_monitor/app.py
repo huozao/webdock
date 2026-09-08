@@ -10,7 +10,7 @@ import re
 import sqlite3
 import time
 import urllib.request
-from datetime import datetime, timezone, tzinfo
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -42,6 +42,10 @@ SCREENSHOT_DIR = DATA_DIR / "screenshots"
 POLL_MIN = float(os.getenv("QUOTA_POLL_MINUTES_MIN", "20"))
 POLL_MAX = float(os.getenv("QUOTA_POLL_MINUTES_MAX", "30"))
 PAGE_SETTLE_SECONDS = float(os.getenv("QUOTA_PAGE_SETTLE_SECONDS", "5"))
+try:
+    RETENTION_DAYS = max(1, int(os.getenv("QUOTA_RETENTION_DAYS", "7")))
+except ValueError:
+    RETENTION_DAYS = 7
 # 容器跑在 UTC（页面也就按 UTC 渲染），但卡片和报表时刻都按这个时区走。
 # 值的判定一律用归一化后的绝对时间，展示时区只决定「几点算早报」和文案怎么写。
 DISPLAY_TZ = os.getenv("QUOTA_DISPLAY_TZ", "Asia/Singapore")
@@ -76,6 +80,30 @@ def _db() -> sqlite3.Connection:
     )
     conn.commit()
     return conn
+
+
+def _prune_expired(conn: sqlite3.Connection, *, now: datetime | None = None) -> int:
+    """删除超过保留期的采集记录及其截图，避免历史卷无限增长。"""
+    moment = now or datetime.now(timezone.utc)
+    cutoff = (moment.astimezone(timezone.utc) - timedelta(days=RETENTION_DAYS)).isoformat()
+    rows = conn.execute(
+        "SELECT id, screenshot_path FROM captures WHERE captured_at < ?", (cutoff,)
+    ).fetchall()
+    screenshot_root = SCREENSHOT_DIR.resolve()
+    for row in rows:
+        raw_path = row["screenshot_path"]
+        if not raw_path:
+            continue
+        try:
+            path = Path(raw_path).resolve()
+            if path.parent == screenshot_root and path.is_file():
+                path.unlink()
+        except OSError:
+            LOG.warning("failed to remove expired screenshot capture_id=%s", row["id"])
+    if rows:
+        conn.execute("DELETE FROM captures WHERE captured_at < ?", (cutoff,))
+        conn.commit()
+    return len(rows)
 
 
 def _parse(provider: str, text: str) -> tuple[dict[str, Any], float, str]:
@@ -374,13 +402,14 @@ async def _capture(page: Any, provider: str) -> dict[str, Any]:
          confidence, str(screenshot_path) if screenshot_path else None, digest, error, reset_key),
     )
     conn.commit()
+    pruned = _prune_expired(conn)
     if reset_detected:
         reset_detected = record_event_once(
             conn, event_key(provider, {"weekly_reset_at": fields.get("weekly_reset_at"), "weekly_remaining": fields.get("weekly_remaining")}), provider, captured_at,
             {"provider": provider, "fields": fields, "screenshot_sha256": digest},
         )
     conn.close()
-    LOG.info("capture provider=%s status=%s confidence=%.2f screenshot=%s", provider, status, confidence, bool(digest))
+    LOG.info("capture provider=%s status=%s confidence=%.2f screenshot=%s pruned=%d", provider, status, confidence, bool(digest), pruned)
     result = {"provider": provider, "status": status, "fields": fields, "screenshot_path": screenshot_path,
               "captured_at": captured_at, "reset_detected": reset_detected}
     if reset_detected:

@@ -45,6 +45,9 @@ ssh txecs "sudo docker exec business-cn-postgres-1 psql -U app -d app -c \"selec
 ## 采集与展示
 
 - 默认每 20–30 分钟随机采集一次，保留原始页面文字和 PNG 截图。
+- 历史采集按 `QUOTA_RETENTION_DAYS` 清理，默认保留 7 天；每轮采集后删除过期的
+  `captures` 记录及其对应截图。`quota_events` / `quota_meta` 只保存去重和日报状态，
+  体积很小，不随采集明细增长。
 - console 卡片分别展示 5 小时限额、周限额、剩余/已用、绝对重置时间和倒计时；
   截图是解析异常时的最后证据。
 - Codex 页面若没有单独提供 5 小时重置时间且剩余为 100%，展示“无需等待（额度充足）”，

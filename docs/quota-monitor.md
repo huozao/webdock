@@ -157,6 +157,25 @@ column，折行只让那一格变高，不牵动邻格；顺带每格宽度从 5
   随后 websockify 反复报 `localhost:5902 connection refused`。当前 entrypoint 会等待
   `/tmp/.X11-unix/X101` 就绪后才启动 x11vnc。
 
+### 截图超时：静止页面的渲染器不产帧（2026-09-08）
+
+现象：console 的 codex 那一列全是碎图，状态写着 `network_error`，而数值明明是对的。
+`captures.error` 里是 `TimeoutError: Page.screenshot: Timeout 30000ms exceeded`，
+call log 停在 `fonts loaded`。当天 09:04 UTC 起连续 8 轮全挂，claude 侧毫发无损。
+
+⚠️ **`page.reload()` 救不回来**——每轮采集都先 reload 再截图，照样超时。判据取自现场探针：
+codex 页 `document.getAnimations()` 为 0，空闲后第一次截图必超时；先做一次
+`bring_to_front` + 指针移动 + 1px 滚动回滚，同一张图 0.1s 就返回，之后连续成功。
+claude 页有 5 个常驻动画一直在产帧，所以从没触发过。触发点是当天有人在这个浏览器里
+新开了标签并切走——**这个环境下四个标签的 `document.visibilityState` 全是 `visible`**
+（Xvfb 无窗口管理器），所以从页面侧看不出谁在前台，别拿 visibilityState 当判据。
+
+修复在采集器侧（`_force_repaint` / `_screenshot`）：截图前强制产帧、超时 15s、失败重试一次。
+⚠️ 更要紧的是**截图不再与解析共用一个 `try`**：此前截图超时会把整条采集写成
+`network_error`，而 `weekly_reset_candidate` 要求前后两次都 healthy——**codex 的周额度
+重置告警因此被静默停用**，看板和日报上只表现为「网络错误」。截图失败现在只记
+`screenshot_error`，`screenshot_path` 存 NULL，`screenshot_url` 只在文件真实存在时下发。
+
 ## 发布
 
 quota-monitor 随独立仓库 `huozao/ai-quota-monitor` 的 `main` 不可变镜像发布；生产 compose
@@ -164,13 +183,16 @@ quota-monitor 随独立仓库 `huozao/ai-quota-monitor` 的 `main` 不可变镜�
 
 完整一轮（2026-09-07 走过六次，每一步都有判据）：
 
-1. webdock 直推 `main`（**推前本地 `pytest` 必须过**，本仓 CI 不拦直推）。
+1. `ai-quota-monitor` 直推 `main`（**推前本地 `pytest` 必须过**，本仓 CI 不拦直推）。
 2. 等 **release** run 出镜像。⚠️ 同一个 commit 会同时触发 `ci` 和 `release` 两个 run，
    `gh run list --limit 1` 常常给的是 `ci`——它只有 `test` 一个 job，绿了也**没有镜像**。
-   判据：`gh run view <id> --json jobs` 里必须看到 `build-push: success`
-   （`mirror-to-tcr: skipped` 属常态）。
-3. `sops set secrets/webdock2.enc.env '["WEBDOCK_IMAGE"]' '"ghcr.io/huozao/webdock:sha-<完整40位>"'`。
+   判据：`gh run view <id> --json jobs` 里必须看到 `build-push: success`。
+   ⚠️ 构建耗时**别按 9 分钟估**：Dockerfile 的 apt 源指向 `mirrors.aliyun.com`，
+   GitHub runner 从境外拉这个镜像站很慢，workflow 也没配 layer cache，
+   2026-09-08 那次跑了 30 分钟以上。
+3. `sops set secrets/webdock2.enc.env '["QUOTA_IMAGE"]' '"ghcr.io/huozao/ai-quota-monitor:sha-<完整40位>"'`。
    ⚠️ 用完整 SHA，别照着短 SHA 手拼——拼错了会 pin 到一个不存在的 tag。
+   （webdock 主容器的镜像是另一个键 `WEBDOCK_IMAGE`，别改错。）
 4. infra 推 origin + 三个 device bare，然后设备上
    `sudo -u webdock git -C /home/webdock/infra pull --ff-only origin main`
    （webdock2 已改直拉 GitHub，见 `infra/roles/webdock/README.md`〈设备直拉 GitHub〉）。
@@ -180,6 +202,15 @@ quota-monitor 随独立仓库 `huozao/ai-quota-monitor` 的 `main` 不可变镜�
    `up -d --no-build quota-monitor`——**只重建这一个容器，别动 webdock 主容器**。
 7. 判据三件套：`docker inspect --format '{{.Config.Image}}' quota-monitor` 的 tag 变了、
    容器内 `grep` 到本次新增的函数名、等一轮采集看 `captures` 里新行的字段。
+
+⚠️ **不要用命令行临时传 env 起这个容器。** 2026-09-08 实测的后果有三层，且全都静默：
+`QUOTA_IMAGE` 不在 sops 里时 compose 默认退回 `:latest`（跑的是哪个 commit 说不清）；
+`NOTIFY_ENDPOINT` 漏了就是**飞书日报和重置告警全部停发**——`_notify()` 端点为空直接
+return，而 `quota_meta.last_daily_report` 照样落库，那一档**不会补发**；
+`QUOTA_PUBLIC_LINK` / `QUOTA_PUBLIC_API_PREFIX` 漏了则卡片链接为空、看板截图 404。
+这三个键自 2026-09-08 起分别落在 sops（`QUOTA_IMAGE`）和 `deploy/laptop/compose.yml`
+（其余两个有默认值），照上面的 `--env-file` 路径重建即可，判据是重建后
+`docker inspect` 里这三个 env 都非空。
 
 ⚠️ **跨仓发版顺序**：卡片用到中枢的新字段时（如 `NotifyField.note`），必须
 **AliECS backend 先上线**。旧模型对多余字段是 pydantic 默认的静默忽略，先上 webdock

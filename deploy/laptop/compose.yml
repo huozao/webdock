@@ -94,6 +94,11 @@ services:
       QUOTA_PAGE_SETTLE_SECONDS: ${QUOTA_PAGE_SETTLE_SECONDS:-5}
       QUOTA_RETENTION_DAYS: ${QUOTA_RETENTION_DAYS:-7}
       QUOTA_REPORT_TIMES: ${QUOTA_REPORT_TIMES:-08:00,13:00,20:00}
+      # 看板与飞书卡片的对外地址。⚠️ 缺这两个的后果不是样式问题：PUBLIC_LINK 为空时
+      # 卡片「查看额度历史」指向空 URL，API_PREFIX 决定 latest/history 里下发的
+      # screenshot_url 前缀，写错了看板的截图全是 404。
+      QUOTA_PUBLIC_API_PREFIX: ${QUOTA_PUBLIC_API_PREFIX:-/console/quota/api}
+      QUOTA_PUBLIC_LINK: ${QUOTA_PUBLIC_LINK:-https://hydwang.xyz/console/quota/}
       NOTIFY_ENDPOINT: ${NOTIFY_ENDPOINT:-http://host.docker.internal:18020/v1/internal/notify/send}
       NOTIFY_SOURCE_TOKEN: ${NOTIFY_SOURCE_TOKEN:-}
     entrypoint: ["/app/docker/quota-entrypoint.sh"]

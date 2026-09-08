@@ -15,6 +15,20 @@ def test_laptop_compose_keeps_ports_private_by_default():
     assert "${HOST_LOGS_DIR:-/var/log/webdock}:/app/logs" in compose
 
 
+def test_laptop_compose_gives_quota_monitor_its_public_addresses():
+    """看板与飞书卡片的对外地址必须在 compose 里给默认值。
+
+    ⚠️ 2026-09-08 实测：生产容器是命令行临时传 env 起的，这两个键不在 compose 里，
+    照着本文件的 compose 重建容器就会丢——卡片「查看额度历史」链接变空，
+    latest/history 下发的 screenshot_url 也失去 /console 前缀。
+    """
+    compose = (ROOT / "deploy/laptop/compose.yml").read_text(encoding="utf-8")
+
+    assert "QUOTA_PUBLIC_API_PREFIX: ${QUOTA_PUBLIC_API_PREFIX:-/console/quota/api}" in compose
+    assert "QUOTA_PUBLIC_LINK: ${QUOTA_PUBLIC_LINK:-https://hydwang.xyz/console/quota/}" in compose
+    assert "image: ${QUOTA_IMAGE:-ghcr.io/huozao/ai-quota-monitor:latest}" in compose
+
+
 def test_laptop_env_example_uses_safe_defaults():
     example = (ROOT / "deploy/laptop/.env.example").read_text(encoding="utf-8")
 

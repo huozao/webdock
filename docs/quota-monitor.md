@@ -180,6 +180,14 @@ column，折行只让那一格变高，不牵动邻格；顺带每格宽度从 5
   随后 websockify 反复报 `localhost:5902 connection refused`。当前 entrypoint 会等待
   `/tmp/.X11-unix/X101` 就绪后才启动 x11vnc。
 
+### 观察位读到 0 条帖子：时间线还没渲染（2026-09-08）
+
+`x-<账号>` 采到 `schema_changed`、看板显示「未读到帖子」、日报挂「采集异常」，但
+`captures.text` 里资料头、关注数、`Posts/Replies` 标签都在——**登录态是好的**，只是 X 的
+虚拟列表还没渲染就被读了（`QUOTA_PAGE_SETTLE_SECONDS` 默认 5 秒对它不够）。判据就是读
+`captures.text`：有资料头没帖子 = 渲染没跟上；整页是登录墙 = 登录态失效。
+现在会先等第一条 `article` 出现（`QUOTA_X_POST_WAIT_SECONDS`，默认 15 秒）再读。
+
 ### 截图超时：静止页面的渲染器不产帧（2026-09-08）
 
 现象：console 的 codex 那一列全是碎图，状态写着 `network_error`，而数值明明是对的。
@@ -239,26 +247,36 @@ return，而 `quota_meta.last_daily_report` 照样落库，那一档**不会补�
 **AliECS backend 先上线**。旧模型对多余字段是 pydantic 默认的静默忽略，先上 webdock
 的后果不是「样式没生效」而是**那一行整个消失**（2026-09-07 在生产容器里实测过）。
 
-## 交接快照（2026-09-08）
+## 交接快照（2026-09-08 晚）
 
-- 采集器源码、Dockerfile、测试和独立 compose 已迁至公开仓库
-  `https://github.com/huozao/ai-quota-monitor`，当前 main=`1ef318f`；CI 与 release
-  均成功，生产镜像为 `ghcr.io/huozao/ai-quota-monitor:sha-1ef318f5aaa8eb13ed8393dee4e9f9a720ff3aca`。
-- webdock2 当前 `quota-monitor` 使用上述独立镜像，状态 `healthy`；复用
-  `/var/lib/webdock/quota_browser_data`（登录态）、`/var/lib/webdock/quota_data`
-  （SQLite 与 screenshots）和 `/var/log/webdock/quota-monitor`。现场回读为 210 条采集，
-  时间范围 2026-09-06 至 2026-09-08，未有数据需要清理。
-- `QUOTA_RETENTION_DAYS=7` 已在生产容器生效；清理在每轮采集后执行，删除过期
-  `captures` 行及其截图，不删除浏览器 profile、`quota_events` 或 `quota_meta`。
-- `/console/quota/` 曾因 txecs 静态页为 `root:root 0640` 返回 403；已修为
-  `root:www-data 0640`，`www-data` 可读，未登录探测返回预期 Authelia 302。对应
-  infra 提交为 `f00b69b`，现场已直接修复；之后若重新渲染，依赖
-  `roles/server/tencent/apply.sh` 中的 `chown root:www-data`。
-- WebDock 集成清单提交 `71a8f35`：保留 `quota-monitor` 兼容 service，但镜像改为
-  `QUOTA_IMAGE`，不再从 WebDock Dockerfile 构建。webdock2 的 `/opt/webdock` 是无 Git
-  的部署副本，已用该提交的 raw 文件更新；不要对它执行 git pull/reset。
-- 生产切换未重建主 `webdock` 容器，未清空数据或要求重新登录。后续升级只替换
-  `quota-monitor`，执行前先 pull 独立仓库镜像，再 `docker compose ... up -d --no-build quota-monitor`。
+⚠️ **这一节是时间点快照，判据只在写下的那一刻成立**；接手时先跑下面〈交接时先核验〉那三条，
+以现场为准，不要拿本节的 SHA 和条数当现状。
+
+- 采集器仓 `huozao/ai-quota-monitor` 已迁进工作区
+  `~/src/AliECS-WebDock/ai-quota-monitor`（旧路径 `~/src/ai-quota-monitor` 留了兼容软链）。
+  当天 main=`65f4175`。
+- **生产镜像 pin 在 `sha-031cdfba…`，不是 main 头**——031cdfb 之后的提交只动 CI/测试/文档，
+  没有运行时变化，故意没发。下次功能改动一并带上即可。
+- 采集对象**三个**：`codex`、`claude`，以及观察位 `x-thsottiaux`（X 时间线，重置预告）。
+  provider 名进了 API、看板和 `quota_events`，加减观察位要一起看这三处。
+- 当天现场：249 条采集（2026-09-06 起），`quota_events` 12 条，
+  `quota_meta.last_daily_report=2026-09-08:20:00`。卷仍是
+  `/var/lib/webdock/quota_{browser_data,data}` 与 `/var/log/webdock/quota-monitor`。
+- 当天修掉的三件事，判据都在前面对应小节：截图超时（静止页面不产帧）、
+  `NOTIFY_ENDPOINT` 被临时命令行起容器时清空导致**日报和告警静默停发**、
+  X 时间线未渲染就读被误判成 `schema_changed`。
+- `QUOTA_IMAGE` 自当天起由 sops `secrets/webdock2.enc.env` 管理，`render.sh webdock2`
+  渲染进 `/opt/webdock/deploy/laptop/.env`；`QUOTA_PUBLIC_API_PREFIX` /
+  `QUOTA_PUBLIC_LINK` 在 `deploy/laptop/compose.yml` 里有默认值。
+- 观察位轮询**沿用 20–30 分钟主循环**（当天明确决定不单独提速）：新帖最坏 30 分钟后被发现。
+- console 两页分工见 `infra/console/README.md`〈两个页面的分工〉：实时卡片和历史都在
+  `/console/quota/`，`/console/` 只留入口且不再有脚本。
+- `QUOTA_RETENTION_DAYS=7` 生效；清理在每轮采集后执行，删除过期 `captures` 行及其截图，
+  不动浏览器 profile、`quota_events` 和 `quota_meta`。
+- `/console/quota/` 曾因 txecs 静态页 `root:root 0640` 返回 403；现为 `root:www-data 0640`
+  （infra `f00b69b`）。重新渲染依赖 `roles/server/tencent/apply.sh` 里的 `chown root:www-data`。
+- webdock2 的 `/opt/webdock` 是**无 Git 的部署副本**，用仓库 raw 文件定点更新，
+  不要对它 git pull/reset。
 
 ### 交接时先核验
 
@@ -266,6 +284,8 @@ return，而 `quota_meta.last_daily_report` 照样落库，那一档**不会补�
 ssh webdock2 "wsl -d Ubuntu-24.04-WebDock -- docker inspect quota-monitor --format '{{.Config.Image}} {{.State.Health.Status}}'"
 ssh webdock2 "wsl -d Ubuntu-24.04-WebDock -- docker exec quota-monitor python -c 'import sqlite3; c=sqlite3.connect(\"/app/quota_data/quota.sqlite3\"); print(c.execute(\"select count(*),min(captured_at),max(captured_at) from captures\").fetchone())'"
 ssh txecs "sudo stat -c '%A %a %U:%G %n' /usr/local/share/site-entry/console-quota.html"
+# 三个 provider 各自最近一次采集的状态（观察位算第三个）
+ssh webdock2 "wsl -d Ubuntu-24.04-WebDock -- docker exec quota-monitor python -c 'import sqlite3; c=sqlite3.connect(\"/app/quota_data/quota.sqlite3\"); [print(r) for r in c.execute(\"select provider,max(captured_at),status from captures group by provider\")]'"
 ```
 
 认证页面的无 cookie `curl` 只能证明 Authelia 302；要证明用户界面，需在已登录浏览器

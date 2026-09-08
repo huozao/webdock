@@ -1,5 +1,9 @@
 # AI 额度监控运行说明
 
+> 采集器源码已迁移到公开仓库
+> [`huozao/ai-quota-monitor`](https://github.com/huozao/ai-quota-monitor)。本文保留
+> WebDock 集成、生产验证和通知契约；不要在本仓库重新添加采集器源码。
+
 ## 排障入口（先读这段）
 
 三条链路，出问题先判断落在哪一段：
@@ -59,8 +63,6 @@ ssh txecs "sudo docker exec business-cn-postgres-1 psql -U app -d app -c \"selec
 （Claude：`Current session` / `Weekly limits` / `Usage credits`；Codex：`5 hour usage limit` /
 `Weekly usage limit` / `Credits remaining`），再在各自的块里找 `Resets …`。
 
-<!-- nav-check-python: quota_monitor/core.py:claude_reset_sections -->
-<!-- nav-check-python: quota_monitor/core.py:codex_reset_sections -->
 
 ⚠️ **按出现顺序取值（`findall` 后 `[0]` 当 5 小时、`[1]` 当周）自 2026-09-07 起确认会错位。**
 页面在某个窗口还没用满时**不渲染那个窗口的 Resets 行**：Claude 会话未开始时显示
@@ -87,7 +89,6 @@ ssh txecs "sudo docker exec business-cn-postgres-1 psql -U app -d app -c \"selec
 `/v1/quota/latest` 与 `/v1/quota/history` 两个字段都给，console 优先用 `*_iso`，
 拿不到时原样回显字符串、不显示倒计时——**下游一律不得再从字符串猜绝对时间**。
 
-<!-- nav-check-python: quota_monitor/core.py:normalize_reset -->
 
 `QUOTA_DISPLAY_TZ`（默认 `Asia/Singapore`）决定卡片文案和**报表时刻按哪个时区判**，
 `QUOTA_TZ_LABEL`（默认 `SGT`）只是副标题里那个括号。两者都不参与额度判定——判定一律用
@@ -99,7 +100,6 @@ ssh txecs "sudo docker exec business-cn-postgres-1 psql -U app -d app -c \"selec
 收到的却是下午、深夜和凌晨（`notify_outbox` 里 `quota:daily_report:2026-09-06:20:00`
 那条是次日 04:21 才发出的）。判据抽在 `pick_report_slot`，`now` 必须带展示时区。
 
-<!-- nav-check-python: quota_monitor/core.py:pick_report_slot -->
 
 ## 通知规则
 
@@ -115,7 +115,6 @@ ssh txecs "sudo docker exec business-cn-postgres-1 psql -U app -d app -c \"selec
   错位，`weekly_reset_at` 从 "Sat 10:00 AM" 变成 "Oct 1"，而 `weekly_remaining` 全程 75%
   没动，照样发出一条「周额度已重置」。判据现在落在剩余额度上（`weekly_reset_candidate`）。
 
-<!-- nav-check-python: quota_monitor/core.py:weekly_reset_candidate -->
 
 ### 卡片排版
 
@@ -150,7 +149,6 @@ column，折行只让那一格变高，不牵动邻格；顺带每格宽度从 5
 - **拿不到重置时间就不写重置**：满额度显示「额度充足」，周额度耗尽时 5h 那格显示
   「等待周额度重置」，一律不从别的窗口推算时间。
 
-<!-- nav-check-python: quota_monitor/core.py:countdown_label -->
 
 ## 已知故障与修复
 
@@ -161,8 +159,8 @@ column，折行只让那一格变高，不牵动邻格；顺带每格宽度从 5
 
 ## 发布
 
-quota-monitor 随 webdock GitHub `main` 的不可变镜像发布；生产 compose 不再绑定本地源码，
-设备只运行 GitHub Actions 构建出的镜像版本。
+quota-monitor 随独立仓库 `huozao/ai-quota-monitor` 的 `main` 不可变镜像发布；生产 compose
+不再绑定本地源码，设备只运行 GitHub Actions 构建出的镜像版本。
 
 完整一轮（2026-09-07 走过六次，每一步都有判据）：
 

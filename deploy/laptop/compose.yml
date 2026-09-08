@@ -74,10 +74,9 @@ services:
   # 独立 AI 额度浏览器。与生产 webdock 使用不同 profile/display/CDP，
   # 登录阶段 quota-entrypoint 不启动 Playwright attach；手工登录后再创建 ATTACH_ENABLED。
   quota-monitor:
-    build:
-      context: ../..
-      dockerfile: Dockerfile
-    image: ${WEBDOCK_IMAGE:-ghcr.io/huozao/webdock:latest}
+    # Compatibility manifest: quota-monitor is maintained in the standalone
+    # ai-quota-monitor repository and is no longer built from this Dockerfile.
+    image: ${QUOTA_IMAGE:-ghcr.io/huozao/ai-quota-monitor:latest}
     container_name: quota-monitor
     restart: unless-stopped
     environment:

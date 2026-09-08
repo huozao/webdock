@@ -254,9 +254,10 @@ return，而 `quota_meta.last_daily_report` 照样落库，那一档**不会补�
 
 - 采集器仓 `huozao/ai-quota-monitor` 已迁进工作区
   `~/src/AliECS-WebDock/ai-quota-monitor`（旧路径 `~/src/ai-quota-monitor` 留了兼容软链）。
-  当天 main=`65f4175`。
-- **生产镜像 pin 在 `sha-031cdfba…`，不是 main 头**——031cdfb 之后的提交只动 CI/测试/文档，
-  没有运行时变化，故意没发。下次功能改动一并带上即可。
+  当天 main=`65f4175`，**生产镜像就是它**（`sha-65f4175f…`）。
+- 判断"生产跑的是哪个 commit"只认 `docker inspect --format '{{.Config.Image}}'` 的 tag 与
+  sops 里的 `QUOTA_IMAGE`，两者应一致。⚠️ 只改 CI/测试/文档的提交**不必发版**，那种时候
+  生产 pin 落后 main 是正常的，别据此判定"漏部署"。
 - 采集对象**三个**：`codex`、`claude`，以及观察位 `x-thsottiaux`（X 时间线，重置预告）。
   provider 名进了 API、看板和 `quota_events`，加减观察位要一起看这三处。
 - 当天现场：249 条采集（2026-09-06 起），`quota_events` 12 条，

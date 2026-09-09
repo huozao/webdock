@@ -240,6 +240,17 @@ failed"，跟真实原因无关。当天两台机器都报它，实际 Chrome �
   `autostart=%(ENV_FEISHU_CHROME_AUTOSTART)s` 门控，webdock1 拿到 `false`。
   ⚠️ 这个变量展开不到会让 **supervisord 整个起不来**（连 ChatGPT 一起死），默认值因此写死在 Dockerfile。
 - `webdock.service` 的 pull/up/down 三行一律不带服务名，跑哪些由 `.env` 的 `COMPOSE_PROFILES` 决定。
+- `supervisord.conf` 新增 `[unix_http_server]` / `[rpcinterface:supervisor]` / `[supervisorctl]`
+  三段，这样才能**单独重启一个 program**，不必重建整个容器（那会连带打断 ChatGPT 登录会话）。
+  ⚠️ **2026-09-09 实测：工厂路径的分隔符写错一个字符，整个容器就起不来。**
+  正确是 `supervisor.rpcinterface:make_main_rpcinterface`（entry-point 语法，`模块:对象`），
+  写成全点号的 `supervisor.rpcinterface.make_main_rpcinterface` 会让 supervisord 报
+  `cannot be resolved within [rpcinterface:supervisor]` 后立即退出，容器进无限重启循环。
+  当时测试只断言了各 `[program:]` 段的字符串、**没有任何判据覆盖这一行**，所以 CI 全绿、
+  镜像照常发布，直到设备上真正 restart 一次才暴露——`sha-0fab0bd9` 就是这样一个起不来的镜像。
+  判据已补进 `tests/test_laptop_deploy_files.py::test_supervisord_rpc_channel_is_actually_loadable`。
+  更一般的教训：**「配置文件里有这个字符串」不等于「这份配置能被解析」**，供给 supervisord、
+  nginx 这类「解析失败即退出」的程序的配置，判据要落在能不能加载上。
 - ⚠️ **只加 `Restart=on-failure` 修不好这个故障**：`run-sync-container.sh` 每轮同步前本来就会调一次
   `ensure-chrome`，等于已有一次自动重试，明早那轮照样会被同一把锁挡住。**清锁是必需项，重试是纵深防御。**
 
@@ -405,7 +416,7 @@ bundle 保留为 GitHub 不可达时的应急路径。判据：先看 `origin` �
 
 - ⚠️ **`/opt/webdock` 不是 git 仓，是一份拷贝**（2026-09-09 实测：`git -C /opt/webdock rev-parse`
   报 not a git repository）。所以改了 webdock 仓的 `deploy/laptop/webdock.service`、
-  `compose.yml` 之后，**没有任何自动化会把它送到设备**——render.sh 只渲染 `.env` 和
+  `compose.yml`、`require-pinned-images.sh` 之后，**没有任何自动化会把它送到设备**——render.sh 只渲染 `.env` 和
   infra 自己那批文件，不碰这两个。必须手工拷过去，再 `install -m 644 … /etc/systemd/system/`
   + `daemon-reload`。跨 shell 传文件用 base64 单行最稳（`scp` 到 webdock2 落在 Windows 侧）：
 
@@ -417,9 +428,18 @@ ssh webdock2 "wsl -d Ubuntu-24.04-WebDock -- bash -lc 'echo $B | base64 -d | sud
 
   **覆盖前先比指纹**：设备上那份可能有现场漂移，与仓库上一版逐字一致才可以直接覆盖，
   不一致要先弄清是谁改的（`git show <上一版commit>:deploy/laptop/compose.yml | sha256sum`）。
+  ⚠️ `require-pinned-images.sh` 拷过去之后**必须 `chmod +x`**：base64 传的是内容不是权限位，
+  丢了执行位那条 `ExecStartPre` 会以 `Permission denied` 失败，而它不带 `-`，于是整个
+  `webdock.service` 起不来——守卫本身变成故障源。判据是 `test -x` 而不是 `ls` 看得见。
 - 验证顺序：设备 `docker ps` 看 tag 变新 + healthy → 从当前 business-cn 主机 `curl -i http://127.0.0.1:11800/healthz`，看 `X-Webdock-Device` / `X-Webdock-Route` 是否还是预期主机（重启不该改变主备，若变了说明 failover 切走了）。
 - ⛔ restart 会**重建容器、Chrome 随之重启**，中断生产链路 1-2 分钟（登录态在 `browser_data` 卷不会丢）。动手前先与用户确认时机。
 - ⛔ **切镜像前先在设备上 `docker pull <新 tag>` 确认落地，pull 成功再 render+restart**（2026-08-20 血的教训）。`systemctl restart` 的顺序是**先停旧容器、删掉，再创建新的**；`ExecStartPre=-pull` 前面那个 `-` 意味着拉取失败被忽略，于是流程照走到 create 才报 `No such image`——**旧容器已经没了，新容器起不来，这台机器上没有 webdock**。当天 webdock1 就是这样一度空缺（备机，主力没受影响；换成主力就是生产中断）。先 pull 的话，拉不动只是没变化，容器还在跑。
+  **⚠️ 2026-09-09 同一个坑第二次踩，这次踩在主力 webdock2 上**：上次是 TLS/EOF 拉不动，这次是
+  网卡驱动坏掉整机断网、`.env` 又刚 pin 到设备上还没有的 tag，开机自启一跑就把两个健康容器
+  全删了，服务停 45 分钟。**纪律靠不住，因为开机自启不经过人。** 已加自动守卫
+  `deploy/laptop/require-pinned-images.sh`：作为不带 `-` 的 `ExecStartPre` 排在 pull 之后、
+  `up` 之前，pin 的镜像本地拿不到就中止启动，旧容器继续跑。它按 `COMPOSE_PROFILES` 决定
+  要不要校验 `QUOTA_IMAGE`，所以不设 profile 的 webdock1 不会被误拦。
 - ⚠️ **历史记录（2026-08-20）**：webdock1 直拉 GHCR 曾出现 TLS/EOF，导致无法切新镜像；现在保留该证据用于解释为何引入 TCR。若启用 TCR，仍须按上一条逐机 `docker pull` 验证，不能仅凭 Actions 绿灯判断设备可拉取。
 - ⚠️ **容器一重建，热补丁就没了**（同日实证：webdock1 restart 后 `/app/src/browser/file_download.py` 的 md5 从热补版回到镜像版）。所以热补丁只是"等镜像"的临时态，重启后要立刻重打并重启 `python -m src`，验活看 md5。**比对时注意行尾**：仓库里是 LF，从 Windows devbox `cat` 过去的是 CRLF，两者 md5 不同但内容一致——用 `b.replace(b"\r\n", b"\n")` 归一化后再比，别误判成"补丁没生效"。
 - `webdock.service` 已加 `ExecStartPre=-pull`（自愈拉镜像）；新机装 `install-ubuntu.sh` 自带。**webdock2 出网可达 ghcr**（2026-08-14 实测，08-20 复测仍可用），换镜像不需要从 devbox 递镜像；要走 bundle 的只有 infra 仓本身，见 `infra/AGENTS.md`「webdock2 同步链路」。

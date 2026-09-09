@@ -76,13 +76,21 @@ def test_boot_unit_starts_and_stops_the_same_set_of_services():
     """
     unit = (ROOT / "deploy/laptop/webdock.service").read_text(encoding="utf-8")
 
+    checked = 0
     for line in unit.splitlines():
         if not line.startswith(("ExecStartPre=", "ExecStart=", "ExecStop=")):
             continue
+        # ⚠️ 不是每条 Exec* 都是 compose 命令（还有 require-pinned-images.sh 那条断言）。
+        # 不过滤的话它的路径参数会被当成服务名，测试恒红。
+        if "docker compose" not in line:
+            continue
+        checked += 1
         verb = line.rsplit(" -f ", 1)[-1].split("compose.yml", 1)[-1].split()
         # 去掉 compose 自身的动词与开关，剩下的必须为空：任何服务名都会让起停不对称。
         assert [word for word in verb if not word.startswith("-") and word not in
                 {"pull", "up", "down"}] == [], line
+    # 过滤条件写错时上面的循环会一条都不检查，和「全部通过」在结果上一样。
+    assert checked == 3, f"expected pull/up/down, checked {checked}"
 
 
 def test_quota_monitor_is_gated_by_a_compose_profile():
@@ -239,3 +247,68 @@ def test_entrypoint_warns_about_vnc_password_truncation():
 
     assert "VNC_PASSWORD is longer than 8 chars" in entrypoint
     assert "${#VNC_PASSWORD}" in entrypoint
+
+
+def test_supervisord_rpc_channel_is_actually_loadable():
+    """supervisorctl 的通道段必须能被 supervisord 解析，否则整个容器起不来。
+
+    ⚠️ 2026-09-09 实测：工厂路径写成 `supervisor.rpcinterface.make_main_rpcinterface`
+    （模块与可调用对象之间用了 `.`），supervisord 报
+    `cannot be resolved within [rpcinterface:supervisor]` 后立即退出，容器进无限重启循环。
+    差一个字符，而当时的测试只断言了各 [program:] 段的字符串，没有任何判据覆盖这一行，
+    所以 CI 全绿、镜像照常发布，直到设备上真正起了一次才暴露。
+    entry-point 语法要求 `模块:可调用对象`。
+    """
+    supervisor = (ROOT / "docker/supervisord.conf").read_text(encoding="utf-8")
+
+    assert "[rpcinterface:supervisor]" in supervisor
+    assert (
+        "supervisor.rpcinterface_factory = supervisor.rpcinterface:make_main_rpcinterface"
+        in supervisor
+    )
+    # 三段是一套：少了 unix_http_server 或 supervisorctl，supervisorctl 仍然连不上。
+    assert "[unix_http_server]" in supervisor
+    assert "file=/tmp/supervisor.sock" in supervisor
+    assert "[supervisorctl]" in supervisor
+    assert "serverurl=unix:///tmp/supervisor.sock" in supervisor
+
+    # 每个 rpcinterface_factory 都必须是 `模块:对象`，不能退回成全点号写法。
+    for line in supervisor.splitlines():
+        if line.startswith("supervisor.rpcinterface_factory"):
+            value = line.split("=", 1)[1].strip()
+            assert ":" in value, line
+
+
+def test_boot_unit_refuses_to_start_without_the_pinned_images():
+    """pull 失败被 `-` 吞掉后，up -d 会先删旧容器再报 No such image。
+
+    ⚠️ 2026-09-09 实测：.env 刚换 tag、设备恰好断网，两个健康容器被删光、服务停 45 分钟。
+    判据落在连接处——ExecStart 的前置条件是「pin 的镜像本地拿得到」，不是「pull 跑过了」。
+    断言必须排在 pull 之后、up 之前，否则拦不住。
+    """
+    unit = (ROOT / "deploy/laptop/webdock.service").read_text(encoding="utf-8")
+    guard = ROOT / "deploy/laptop/require-pinned-images.sh"
+
+    assert guard.exists()
+    assert guard.stat().st_mode & 0o111, "守卫脚本必须可执行，否则 ExecStartPre 直接失败"
+
+    lines = unit.splitlines()
+    guard_at = next(i for i, l in enumerate(lines) if "require-pinned-images.sh" in l)
+    pull_at = next(i for i, l in enumerate(lines) if l.startswith("ExecStartPre=-"))
+    up_at = next(i for i, l in enumerate(lines) if l.startswith("ExecStart=") and " up " in l)
+
+    assert lines[guard_at].startswith("ExecStartPre="), lines[guard_at]
+    # 不带前导 `-`：这条失败就必须中止启动，那正是它存在的意义。
+    assert not lines[guard_at].startswith("ExecStartPre=-"), lines[guard_at]
+    assert pull_at < guard_at < up_at
+
+    # 脚本只读 .env 里需要的键，不 source 整个文件（会把密钥带进环境）。
+    script = guard.read_text(encoding="utf-8")
+    code = [l for l in script.splitlines() if not l.lstrip().startswith("#")]
+    for line in code:
+        assert not line.lstrip().startswith(("source ", ". ")), line
+    assert "docker image inspect" in script
+    # quota 镜像的校验必须跟着 profile 走，否则 webdock1（不设 profile）会被误拦。
+    assert "COMPOSE_PROFILES" in script
+    assert "WEBDOCK_IMAGE" in script
+    assert "QUOTA_IMAGE" in script

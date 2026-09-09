@@ -20,6 +20,13 @@ WorkingDirectory=/opt/webdock
 # 现在三行一律不带服务名，跑哪些由 .env 里的 COMPOSE_PROFILES 决定（webdock1 不设，
 # 因此只有 webdock；webdock2 设 quota）。以后新增服务不必再改这个 unit。
 ExecStartPre=-/usr/bin/docker compose -p webdock --env-file /opt/webdock/deploy/laptop/.env -f /opt/webdock/deploy/laptop/compose.yml pull
+# ⚠️ 上一行的 `-` 假设「离线主机已经有这些镜像」。2026-09-09 该假设被击穿：.env 刚把
+# WEBDOCK_IMAGE 换成设备上还没有的 tag，恰好网卡驱动坏掉整机断网，pull 失败被吞、
+# `up -d` 照常跑、compose 为应用新配置先删掉了正在健康运行的旧容器，才报 "No such
+# image" 退出——两个容器全没，服务停了 45 分钟。所以在 up 之前断言 pin 的镜像本地
+# 拿得到；拿不到就中止启动，让旧容器继续跑。这不影响原设计里那个「离线但镜像齐全」
+# 的场景，那种情况下断言照样通过。
+ExecStartPre=/opt/webdock/deploy/laptop/require-pinned-images.sh /opt/webdock/deploy/laptop/.env
 ExecStart=/usr/bin/docker compose -p webdock --env-file /opt/webdock/deploy/laptop/.env -f /opt/webdock/deploy/laptop/compose.yml up -d --no-build
 ExecStop=/usr/bin/docker compose -p webdock --env-file /opt/webdock/deploy/laptop/.env -f /opt/webdock/deploy/laptop/compose.yml down
 TimeoutStartSec=0

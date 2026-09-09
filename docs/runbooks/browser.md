@@ -177,6 +177,48 @@ failed"，跟真实原因无关。当天两台机器都报它，实际 Chrome �
 
 <!-- nav-check-python: src/api/routes_chat.py:_publish_debug_screenshot -->
 
+## 取证快照里有什么（2026-09-09 起对齐三仓契约）
+
+契约是 `../../AliECS/docs/constraints/browser-capture-evidence.md`，三个浏览器抓取任务
+（ChatGPT 9222 / 飞书原文 9223 / 额度采集 9224）的共同下限。
+
+`logs/debug/<时间戳>/` 里除了原有的 `page.html`、`screenshot.png`、`selector_report.json`、
+`error_trace.txt`，现在还有 `capture.json`，字段与 `ai-quota-monitor` 的 `captures` 表同名；
+同级另有一份 `logs/debug/index.jsonl`，**一次失败一行**。
+
+没有索引时「不登设备就能判断失败在哪一步」是做不到的——`selector_report.json` 散在几十个
+目录里只能逐个翻，2026-09-09 那次就是这样把定位拖成了逐台 SSH。
+
+- `confidence` = 这一页还剩几成预期结构。**0 说明页面被打成了错误边界**（09-09 的
+  `/project` 空页就是这个形状）；接近 1 说明页面是好的、失败在别处。
+- `error_code` 是结构化字段，**下游判据一律用它，不要匹配人类可读文案**——
+  `webdock-failover-proxy` 曾用 `"Chrome not running or CDP attach failed" in text` 决定
+  切不切备机，上游一改文案它就静默不切且不打日志。
+- 截图失败只并进 `error`（`原错误 | screenshot: ...`），**不替换原始错误**，也不会留下
+  指向不存在文件的路径。
+
+### 保留期
+
+`debug_retention_days`，默认 7 天，可在 `runtime.json` 改（不必重建容器）。
+⚠️ 2026-09-09 之前**没有保留期**，设备上已经积到 59 个目录，没有任何机制会提醒。
+**按目录名里的日期判，不按 mtime**——回看一个旧快照会改 mtime，按 mtime 判等于给它续命。
+`logs/archive/` 不在此列：那是审计存档，性质不同，不跟着删。
+
+### 补上的两条失败路径
+
+以前只有 `ask` 里的异常和 `browser.start()` 失败会留快照。现在还有：
+
+| 路径 | 为什么必须留 |
+|---|---|
+| `UPLOAD_FAILED`（图片没进 composer） | 09-09 跨机尝试链的**第一环**，此前一张快照都没有，composer 长什么样只能靠猜 |
+| 硬顶超时的 `RESPONSE_TIMEOUT` | 唯一一条「页面还活着但请求被掐掉」的路径。⚠️ **取证必须在 `_reset_lane_page` 之前**，重建之后那条车道的标签页是全新的，截到的图与出问题的那轮无关 |
+
+`GENERATION_FAILED`（ChatGPT 自己的报错横幅）不用单独加：它在 `ask` 内部抛出，
+已经被那层 `except RelayError` 的 `save_debug_dump` 兜住了。
+`LANE_BUSY` / `REQUEST_CANCELLED` **故意不截**：它们不是页面故障，截了只会刷屏。
+
+<!-- nav-check-python: src/browser/debug_dump.py:save_debug_dump -->
+
 ## 重启后哪些东西不会自己回来（2026-09-09 定案，已修）
 
 一次 WSL/Docker 重启同时打断了两样，**两样都不报错**，判据都不在「服务是不是 active」上：

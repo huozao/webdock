@@ -10,6 +10,7 @@ from typing import Any, Awaitable, Callable
 
 from src.browser import selectors
 from src.browser.chatgpt_page import ChatGPTPage, upload_images
+from src.browser.debug_dump import save_debug_dump
 from src.browser.detector import find_first
 from src.browser.lane_routing import (
     LaneRouter,
@@ -25,6 +26,15 @@ log = logging.getLogger(__name__)
 AskFunc = Callable[[object, str], Awaitable[tuple[str, float]]]
 
 _SAFE_KEY_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
+
+
+async def _safe_dump(page: Any, error: Any) -> str | None:
+    """取证，且**绝不让取证失败盖过它要记录的那个错误**。"""
+    try:
+        return await save_debug_dump(page, error)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("debug dump failed: %s", exc)
+        return None
 
 # After navigating to a project/conversation URL, wait this long for the editor.
 ROUTE_INPUT_TIMEOUT_MS = 10000
@@ -299,6 +309,10 @@ class ChatLaneScheduler:
                             ErrorCode.UPLOAD_FAILED,
                             "图片未能附加到 ChatGPT 输入框，本次请求未发送。请重新发送这条消息。",
                         )
+                        # 2026-09-09 的跨机尝试链 webdock2:UPLOAD_FAILED →
+                        # webdock1:BROWSER_NOT_STARTED 里，第一环一张快照都没有——
+                        # composer 当时长什么样只能靠猜。取证失败绝不能盖过原始错误。
+                        exc.debug_dir = await _safe_dump(page, exc)
                         await self._archiver(lane, clean_message, images, error=exc)
                         raise exc
                 effective_timeout = select_chat_timeout(
@@ -330,11 +344,16 @@ class ChatLaneScheduler:
                     # other users' lanes.
                     answer, duration = await asyncio.wait_for(coro, timeout=hard_cap)
                 except asyncio.TimeoutError:
+                    # ⚠️ 取证必须在 _reset_lane_page **之前**：重建之后这条车道的标签页
+                    # 是全新的，截到的图与出问题的那一轮无关。硬顶超时是唯一一条
+                    # 「页面还活着但请求被掐掉」的路径，以前它什么证据都不留。
+                    dumped = await _safe_dump(page, "hard cap exceeded")
                     # Rebuild this lane's tab so the next request starts clean.
                     await _reset_lane_page(browser, lane)
                     exc = RelayError(
                         ErrorCode.RESPONSE_TIMEOUT,
                         f"webdock request exceeded hard cap of {hard_cap:.0f}s; lane reset.",
+                        debug_dir=dumped,
                     )
                     await self._archiver(lane, clean_message, images, error=exc)
                     raise exc

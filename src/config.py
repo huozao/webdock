@@ -20,6 +20,10 @@ class Settings:
     archive_dir: Path = Path("logs/archive")
     photo_storage_dir: Path = Path("photo_storage")
     archive_enabled: bool = True
+    # logs/debug/ 的保留期。⚠️ 2026-09-09 之前**没有保留期**，设备上已经积到 59 个目录，
+    # 没有任何机制会提醒。7 天与 quota-monitor 的 QUOTA_RETENTION_DAYS 取同一个值。
+    # logs/archive/ 不在此列：那是审计存档，性质不同，不跟着一起删。
+    debug_retention_days: int = 7
     diagnostic_probe_enabled: bool = False
     chatgpt_url: str = "https://chatgpt.com/"
     # How a project home page (/g/<gizmo>/project) is opened. "sidebar" clicks the
@@ -104,6 +108,7 @@ def get_settings() -> Settings:
         archive_dir=_path_from_env(_get("ARCHIVE_DIR", "logs/archive", env)),
         photo_storage_dir=_path_from_env(_get("PHOTO_STORAGE_DIR", "photo_storage", env)),
         archive_enabled=_get("ARCHIVE_ENABLED", "true", env).lower() == "true",
+        debug_retention_days=int(_get("DEBUG_RETENTION_DAYS", "7", env)),
         chatgpt_url=_get("CHATGPT_URL", "https://chatgpt.com/", env),
         project_entry_mode=_get("PROJECT_ENTRY_MODE", "sidebar", env),
         chat_timeout_seconds=int(_get("CHAT_TIMEOUT_SECONDS", "120", env)),
@@ -185,6 +190,7 @@ _RUNTIME_OVERRIDE_INT_FIELDS = (
     "response_stable_seconds",
     "response_idle_timeout_seconds",
     "response_hard_timeout_seconds",
+    "debug_retention_days",
 )
 _RUNTIME_OVERRIDE_STR_FIELDS = (
     "test_media_url",

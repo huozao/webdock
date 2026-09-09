@@ -44,6 +44,12 @@ services:
       VIEWPORT_JITTER_PX: ${VIEWPORT_JITTER_PX:-20}
       BROWSER_CHANNEL: ${BROWSER_CHANNEL:-chrome}
       CHROME_PROXY_SERVER: ${CHROME_PROXY_SERVER:-}
+      # Feishu 同步浏览器（:100 / 9223 / browser_data/feishu-sync）。默认关闭：
+      # 只有 webdock2 跑飞书同步，webdock1 拿到 false 就只定义不启动。
+      # ⚠️ 代理与 ChatGPT 的 CHROME_PROXY_SERVER 是两个值，不要合并成一个键。
+      FEISHU_CHROME_AUTOSTART: ${FEISHU_CHROME_AUTOSTART:-false}
+      FEISHU_CHROME_URL: ${FEISHU_CHROME_URL:-https://www.feishu.cn/}
+      FEISHU_CHROME_PROXY_SERVER: ${FEISHU_CHROME_PROXY_SERVER:-}
       BEFORE_TYPE_DELAY_MIN_MS: ${BEFORE_TYPE_DELAY_MIN_MS:-500}
       BEFORE_TYPE_DELAY_MAX_MS: ${BEFORE_TYPE_DELAY_MAX_MS:-1200}
       BEFORE_SEND_DELAY_MIN_MS: ${BEFORE_SEND_DELAY_MIN_MS:-300}
@@ -79,6 +85,11 @@ services:
     image: ${QUOTA_IMAGE:-ghcr.io/huozao/ai-quota-monitor:latest}
     container_name: quota-monitor
     restart: unless-stopped
+    # 额度采集只在 webdock2 跑。门控放在 profile 而不是 webdock.service 的服务名列表里：
+    # 服务名列表会在下一个新服务加进来时重演 2026-09-09 那次事故——ExecStop 是不带服务名的
+    # `down`（停整个 project），ExecStart 却只点名 webdock，重启一次就把 quota-monitor
+    # 永久删掉且没有任何告警。现在两端都不带服务名，靠 COMPOSE_PROFILES 决定跑哪些。
+    profiles: ["quota"]
     environment:
       DISPLAY: ":101"
       DISPLAY_WIDTH: ${DISPLAY_WIDTH:-1366}

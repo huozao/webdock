@@ -6,6 +6,12 @@ ENV DISPLAY=:99
 ENV DISPLAY_WIDTH=1366
 ENV DISPLAY_HEIGHT=768
 ENV DISPLAY_DEPTH=24
+# Feishu 同步浏览器的默认值必须在镜像里给全：supervisord 的 %(ENV_...)s 展开不到变量时
+# **整个 supervisord 起不来**，连 ChatGPT 那半边一起死。compose 会覆盖这三个值；
+# 直接 docker run 起镜像的场合靠这里兜底。默认不自启，只有 webdock2 打开。
+ENV FEISHU_CHROME_AUTOSTART=false
+ENV FEISHU_CHROME_URL=https://www.feishu.cn/
+ENV FEISHU_CHROME_PROXY_SERVER=
 
 WORKDIR /app
 

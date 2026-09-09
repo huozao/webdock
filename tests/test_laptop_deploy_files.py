@@ -66,6 +66,73 @@ def test_supervisor_exposes_independent_feishu_display():
     assert "6081 localhost:5901" in supervisor
 
 
+def test_boot_unit_starts_and_stops_the_same_set_of_services():
+    """起停必须对称，否则重启一次就永久少一个容器。
+
+    ⚠️ 2026-09-09 实测：ExecStop 是不带服务名的 `down`（停整个 project），ExecStart 却只
+    点名 `webdock`。一次 WSL 重启后 quota-monitor 容器被 down 删掉、再也没被创建出来；
+    `restart: unless-stopped` 对**已删除**的容器无效，而 console 页面照样 200、只有数据接口
+    502，所以整整一天没人发现。判据落在「三行命令的服务名列表是否一致」这个连接处。
+    """
+    unit = (ROOT / "deploy/laptop/webdock.service").read_text(encoding="utf-8")
+
+    for line in unit.splitlines():
+        if not line.startswith(("ExecStartPre=", "ExecStart=", "ExecStop=")):
+            continue
+        verb = line.rsplit(" -f ", 1)[-1].split("compose.yml", 1)[-1].split()
+        # 去掉 compose 自身的动词与开关，剩下的必须为空：任何服务名都会让起停不对称。
+        assert [word for word in verb if not word.startswith("-") and word not in
+                {"pull", "up", "down"}] == [], line
+
+
+def test_quota_monitor_is_gated_by_a_compose_profile():
+    """额度采集只在 webdock2 跑，门控放 profile 不放服务名列表。"""
+    compose = (ROOT / "deploy/laptop/compose.yml").read_text(encoding="utf-8")
+    example = (ROOT / "deploy/laptop/.env.example").read_text(encoding="utf-8")
+
+    assert 'profiles: ["quota"]' in compose
+    # 示例文件里留空 = 一台干净的中继默认不跑额度采集；设值是 webdock2 的事。
+    assert "\nCOMPOSE_PROFILES=\n" in example
+
+
+def test_entrypoint_clears_singleton_locks_for_both_profiles():
+    """两个 profile 都要清 Singleton*，否则容器一重建那半边就永久起不来。
+
+    ⚠️ 锁里写的是**创建它的容器 hostname**，重建后 Chrome 判定 profile 被「另一台计算机」
+    占用并拒绝启动。ChatGPT 侧一直在清所以每次自愈；Feishu 侧从来没清过，2026-09-09
+    一次重启就卡住一天（chrome.log 里是 "in use by another Google Chrome process ... on
+    another computer"）。
+    """
+    entrypoint = (ROOT / "docker/entrypoint.sh").read_text(encoding="utf-8")
+
+    assert "/app/browser_data /app/browser_data/feishu-sync" in entrypoint
+    for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+        assert f'"$profile/{name}"' in entrypoint
+
+
+def test_supervisor_owns_the_feishu_browser_and_gates_its_autostart():
+    """Feishu Chrome 与它的 :100/5901/6081 归同一处托管，自启由环境变量门控。
+
+    ⚠️ `%(ENV_FEISHU_CHROME_AUTOSTART)s` 展开不到变量时 supervisord **整个起不来**，
+    会连 ChatGPT 那半边一起拖死，所以默认值必须写死在镜像里。
+    """
+    supervisor = (ROOT / "docker/supervisord.conf").read_text(encoding="utf-8")
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    compose = (ROOT / "deploy/laptop/compose.yml").read_text(encoding="utf-8")
+
+    assert "[program:feishu-chrome]" in supervisor
+    assert "--user-data-dir=/app/browser_data/feishu-sync" in supervisor
+    assert "--remote-debugging-port=9223" in supervisor
+    assert "autostart=%(ENV_FEISHU_CHROME_AUTOSTART)s" in supervisor
+    assert 'environment=DISPLAY=":100"' in supervisor
+    assert "autorestart=true" in supervisor.split("[program:feishu-chrome]", 1)[1]
+    assert "ENV FEISHU_CHROME_AUTOSTART=false" in dockerfile
+    assert "FEISHU_CHROME_AUTOSTART: ${FEISHU_CHROME_AUTOSTART:-false}" in compose
+    # 两个浏览器的代理是两个独立的键，合并会让其中一台走错出口。
+    assert "FEISHU_CHROME_PROXY_SERVER: ${FEISHU_CHROME_PROXY_SERVER:-}" in compose
+    assert "CHROME_PROXY_SERVER: ${CHROME_PROXY_SERVER:-}" in compose
+
+
 def test_ecs_tunnel_files_keep_webdock_private():
     env_example = (ROOT / "deploy/laptop/ecs-tunnel.env.example").read_text(encoding="utf-8")
     service = (ROOT / "deploy/laptop/webdock-ecs-tunnel.service").read_text(encoding="utf-8")

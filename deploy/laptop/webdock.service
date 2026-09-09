@@ -8,12 +8,19 @@ Wants=network-online.target
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/opt/webdock
-# Pull the pinned WEBDOCK_IMAGE first so a tag change or a fresh host self-heals
-# instead of failing with "No such image"; the leading `-` makes a failed pull
-# non-fatal, so an offline host that already has the image still starts. ExecStart
-# then runs the pulled image (--no-build) per compose.yml's "laptop just pulls it".
-ExecStartPre=-/usr/bin/docker compose -p webdock --env-file /opt/webdock/deploy/laptop/.env -f /opt/webdock/deploy/laptop/compose.yml pull webdock
-ExecStart=/usr/bin/docker compose -p webdock --env-file /opt/webdock/deploy/laptop/.env -f /opt/webdock/deploy/laptop/compose.yml up -d --no-build webdock
+# Pull the pinned images first so a tag change or a fresh host self-heals instead of
+# failing with "No such image"; the leading `-` makes a failed pull non-fatal, so an
+# offline host that already has the images still starts. ExecStart then runs them
+# (--no-build) per compose.yml's "laptop just pulls it".
+#
+# ⚠️ 这三行以前都点名 `webdock`，只有 ExecStop 的 `down` 不带服务名。停的是整个 project、
+# 起的只有一个服务——2026-09-09 一次 WSL 重启后 quota-monitor 容器就此消失，
+# `restart: unless-stopped` 也救不回来（容器已经被删掉，不是停着）。console 的
+# /console/quota/ 仍然 200、只有数据接口 502，所以一天没人发现。
+# 现在三行一律不带服务名，跑哪些由 .env 里的 COMPOSE_PROFILES 决定（webdock1 不设，
+# 因此只有 webdock；webdock2 设 quota）。以后新增服务不必再改这个 unit。
+ExecStartPre=-/usr/bin/docker compose -p webdock --env-file /opt/webdock/deploy/laptop/.env -f /opt/webdock/deploy/laptop/compose.yml pull
+ExecStart=/usr/bin/docker compose -p webdock --env-file /opt/webdock/deploy/laptop/.env -f /opt/webdock/deploy/laptop/compose.yml up -d --no-build
 ExecStop=/usr/bin/docker compose -p webdock --env-file /opt/webdock/deploy/laptop/.env -f /opt/webdock/deploy/laptop/compose.yml down
 TimeoutStartSec=0
 

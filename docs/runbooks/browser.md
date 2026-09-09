@@ -177,6 +177,39 @@ failed"，跟真实原因无关。当天两台机器都报它，实际 Chrome �
 
 <!-- nav-check-python: src/api/routes_chat.py:_publish_debug_screenshot -->
 
+## 重启后哪些东西不会自己回来（2026-09-09 定案，已修）
+
+一次 WSL/Docker 重启同时打断了两样，**两样都不报错**，判据都不在「服务是不是 active」上：
+
+| 掉的东西 | 当时的表象 | 机制 |
+|---|---|---|
+| `quota-monitor` 容器 | `/console/quota/` 仍 200，只有 `api/history` 502；18002/6082/9224 全不监听 | `webdock.service` 的 `ExecStop` 是不带服务名的 `down`（停整个 project），`ExecStart` 只点名 `webdock`。**停多起少**，容器被删掉而不是停着，所以 `restart: unless-stopped` 救不回来 |
+| Feishu Chrome（9223） | 16092 隧道正常、noVNC 能连，`:100` 画面是空的；unit 停在 `failed` | `feishu-sync` profile 里残留 `SingletonLock -> <旧容器hostname>-<pid>`，Chrome 判定 profile 被「另一台计算机」占用并拒绝启动 |
+
+**为什么 ChatGPT 的 Chrome 每次都能自愈**：它由容器内 supervisord 托管（`autorestart=true`），
+且 `entrypoint.sh` 每次启动都清 `/app/browser_data` 的三个 `Singleton*`。Feishu 那半边当时
+只有 `:100`/5901/6081 在 supervisord 里，**浏览器本身在宿主机 systemd 的 oneshot unit 里**，
+容器重建后没有任何东西把它拉起来。
+
+已改：
+
+- `entrypoint.sh` 对两个 profile 都清 `Singleton*`（各清各的，不跨目录）。
+- `supervisord.conf` 新增 `[program:feishu-chrome]`，与 `[program:chrome]` 对称；
+  `autostart=%(ENV_FEISHU_CHROME_AUTOSTART)s` 门控，webdock1 拿到 `false`。
+  ⚠️ 这个变量展开不到会让 **supervisord 整个起不来**（连 ChatGPT 一起死），默认值因此写死在 Dockerfile。
+- `webdock.service` 的 pull/up/down 三行一律不带服务名，跑哪些由 `.env` 的 `COMPOSE_PROFILES` 决定。
+- ⚠️ **只加 `Restart=on-failure` 修不好这个故障**：`run-sync-container.sh` 每轮同步前本来就会调一次
+  `ensure-chrome`，等于已有一次自动重试，明早那轮照样会被同一把锁挡住。**清锁是必需项，重试是纵深防御。**
+
+排障判据（不要看 unit 是不是 active）：
+
+```bash
+# 该 profile 有没有活着的浏览器——三个 Chrome 同名，只能按 profile 路径认
+ssh webdock2 "wsl -d Ubuntu-24.04-WebDock -- bash -lc 'docker top webdock -eo pid,args | grep feishu-sync'"
+# CDP 才是「起来了」的判据
+ssh webdock2 "wsl -d Ubuntu-24.04-WebDock -- bash -lc 'docker exec webdock sh -lc \"curl -sS --max-time 3 http://127.0.0.1:9223/json/version\"'"
+```
+
 ## 症状表
 
 | 症状 | 先查 | 处置 |

@@ -180,6 +180,31 @@ column，折行只让那一格变高，不牵动邻格；顺带每格宽度从 5
   随后 websockify 反复报 `localhost:5902 connection refused`。当前 entrypoint 会等待
   `/tmp/.X11-unix/X101` 就绪后才启动 x11vnc。
 
+### `/console/quota/` 打不开：三种成因，判据都在 txecs 的日志里（2026-09-09）
+
+**页面和 nginx 路由几乎从来不是原因。** `location = /console/quota/` 直接发本地静态文件，
+`location /console/quota/api/` 转 `127.0.0.1:16094/v1/quota/`，两处都很稳。「打不开」的实际
+表现是**页面出来了、数据是空的**，因为挂的是上游。三种成因在 txecs 的
+`/var/log/nginx/error.log` 里长得不一样：
+
+| 日志 | 含义 | 处置 |
+|---|---|---|
+| `connect() failed (111: Connection refused)` | 隧道端口没人监听 = **容器不存在或没起** | 上 webdock2 `docker ps` 看 quota-monitor 在不在 |
+| `recv() failed (104: Connection reset by peer)` | 端口在、对端没了 = **隧道还在但 webdock2 侧断了** | 先判 webdock2 整机是否失联 |
+| 502 且 txecs `ss -ltn` 里**连 16094 都没有** | 反向隧道进程已退出 = **webdock2 离线** | 见 `docs/runbooks/browser.md`「webdock2 整机失联」 |
+
+2026-09-09 一天之内前两种都出现了：13:38 是「重启后 quota-monitor 容器根本没被创建」
+（`webdock.service` 起停不对称，已修），16:33 是 webdock2 整机失联。中间 15:24 有一批
+21 个 `captures/*/screenshot` 全 200——**这就是「配置没问题」的判据**，不用再去翻 nginx。
+
+⚠️ 别把「页面 200」当成好了：`/console/quota/` 本身是静态文件，容器全死它照样 200。
+判据只能取数据接口：
+
+```bash
+ssh txecs "curl -sS -o /dev/null -w '%{http_code}\n' --max-time 8 http://127.0.0.1:16094/healthz"
+ssh txecs "sudo grep 'console/quota/api' /var/log/nginx/access.log | tail -5"
+```
+
 ### 观察位读到 0 条帖子：时间线还没渲染（2026-09-08）
 
 `x-<账号>` 采到 `schema_changed`、看板显示「未读到帖子」、日报挂「采集异常」，但

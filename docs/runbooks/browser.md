@@ -396,6 +396,27 @@ ssh webdock2 "wsl -d Ubuntu-24.04-WebDock -- sudo systemctl restart webdock"
 ```bash
 sudo -u webdock git -C /home/webdock/infra pull --ff-only /mnt/c/temp/<file>.bundle main
 ```
+
+⚠️ **该 bundle 写法自 2026-09-07 起不再是日常路径**：webdock2 的 `/home/webdock/infra` 已配好
+只读 deploy key、`origin` 指 GitHub，日常同步是
+`sudo -u webdock git -C /home/webdock/infra pull --ff-only origin main`（2026-09-09 实测可用）。
+bundle 保留为 GitHub 不可达时的应急路径。判据：先看 `origin` 指向哪里。新情况见
+`infra/AGENTS.md`〈webdock2 已改为直拉 GitHub〉。
+
+- ⚠️ **`/opt/webdock` 不是 git 仓，是一份拷贝**（2026-09-09 实测：`git -C /opt/webdock rev-parse`
+  报 not a git repository）。所以改了 webdock 仓的 `deploy/laptop/webdock.service`、
+  `compose.yml` 之后，**没有任何自动化会把它送到设备**——render.sh 只渲染 `.env` 和
+  infra 自己那批文件，不碰这两个。必须手工拷过去，再 `install -m 644 … /etc/systemd/system/`
+  + `daemon-reload`。跨 shell 传文件用 base64 单行最稳（`scp` 到 webdock2 落在 Windows 侧）：
+
+```bash
+B=$(base64 -w0 deploy/laptop/webdock.service)
+ssh webdock2 "wsl -d Ubuntu-24.04-WebDock -- bash -lc 'echo $B | base64 -d | sudo tee /opt/webdock/deploy/laptop/webdock.service > /dev/null'"
+# 判据取两侧 sha256sum 是否一致，别看「命令没报错」
+```
+
+  **覆盖前先比指纹**：设备上那份可能有现场漂移，与仓库上一版逐字一致才可以直接覆盖，
+  不一致要先弄清是谁改的（`git show <上一版commit>:deploy/laptop/compose.yml | sha256sum`）。
 - 验证顺序：设备 `docker ps` 看 tag 变新 + healthy → 从当前 business-cn 主机 `curl -i http://127.0.0.1:11800/healthz`，看 `X-Webdock-Device` / `X-Webdock-Route` 是否还是预期主机（重启不该改变主备，若变了说明 failover 切走了）。
 - ⛔ restart 会**重建容器、Chrome 随之重启**，中断生产链路 1-2 分钟（登录态在 `browser_data` 卷不会丢）。动手前先与用户确认时机。
 - ⛔ **切镜像前先在设备上 `docker pull <新 tag>` 确认落地，pull 成功再 render+restart**（2026-08-20 血的教训）。`systemctl restart` 的顺序是**先停旧容器、删掉，再创建新的**；`ExecStartPre=-pull` 前面那个 `-` 意味着拉取失败被忽略，于是流程照走到 create 才报 `No such image`——**旧容器已经没了，新容器起不来，这台机器上没有 webdock**。当天 webdock1 就是这样一度空缺（备机，主力没受影响；换成主力就是生产中断）。先 pull 的话，拉不动只是没变化，容器还在跑。

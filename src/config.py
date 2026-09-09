@@ -22,6 +22,14 @@ class Settings:
     archive_enabled: bool = True
     diagnostic_probe_enabled: bool = False
     chatgpt_url: str = "https://chatgpt.com/"
+    # How a project home page (/g/<gizmo>/project) is opened. "sidebar" clicks the
+    # project's row in the left rail from an already-loaded chatgpt.com page;
+    # "direct" navigates straight to the URL. Default is sidebar because as of
+    # 2026-09-09 a full navigation to /project renders ChatGPT's error boundary
+    # ("Try again") with no composer, on every project and on both devices, while
+    # the same page reached through in-app routing is fine. Flip to "direct" via
+    # runtime.json once OpenAI fixes that route — no redeploy needed.
+    project_entry_mode: str = "sidebar"
     chat_timeout_seconds: int = 120
     # Image-bearing turns (reference images and/or image generation) legitimately
     # run far longer than text — image rendering has >idle_timeout quiet gaps that
@@ -97,6 +105,7 @@ def get_settings() -> Settings:
         photo_storage_dir=_path_from_env(_get("PHOTO_STORAGE_DIR", "photo_storage", env)),
         archive_enabled=_get("ARCHIVE_ENABLED", "true", env).lower() == "true",
         chatgpt_url=_get("CHATGPT_URL", "https://chatgpt.com/", env),
+        project_entry_mode=_get("PROJECT_ENTRY_MODE", "sidebar", env),
         chat_timeout_seconds=int(_get("CHAT_TIMEOUT_SECONDS", "120", env)),
         chat_timeout_seconds_with_images=int(_get("CHAT_TIMEOUT_SECONDS_WITH_IMAGES", "300", env)),
         upload_land_timeout_seconds=int(_get("UPLOAD_LAND_TIMEOUT_SECONDS", "300", env)),
@@ -181,6 +190,7 @@ _RUNTIME_OVERRIDE_STR_FIELDS = (
     "test_media_url",
     "media_base_url",
     "routing_backend_url",
+    "project_entry_mode",
 )
 _RUNTIME_OVERRIDE_BOOL_FIELDS = ("diagnostic_probe_enabled",)
 

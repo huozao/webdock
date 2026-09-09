@@ -129,6 +129,34 @@ GENERATION_ERROR_TEXTS = (
 )
 
 
+# Left-rail project rows, used to reach a project home page through in-app
+# routing instead of a full navigation (see manager.open_project_home).
+#
+# Dumped 2026-09-09 on both devices. Three things that look like handles are NOT
+# available here: the row carries no gizmo id anywhere in its subtree, it is not
+# an <a href>, and clicking the row's own label does not navigate at all. The
+# only working entry point is the row's trailing "open project home" button.
+SIDEBAR_PROJECT_ITEM = [
+    "div[data-sidebar-item][role='button'].__menu-item",
+    "div[data-sidebar-item][role='button']",
+]
+
+# The row has TWO trailing buttons and they must not be confused: the second one
+# opens the options menu and never navigates. Tell them apart by structure, not
+# by position or label — only the menu one carries aria-haspopup, while the
+# aria-label is localized ("Open project home" on webdock2's en-US UI,
+# "打开项目首页" on webdock1's zh-CN UI) and would silently miss on the standby.
+SIDEBAR_PROJECT_HOME_BUTTON = [
+    "button[data-trailing-button]:not([aria-haspopup])",
+]
+
+# Collapsed-projects expander. Projects past the first few are hidden behind it,
+# so a row lookup that misses must expand before concluding the project is gone
+# (2026-09-09: weixin-b, a routed production project, sits below the fold).
+# It is a <button data-sidebar-item>, whereas project rows are <div role=button>,
+# so the structural selector above never matches it.
+SIDEBAR_SHOW_MORE_TEXTS = ("show more", "查看更多")
+
 SELECTOR_GROUPS = {
     "CHAT_INPUT": CHAT_INPUT,
     "GENERATION_ERROR_BANNER": GENERATION_ERROR_BANNER,
@@ -142,4 +170,6 @@ SELECTOR_GROUPS = {
     "LOGIN_INDICATORS": LOGIN_INDICATORS,
     "MODE_PICKER_BUTTON": MODE_PICKER_BUTTON,
     "MODE_MENU_ITEM": MODE_MENU_ITEM,
+    "SIDEBAR_PROJECT_ITEM": SIDEBAR_PROJECT_ITEM,
+    "SIDEBAR_PROJECT_HOME_BUTTON": SIDEBAR_PROJECT_HOME_BUTTON,
 }

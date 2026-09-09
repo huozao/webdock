@@ -107,6 +107,76 @@ ChatGPT 登录与 Cloudflare 验证必须人工在 noVNC 完成，自动化必�
 <!-- nav-check-python: src/browser/detector.py:generation_error_text -->
 <!-- nav-check-python: src/utils/errors.py:GENERATION_FAILED -->
 
+## 项目页直达已失效，改走侧栏（2026-09-09）
+
+**整页导航到 `https://chatgpt.com/g/<gizmo>/project` 会渲染成 ChatGPT 的 error
+boundary**：`body` 只有一个 "Try again"（webdock1 中文界面是"重试"），没有 composer、
+没有 file input。`page.goto` 本身不报错，主文档 **HTTP 200**、0.7–8.9s 返回，49 个请求
+里没有一个 5xx。
+
+当天的取证，对着看再动手：
+
+| 入口 | 结果 |
+|---|---|
+| `chatgpt.com/` 整页导航 | 正常，composer + 5 个 file input |
+| `/g/<gizmo>/c/<会话>` 整页导航 | 正常。**只有 `/project` 这一条路由坏了** |
+| `/g/<gizmo>/project` 整页导航 | Try again，composer=0 |
+| `/g/<gizmo>`（裸 gid） | 302 到 `/project`，同样失败 |
+| 首页 → 点侧栏项目行的"打开项目首页"图标 | 正常，composer + 5 个 file input |
+
+- **不是设备问题**：webdock1 和 webdock2 同时复现，两台的出口 IP、Chrome 大版本
+  （151 / 152）、界面语言都不同。
+- **不是某个项目的数据问题**：试了 4 个项目，全部失败。
+- **不是网络也不是 Cloudflare**：容器内经代理到 chatgpt.com 后端 0.84s；裸 curl 拿到的
+  403 挑战页是无浏览器指纹时的正常反应，不能当成"被封"的证据。
+- 唯一伴随异常是 `/backend-api/locked_chats/status` **404**，且只在项目页出现。是不是
+  崩溃点没有确认，只是相关。
+- ⛔ **进了这个状态的 tab 救不回来**：点页面自己的 "Try again"、`history.back()` 都实测
+  无效，只有重新导航到别的 URL 才行。所以失败的那一次会把生产 tab 一起打废，下一条请求
+  如果目标是会话页才会自愈。
+
+规避实现在 `manager.open_project_home`：先确保 tab 停在一个**可用的** chatgpt.com 页面
+（composer 在），再点侧栏该项目行的"打开项目首页"按钮。判据是**结果 URL 里的 gizmo id
+加 composer 出现**，不是"点击发出去了"——点错行同样会"成功"。任何一步失败都回退到原来的
+`page.goto`，OpenAI 修好后这条回退自动重新变成快路径。
+
+改这块前必须知道的三件事：
+
+- **侧栏行没有 gizmo id，也不是 `<a href>`**，整个子树里搜不到 id；点项目名本身**不跳转**
+  （role 点击和 JS `click()` 都试过，URL 不动）。唯一入口是行内那个图标按钮。
+- **行内有两个尾部按钮，第二个是选项菜单、永远不导航**。区分它们要用结构
+  `button[data-trailing-button]:not([aria-haspopup])`——`aria-label` 是本地化的
+  （webdock2 `Open project home` / webdock1 `打开项目首页`），按标签选会在备机上静默选空；
+  按位置选则是本仓 08-20 已经栽过一次的那类近似量判据。
+- **匹配项目行必须用相等而不是包含**：`lark-hao` 是 `lark-hao2` 的前缀，包含匹配会把这一轮
+  路由进另一个项目，然后返回一条**看起来合理但来自错误上下文**的回复。另外靠后的项目折在
+  `Show more` 里（`weixin-b` 就是），找不到行要先展开再判定。
+
+开关是 `runtime.json` 的 `project_entry_mode`（`sidebar` 默认 / `direct`）。OpenAI 修好
+后切 `direct` 即可，不用发版；⚠️ 按〈runtime.json〉那条"缺键静默落回代码默认"的机制，
+`config.py` 里的默认值也必须是 `sidebar`，改的时候两处一起看。
+
+<!-- nav-check-python: src/browser/manager.py:open_project_home -->
+<!-- nav-check-python: src/browser/manager.py:parse_project_target -->
+<!-- nav-check-python: src/config.py:project_entry_mode -->
+
+## 失败卡片能带的取证（2026-09-09 起）
+
+`_ensure_browser_ready` 以前在 attach 失败时**什么取证都不返回**：没有快照，所以没有截图、
+没有 page dump，卡片上只剩一句话——而那句话还是硬编码的 "Chrome not running or CDP attach
+failed"，跟真实原因无关。当天两台机器都报它，实际 Chrome 全都活着、CDP 也应答，真正失败的
+是 attach **之后**那次 `page.goto`。
+
+- 消息现在按异常内容分三类（`_describe_start_failure`）：CDP 连不上 / 已 attach 但页面没加载 /
+  其它。**CDP 判在前**，因为 attach 失败的消息里会内嵌它自己的 transport 错误，可能也含
+  "Timeout"。
+- 失败路径现在会调 `save_debug_dump`，并把 `screenshot.png` 通过既有的 media store 发布成
+  短时 URL（`debug_screenshot_url`），bridge 把它作为 `MEDIA:` 标记附到卡片上 → 飞书能直接
+  看到当时的页面。走的是回复图片那条既有通道，没有第二套投递机制。
+- 需要 `media_base_url` 有值才会发布截图（内网值，见〈runtime.json〉）；没配就只有快照路径。
+
+<!-- nav-check-python: src/api/routes_chat.py:_publish_debug_screenshot -->
+
 ## 症状表
 
 | 症状 | 先查 | 处置 |
@@ -124,6 +194,7 @@ ChatGPT 登录与 Cloudflare 验证必须人工在 noVNC 完成，自动化必�
 | 页面生成了 N 张图，飞书只收到几张 | archive 数 `outbound.text` 里 `MEDIA:` 行数；api.log 找 `generated images never returned to` | 判定不是判早了：图早就齐了，是完成帧撞上收尾重渲。见上「多图回复」节 |
 | 发了图，ChatGPT 却说"没收到图片/请重新上传" | `api.log` 查该轮 `upload_stages`（`attached=0` = 没落地，`outcome=` 说明卡在哪一步）；bridge `image_count` 与 archive `inbound.images` 用来排除上游丢图 | 现在这种情况直接报 `UPLOAD_FAILED` 且不发送，用户重发即可；连续复现查 composer 是否又改了 `ATTACHMENT_PREVIEW` 结构 |
 | Cloudflare 无限验证循环 | 自动化是否 attach 着 | detach 后人工过验证 |
+| `/新对话` 报 UPLOAD_FAILED 且 `outcome=no_input`，或卡片说 `BROWSER_NOT_STARTED` | `api.log` 找 `project_entry`；noVNC 里看页面是不是只剩一个 "Try again" | 见下方〈项目页直达已失效〉。**别去查 Chrome 死没死**——两台机器的 Chrome 和 CDP 当时都是好的 |
 | 多图请求后全线卡死 | 单 worker 被堵（142-153s/13图）；healthz 假绿 | 等释放或重启容器；车道隔离测试须测对车道 |
 | 同群后续消息很快收到 `LANE_BUSY` | archive 查同一 `lane.key` 的 active 请求和被拒请求 | 这是车道保护：被拒消息没有发进 ChatGPT。等待当前任务完成，或发送 `/新对话` 抢占重建 |
 | webdock2 整机失联 | WSL 是否活：容器 Up 时长 < 命令年龄 = 假活 | 保活任务已改开机+S4U+`wsl sleep infinity` 常驻（07-12） |

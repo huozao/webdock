@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import random
 import socket
 import subprocess
@@ -391,6 +392,202 @@ def should_navigate_to_chatgpt(current_url: str | None) -> bool:
     return "chatgpt.com" not in current_url
 
 
+# Gizmo ids are ``g-p-`` plus a fixed-width hex blob; the slug that follows is
+# separated by a hyphen but may itself contain hyphens ("lark-hao"), so the id
+# has to be pinned by shape. A lazy ``+?`` here would hand back "g-p-6" and
+# leave the rest of the id inside the slug.
+PROJECT_URL_RE = re.compile(r"/g/(g-p-[0-9a-f]{16,64})(?:-([^/?#]+))?/project\b")
+
+# How long to wait for the in-app route change after clicking a project row.
+# The click resolves in ~2s in production; the budget is generous because the
+# fallback it guards (a full navigation) is the thing currently known to break.
+PROJECT_ENTRY_URL_TIMEOUT_SECONDS = 20.0
+PROJECT_ENTRY_COMPOSER_TIMEOUT_MS = 30000
+
+
+def parse_project_target(url: str | None) -> tuple[str | None, str | None]:
+    """Split a project home URL into (gizmo_id, slug).
+
+    The slug is the only handle the sidebar offers — rows carry no gizmo id — but
+    the gizmo id is what the outcome is checked against, because two projects can
+    have confusable names (``lark-hao`` and ``lark-hao2`` both exist in
+    production) while their ids never collide.
+    """
+    if not url:
+        return None, None
+    match = PROJECT_URL_RE.search(url)
+    if not match:
+        return None, None
+    return match.group(1), (match.group(2) or None)
+
+
+def is_project_home_url(url: str | None) -> bool:
+    return parse_project_target(url)[0] is not None
+
+
+async def _sidebar_project_rows(page: Any) -> Any:
+    """The left rail's project rows, as a locator over the first selector that
+    actually matches. Selector drift is expected here, so fall through the list
+    rather than trusting one shape."""
+    for selector in selectors.SIDEBAR_PROJECT_ITEM:
+        rows = page.locator(selector)
+        if await rows.count():
+            return rows
+    return page.locator(selectors.SIDEBAR_PROJECT_ITEM[-1])
+
+
+async def _find_project_row_index(rows: Any, slug: str) -> int:
+    """Index of the row whose label equals ``slug``, or -1.
+
+    Equality, not containment: ``lark-hao`` is a prefix of ``lark-hao2``, so a
+    substring match would route a turn into the wrong project — a failure that
+    delivers a plausible-looking reply from the wrong context instead of erroring.
+    """
+    wanted = slug.strip().lower()
+    try:
+        labels = await rows.all_text_contents()
+    except Exception:
+        return -1
+    for index, label in enumerate(labels):
+        if label.strip().lower() == wanted:
+            return index
+    return -1
+
+
+async def _expand_sidebar_projects(page: Any) -> bool:
+    """Click the "show more" expander if present. Returns whether it was clicked."""
+    try:
+        buttons = page.locator("button[data-sidebar-item]")
+        for index in range(await buttons.count()):
+            button = buttons.nth(index)
+            label = (await button.text_content() or "").strip().lower()
+            if label in selectors.SIDEBAR_SHOW_MORE_TEXTS:
+                await button.click(timeout=5000)
+                return True
+    except Exception as exc:
+        log.debug("sidebar expand failed: %s", exc)
+    return False
+
+
+async def _wait_for_project_url(page: Any, gizmo_id: str, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if gizmo_id in (page.url or ""):
+                return True
+        except Exception:
+            pass
+        await _sleep_briefly()
+    return False
+
+
+async def _ensure_chatgpt_home(page: Any, settings: Settings) -> None:
+    """Put the tab on a *working* chatgpt.com page before touching the sidebar.
+
+    A tab that already died on /project has no sidebar to click, and its JS
+    context does not recover in place: clicking the error page's own "Try again"
+    and going back through history were both measured to leave it on "Try again"
+    (2026-09-09). Only a fresh navigation to the home URL brings it back.
+    """
+    try:
+        current_url = page.url
+    except Exception:
+        current_url = None
+    healthy = bool(current_url) and "chatgpt.com" in current_url
+    if healthy:
+        try:
+            healthy = bool(await page.locator(selectors.CHAT_INPUT[0]).count())
+        except Exception:
+            healthy = False
+    if not healthy:
+        await page.goto(settings.chatgpt_url, wait_until="domcontentloaded")
+    await page.wait_for_selector(
+        selectors.CHAT_INPUT[0], timeout=PROJECT_ENTRY_COMPOSER_TIMEOUT_MS
+    )
+
+
+async def open_project_home(page: Any, target_url: str, settings: Settings) -> str:
+    """Open a project home page through the sidebar, falling back to a direct
+    navigation. Returns the mode that actually delivered the page.
+
+    Why this exists: since 2026-09-09 a full navigation to ``/g/<gizmo>/project``
+    renders ChatGPT's error boundary — body is just "Try again", no composer, no
+    file input — while the document itself returns HTTP 200 and every backend-api
+    call succeeds. Measured on all four projects tried and on both webdock1 and
+    webdock2 (different egress IPs, different Chrome majors), so it is neither a
+    device nor a network fault. The same page reached by clicking its sidebar row
+    renders normally. Conversation pages under the same project are unaffected.
+
+    The outcome is checked against the gizmo id in the resulting URL plus the
+    composer being present, not against the click having been dispatched: a click
+    that lands on the wrong row still "succeeds".
+    """
+    gizmo_id, slug = parse_project_target(target_url)
+    if not gizmo_id or not slug or settings.project_entry_mode.lower() != "sidebar":
+        await page.goto(target_url, wait_until="domcontentloaded")
+        return "direct"
+
+    started = time.monotonic()
+    stage = "home"
+    try:
+        await _ensure_chatgpt_home(page, settings)
+        home_seconds = round(time.monotonic() - started, 2)
+
+        stage = "row"
+        rows = await _sidebar_project_rows(page)
+        index = await _find_project_row_index(rows, slug)
+        expanded = False
+        if index < 0:
+            expanded = await _expand_sidebar_projects(page)
+            if expanded:
+                rows = await _sidebar_project_rows(page)
+                index = await _find_project_row_index(rows, slug)
+        if index < 0:
+            raise RuntimeError(f"project row not found for slug={slug}")
+
+        stage = "click"
+        row = rows.nth(index)
+        await row.scroll_into_view_if_needed(timeout=5000)
+        await row.hover(timeout=5000)
+        container = row.locator("xpath=ancestor::li[1]")
+        if not await container.count():
+            container = row.locator("xpath=..")
+        await container.locator(
+            selectors.SIDEBAR_PROJECT_HOME_BUTTON[0]
+        ).first.click(timeout=10000)
+
+        stage = "url"
+        if not await _wait_for_project_url(
+            page, gizmo_id, PROJECT_ENTRY_URL_TIMEOUT_SECONDS
+        ):
+            raise RuntimeError(f"url did not reach gizmo={gizmo_id}")
+
+        stage = "composer"
+        await page.wait_for_selector(
+            selectors.CHAT_INPUT[0], timeout=PROJECT_ENTRY_COMPOSER_TIMEOUT_MS
+        )
+        log.info(
+            "project_entry mode=sidebar slug=%s total=%.2fs home=%.2fs expanded=%s idx=%d",
+            slug,
+            time.monotonic() - started,
+            home_seconds,
+            expanded,
+            index,
+        )
+        return "sidebar"
+    except Exception as exc:
+        log.warning(
+            "project_entry mode=sidebar slug=%s FAILED stage=%s after=%.2fs reason=%s; "
+            "falling back to direct navigation",
+            slug,
+            stage,
+            time.monotonic() - started,
+            exc,
+        )
+        await page.goto(target_url, wait_until="domcontentloaded")
+        return "direct_fallback"
+
+
 async def _navigate_lane_page(page: Any, lane: LaneContext, settings: Settings) -> None:
     target_url = lane.target_url or settings.chatgpt_url
     if not target_url:
@@ -402,6 +599,9 @@ async def _navigate_lane_page(page: Any, lane: LaneContext, settings: Settings) 
     if current_url == target_url:
         return
     if should_navigate_to_chatgpt(current_url) or lane.target_url:
+        if is_project_home_url(target_url):
+            await open_project_home(page, target_url, settings)
+            return
         await page.goto(target_url, wait_until="domcontentloaded")
 
 
@@ -458,6 +658,12 @@ async def _sleep_one_second() -> None:
     import asyncio
 
     await asyncio.sleep(1)
+
+
+async def _sleep_briefly() -> None:
+    import asyncio
+
+    await asyncio.sleep(0.3)
 
 
 async def _safe_page_title(page: Any) -> str:

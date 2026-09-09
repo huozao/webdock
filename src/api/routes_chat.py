@@ -6,11 +6,13 @@ import hashlib
 import logging
 import re
 import uuid
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from src.browser.debug_dump import save_debug_dump
 from src.browser.image_input import extract_image_urls
 from src.api.chat_jobs import JobCapacityError, JobConflictError
 from src.browser.lane_scheduler import LaneContext
@@ -323,11 +325,46 @@ def _content_to_text(content: Any) -> str:
     return str(content).strip()
 
 
+def _publish_debug_screenshot(request: Request, debug_dir: str | None) -> str | None:
+    """Expose a failed turn's screenshot as a short-lived media URL.
+
+    ``save_debug_dump`` has always written ``screenshot.png``, but it stayed on
+    the device: the Feishu card could only ever carry the snapshot *path*, so
+    every report needed a round trip to the box before anyone could see what the
+    page looked like. Reuse the existing media store — same TTL and token scheme
+    the reply-image path uses — instead of adding a second delivery mechanism.
+
+    Best-effort by construction: a failure to publish forensics must never
+    replace the error the caller is already reporting.
+    """
+    if not debug_dir:
+        return None
+    store = getattr(request.app.state, "media_store", None)
+    if store is None:
+        return None
+    settings = get_settings()
+    base = (settings.media_base_url or "").rstrip("/")
+    if not base:
+        return None
+    try:
+        candidate = Path(debug_dir)
+        if not candidate.is_absolute() and not candidate.exists():
+            candidate = settings.debug_dir / candidate.name
+        shot = candidate / "screenshot.png"
+        if not shot.is_file():
+            return None
+        token = store.put(shot.read_bytes(), "image/png", "webdock-error.png")
+    except Exception as exc:
+        log.warning("could not publish debug screenshot from %s: %s", debug_dir, exc)
+        return None
+    return f"{base}/media/{token}"
+
+
 async def _ask_browser(
     request: Request, message: str, lane: LaneContext, images: list[str] | None = None
 ) -> Any | JSONResponse:
     browser = request.app.state.browser
-    attach_error = await _ensure_browser_ready(browser)
+    attach_error = await _ensure_browser_ready(browser, request)
     if attach_error:
         return attach_error
 
@@ -337,13 +374,40 @@ async def _ask_browser(
     except RelayError as exc:
         browser.last_error = f"{exc.code.value}: {exc.message}"
         status_code = _status_code_for_error(exc.code)
-        return JSONResponse(
-            status_code=status_code,
-            content=error_response(exc.code, exc.message, exc.debug_dir),
+        payload = error_response(exc.code, exc.message, exc.debug_dir)
+        screenshot_url = _publish_debug_screenshot(request, exc.debug_dir)
+        if screenshot_url:
+            payload["debug_screenshot_url"] = screenshot_url
+        return JSONResponse(status_code=status_code, content=payload)
+
+
+def _describe_start_failure(exc: Exception) -> str:
+    """Name the step that actually failed.
+
+    The old wording claimed "Chrome not running or CDP attach failed" for every
+    exception out of ``browser.start()``. On 2026-09-09 that sent a report down
+    the wrong path for an hour: both devices reported it while Chrome was up and
+    CDP answered ``/json/version`` on demand — what had really failed was the
+    ``page.goto`` that ``start()`` does *after* attaching, which the message never
+    mentioned. Distinguish the two so the card names the failing step.
+    """
+    text = str(exc)
+    # CDP first: an attach failure reports the last transport error inside its own
+    # message, so a "Timeout" inside it must still read as an attach failure.
+    if "cdp" in text.lower():
+        return (
+            f"CDP attach failed: {text}. Chrome is not reachable on the debugging "
+            "port — make sure it is running in noVNC, then retry."
         )
+    if "goto" in text or "Timeout" in text:
+        return (
+            f"Chrome is attached but the initial page load failed: {text}. "
+            "The browser process is alive; the ChatGPT page did not load."
+        )
+    return f"Browser start failed: {text}."
 
 
-async def _ensure_browser_ready(browser: Any) -> JSONResponse | None:
+async def _ensure_browser_ready(browser: Any, request: Request | None = None) -> JSONResponse | None:
     if browser.started and browser.page is not None:
         return None
 
@@ -351,13 +415,23 @@ async def _ensure_browser_ready(browser: Any) -> JSONResponse | None:
         await browser.start()
     except Exception as exc:
         browser.last_error = str(exc)
-        return JSONResponse(
-            status_code=503,
-            content=error_response(
-                ErrorCode.BROWSER_NOT_STARTED,
-                f"Chrome not running or CDP attach failed: {exc}. Make sure Chrome is running in noVNC, then retry.",
-            ),
+        # Attach failures used to return with no forensics at all: no snapshot, so
+        # no screenshot and no page dump, so the only thing the Feishu card could
+        # show was the (misleading) message. The page usually exists here — the
+        # failure is the navigation, not the attach — so dump whatever there is.
+        debug_dir = None
+        try:
+            debug_dir = await save_debug_dump(getattr(browser, "page", None), exc)
+        except Exception as dump_exc:  # never let forensics mask the real error
+            log.warning("debug dump failed during browser start: %s", dump_exc)
+        payload = error_response(
+            ErrorCode.BROWSER_NOT_STARTED, _describe_start_failure(exc), debug_dir
         )
+        if request is not None:
+            screenshot_url = _publish_debug_screenshot(request, debug_dir)
+            if screenshot_url:
+                payload["debug_screenshot_url"] = screenshot_url
+        return JSONResponse(status_code=503, content=payload)
 
     if not browser.started or browser.page is None:
         return JSONResponse(

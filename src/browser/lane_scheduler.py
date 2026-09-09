@@ -430,7 +430,21 @@ class ChatLaneScheduler:
             # only navigate when the tab isn't already there; the editor wait
             # below still gates on the page being usable.
             if current != target_url:
-                await page.goto(target_url, wait_until="domcontentloaded")
+                # Imported here, not at module scope: manager imports LaneContext
+                # from this module, so a top-level import would be circular.
+                from src.browser.manager import is_project_home_url, open_project_home
+
+                if is_project_home_url(target_url):
+                    # Second entry point into a project page, and it must not stay
+                    # a bare goto: a direct navigation to /project has rendered an
+                    # empty "Try again" page since 2026-09-09, and doing it here
+                    # would undo the sidebar entry _navigate_lane_page just made
+                    # whenever the two URLs differ by so much as a trailing slash.
+                    from src.config import get_settings
+
+                    await open_project_home(page, target_url, get_settings())
+                else:
+                    await page.goto(target_url, wait_until="domcontentloaded")
             await find_first(page, selectors.CHAT_INPUT, visible=True, timeout_ms=ROUTE_INPUT_TIMEOUT_MS)
         except Exception as exc:  # navigation failure must not block the chat
             log.warning("Lane routing navigation to %s failed: %s", target_url, exc)

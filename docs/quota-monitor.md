@@ -232,6 +232,24 @@ claude 页有 5 个常驻动画一直在产帧，所以从没触发过。触发�
 重置告警因此被静默停用**，看板和日报上只表现为「网络错误」。截图失败现在只记
 `screenshot_error`，`screenshot_path` 存 NULL，`screenshot_url` 只在文件真实存在时下发。
 
+### X 截图正文为空：超 viewport 的 CDP 长画布未绘制虚拟列表（2026-09-10）
+
+现象：截图尺寸已经从 viewport 高度扩展到约 `1365×2218`，但资料头和 Posts/Replies
+标签下面整片空白；同一条 `captures` 记录的 `status` 仍是 `healthy`，`fields_json.posts`
+有 5 条，截图接口也返回 200。判据说明问题在截图绘制，不在登录态、帖子解析或通知传输。
+
+根因：X 时间线是虚拟列表。用 `Page.captureScreenshot` 配合超过当前 viewport 的 `clip`
+和 `captureBeyondViewport=true` 时，Chromium 可以返回一张尺寸正确的长 PNG，但 X 的正文
+没有被绘制进超 viewport 画布。**不要把这个组合当成 X 长截图方案**。
+
+最终方案：`_x_screenshot_clip` 仍按已渲染 `article[data-testid='tweet']` 的最后边界计算
+高度（末尾留 40px，最大 3000px）；`_x_screenshot_via_cdp` 临时调用
+`Emulation.setDeviceMetricsOverride` 把同一高度设为 viewport，调用 `_force_repaint` 后用
+`Page.captureScreenshot(captureBeyondViewport=false)` 截图，并在 `finally` 中调用
+`Emulation.clearDeviceMetricsOverride`。这让已解析的帖子处于实际可绘制区域，同时恢复原浏览器
+viewport。回归判据：连续生产 capture `519`、`522` 均为 `healthy`、5 条帖子、`1365×2218`，
+正文区域非白像素检查通过；用户已在 noVNC/通知截图中确认视觉效果。
+
 ## 发布
 
 quota-monitor 随独立仓库 `huozao/ai-quota-monitor` 的 `main` 不可变镜像发布；生产 compose
@@ -271,6 +289,26 @@ return，而 `quota_meta.last_daily_report` 照样落库，那一档**不会补�
 ⚠️ **跨仓发版顺序**：卡片用到中枢的新字段时（如 `NotifyField.note`），必须
 **AliECS backend 先上线**。旧模型对多余字段是 pydantic 默认的静默忽略，先上 webdock
 的后果不是「样式没生效」而是**那一行整个消失**（2026-09-07 在生产容器里实测过）。
+
+## 交接快照（2026-09-10）
+
+⚠️ **本节覆盖 2026-09-08 的旧快照，只描述本次收尾时已核验的状态**；后续接手仍先跑下面
+〈交接时先核验〉，不要只凭快照判断实时运行状态。
+
+- 源码唯一源：`huozao/ai-quota-monitor` GitHub `main`=`46a82a1beef2b8631a72cace0498e830fbb48dee`；
+  生产 `QUOTA_IMAGE` 和容器 `Config.Image` 均为 `sha-46a82a1beef2b8631a72cace0498e830fbb48dee`。
+  本轮 release run=`34461577419`，生产 manifest digest=`sha256:d9b4bc8aa568735aa6b5da0371933d23f062260431927c40d53fccee5ad5829d`。
+- infra 唯一源：GitHub `huozao/infra` `main`=`5b17c6319b33d892be853c24434eaf9741fb34da`；
+  `origin`、`device-aliecs`、`device-txecs`、`device-webdock1` 四个 ref 已核对一致。
+  `QUOTA_IMAGE` 只在 SOPS `secrets/webdock2.enc.env` 维护，设备由 `render.sh webdock2` 渲染。
+- 生产容器回读：`running | healthy`，`/healthz` 返回 `ok=true`、`attach_enabled=true`；容器内已核对
+  `_x_screenshot_via_cdp`、`Emulation.setDeviceMetricsOverride` 和 `captureBeyondViewport=false`。
+- 采集证据：最新 X capture `522`（此前 `519`）为 `healthy`、5 条帖子、PNG `1365×2218`；正文区域
+  像素检查通过。用户已确认最终视觉效果。
+- 部署副本边界：webdock2 的 `/opt/webdock` 无 Git，不是源码副本；不要在那里手工改采集器代码，
+  也不要把 SQLite、截图、浏览器 profile、Token 或生产 `.env` 放入公开仓库。
+- 已知非本次问题：`render.sh webdock2` 仍会报告 `runtime.json` 与仓库模板的 mirror drift，主机文件
+  明确以主机为权威，本轮未覆盖；`weapp-ci-upload-key` 缺失只表示 miniapp CI 上传未启用。
 
 ## 交接快照（2026-09-08 晚）
 

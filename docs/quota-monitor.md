@@ -180,6 +180,21 @@ column，折行只让那一格变高，不牵动邻格；顺带每格宽度从 5
   随后 websockify 反复报 `localhost:5902 connection refused`。当前 entrypoint 会等待
   `/tmp/.X11-unix/X101` 就绪后才启动 x11vnc。
 
+### Xvfb 陈旧锁导致“容器 healthy 但采集停止”（2026-09-16）
+
+现场证据：`quota-monitor` 容器显示 `running | healthy`，但 `/tmp/.X101-lock` 和
+`/tmp/.X11-unix/X101` 是 2026-09-10 的残留文件，锁内 PID 10 已是 zombie；`xvfb.log`
+报 `Server is already active for display 101`，`chrome.log` 报 `Missing X server or $DISPLAY`，
+容器内 `9224` 拒绝连接。原健康检查只访问 API `/healthz`，所以把浏览器已死误报为 healthy。
+
+本次恢复只在 quota 容器内删除这两个已确认陈旧的运行文件，再重启 `quota-monitor`；未触碰
+`quota_browser_data`、`quota_data`、截图或日志卷。恢复判据是 Xvfb/x11vnc/Chrome 存活、9224
+可读、三个 provider 的 `captures` 写入新 healthy 行，随后 `notify_deliveries.status=sent`。
+
+修复已进入采集器源码提交 `bcc4485`：entrypoint 只在锁 PID 缺失或为 zombie 时清理，并同时
+检查 Xvfb 进程和套接字；`/healthz` 现在读取 9224 CDP，失败返回 HTTP 503；Docker healthcheck
+启动宽限期为 90 秒。生产是否已运行该修复，以容器 `Config.Image` 的完整 SHA tag 为准。
+
 ### `/console/quota/` 打不开：三种成因，判据都在 txecs 的日志里（2026-09-09）
 
 **页面和 nginx 路由几乎从来不是原因。** `location = /console/quota/` 直接发本地静态文件，
@@ -309,6 +324,39 @@ return，而 `quota_meta.last_daily_report` 照样落库，那一档**不会补�
   也不要把 SQLite、截图、浏览器 profile、Token 或生产 `.env` 放入公开仓库。
 - 已知非本次问题：`render.sh webdock2` 仍会报告 `runtime.json` 与仓库模板的 mirror drift，主机文件
   明确以主机为权威，本轮未覆盖；`weapp-ci-upload-key` 缺失只表示 miniapp CI 上传未启用。
+
+## 交接快照（2026-09-16，Xvfb 恢复修复已上线）
+
+本节记录本次故障修复和正式部署的现场结果；后续接手先执行下面的核验命令，以现场为准。
+
+- 采集器 GitHub 唯一源码：`huozao/ai-quota-monitor` `main`=`bcc4485d129e09eaa7f896f080598f0b5354fbd8`。
+  本地采集器仓与 `origin/main` 已一致；本次本地提交为 `bcc4485`，没有未提交代码。
+- GHCR release run=`35056701526`，`test` 与 `build-push` 均成功；镜像 tag 为
+  `ghcr.io/huozao/ai-quota-monitor:sha-bcc4485d129e09eaa7f896f080598f0b5354fbd8`，manifest digest
+  为 `sha256:a3e70a6983ee81947d6e66d0a88431857957bdc5802e1fcac2619a95b51c4d8b`。
+- infra 唯一源码：GitHub `huozao/infra` `main`=`c068fed`；该提交只更新加密文件中的
+  `QUOTA_IMAGE`，没有混入其他 guidance dirty changes。webdock2 已从 GitHub `main` fast-forward，
+  `render.sh webdock2` 已将新 pin 写入 `/opt/webdock/deploy/laptop/.env`。
+- webdock2 当前容器回读：`quota-monitor` 为 `running | healthy`，`Config.Image` 为上述完整 SHA tag，
+  `/healthz` 返回 `ok=true`、`attach_enabled=true`、`browser_cdp=true`；`webdock` 主容器未重建。
+- 本次正式更新只执行 `pull quota-monitor` 和 `up -d --no-build quota-monitor`；三个卷仍分别挂载
+  `/var/lib/webdock/quota_browser_data`、`/var/lib/webdock/quota_data`、`/var/log/webdock/quota-monitor`。
+- 部署后 `codex`、`claude`、`x-thsottiaux` 均继续写入 `healthy` captures；现场最近回读分别为
+  `2026-09-16T04:48:54Z`、`04:49:02Z`、`04:49:11Z`。`quota_meta.last_daily_report` 为
+  `2026-09-16:08:00`，对应 `notify_deliveries.status=sent` 的日报记录为 outbox `1733`。
+- 修复内容：entrypoint 只在 Xvfb 锁 PID 缺失或为 zombie 时清理 `:101` 锁/套接字，并同时检查进程与
+  套接字；`/healthz` 检查 CDP `9224`，浏览器失效返回 HTTP 503；Docker healthcheck 启动宽限期为 90 秒。
+- 未纳入本次处理：`render.sh webdock2` 仍报告 `runtime.json` mirror drift（主机文件保持权威）；
+  这不是 quota 镜像 pin 或采集器源码漂移。infra 工作区仍有其他会话的 guidance 改动，未提交、未覆盖。
+
+### 本次故障的可复现判据与恢复边界
+
+“容器 healthy 但日报停止”不能只看 `/healthz` 原 HTTP 200。先看 `Config.Image`、CDP `9224`、Xvfb
+进程/锁，再看三个 provider 的 captures，最后看 `notify_deliveries`。恢复时只清理容器内已证明陈旧的
+`/tmp/.X101-lock` 和 `/tmp/.X11-unix/X101`，绝不删除浏览器 profile、SQLite、截图或日志卷。
+
+该修复只保证浏览器运行时和 API 健康探针能发现故障，不代替人工登录、页面解析、通知中枢投递或用户收件
+证明；这些仍按本文排障入口分别验收。
 
 ## 交接快照（2026-09-08 晚）
 

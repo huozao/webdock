@@ -358,6 +358,26 @@ return，而 `quota_meta.last_daily_report` 照样落库，那一档**不会补�
 该修复只保证浏览器运行时和 API 健康探针能发现故障，不代替人工登录、页面解析、通知中枢投递或用户收件
 证明；这些仍按本文排障入口分别验收。
 
+## 交接快照（2026-09-19，重复 Codex 标签页）
+
+本次只读定位并清理了一个多余的 Codex 标签页，未重启容器、未删除浏览器 profile、未改变登录态或采集数据。
+
+- 清理前 webdock2 的 quota Chrome CDP `9224` 有 4 个网页标签：Codex 2 个、Claude 1 个、X 1 个；两个 Codex 的 URL 都是
+  `https://chatgpt.com/codex/cloud/settings/analytics#usage`。
+- 同时段 `captures` 按 provider 每轮仍只有 1 条 `codex`，所以第二个 Codex 是闲置重复页，不是看板或数据库重复采集。
+- 根因已确认到代码边界：`docker/quota-entrypoint.sh` 每次启动都传入 Codex/Claude 启动 URL；profile 是持久卷；`quota_monitor/app.py::_find_page()` 只取第一个匹配页，未实现重复页清理。持久会话恢复与启动 URL 叠加，或人工额外打开页面，都可能留下重复 Codex。
+- 通过 `GET http://127.0.0.1:9224/json/close/<duplicate-target-id>` 关闭其中一个后复核，当前网页标签恢复为 Codex、Claude、X 各 1 个。浏览器进程、容器和三个数据卷均未重启/删除。
+- 防复发尚未实现。后续应先确定“entrypoint 启动页”与“collector 创建页”唯一归属，再设计明确的 duplicate policy；不要直接清空 `quota_browser_data`。
+
+现场复核命令（只读；不要把真实 profile、截图、SQLite 或 token 带回仓库）：
+
+```bash
+ssh webdock2 "wsl -d Ubuntu-24.04-WebDock -- docker exec quota-monitor sh -lc 'curl -sS http://127.0.0.1:9224/json/list'"
+ssh webdock2 "wsl -d Ubuntu-24.04-WebDock -- docker exec quota-monitor python -c 'import sqlite3; c=sqlite3.connect(\"/app/quota_data/quota.sqlite3\"); print(*c.execute(\"select provider,max(captured_at),count(*) from captures group by provider\"),sep=\"\\n\")'"
+```
+
+判据是 CDP `type=page` 的网页标签数与 provider 数量一致，且每个 provider 的最新采集持续前进；`healthz=200` 单独不能证明标签页没有重复。
+
 ## 交接快照（2026-09-08 晚）
 
 ⚠️ **这一节是时间点快照，判据只在写下的那一刻成立**；接手时先跑下面〈交接时先核验〉那三条，

@@ -32,8 +32,9 @@ ssh txecs "sudo docker exec business-cn-postgres-1 psql -U app -d app -c \"selec
 
 ## 运行边界
 
-- quota-monitor 使用独立 Chrome profile、独立 `DISPLAY=:101`、独立 CDP `9224` 和 noVNC `6082`。
-- 首次登录必须通过 noVNC 人工完成；只有人工确认登录完成后，才创建
+- quota-monitor 使用独立 Chrome profile、独立 `DISPLAY=:101`、独立 CDP `9224`（多账号时扩展如 `9225`）和 noVNC `6082`。
+- 多账号支持（2026-09-24 起）：通过 `QUOTA_CODEX_ACCOUNTS`（如 `codex:9224:ishell168,codex_2:9225:www.nada.cn`）启动多个分屏独立 Chrome 实例；端口 9224 沿用根 profile（`/app/quota_browser_data`），其余端口使用独立子目录（如 `/app/quota_browser_data/account_9225`），物理隔离 Cookie 与会话。
+- 首次登录必须通过 noVNC 人工完成（控制台 `https://hydwang.xyz/console/` 链接已自带认证和自动连接参数，经 Authelia 2FA 登录后直达桌面无需重复输 VNC 密码）；只有人工确认登录完成后，才创建
   `/var/lib/webdock/quota_data/ATTACH_ENABLED`，采集器随后只读页面文字、进度条和截图。
 - 采集器不自动登录、不点击账户操作、不使用 API token 读取额度。
 
@@ -305,24 +306,38 @@ return，而 `quota_meta.last_daily_report` 照样落库，那一档**不会补�
 **AliECS backend 先上线**。旧模型对多余字段是 pydantic 默认的静默忽略，先上 webdock
 的后果不是「样式没生效」而是**那一行整个消失**（2026-09-07 在生产容器里实测过）。
 
-## 交接快照（2026-09-24，Codex 重置额度解析与飞书卡片优化已上线）
+## 交接快照（2026-09-24，Codex 多账号监控、自动防重标签页与生产部署）
 
-本节记录本次 Codex 额度重置次数解析、飞书卡片对称排版优化以及正式生产部署的现场结果：
+本节记录 Codex 多账号独立会话监控、标签页自动防重关闭机制、飞书卡片与通知限制以及正式生产部署的现场结果：
 
-- 采集器 GitHub 唯一源码：`huozao/ai-quota-monitor` `main`=`d4bdd21362f3b1947136288d3087c92c564868f0`。
-  本地采集器仓与 `origin/main` 一致，本地 34 个回归测试全绿；本次提交为 `d4bdd21`，包含重置次数提取、归一化、事件去重及卡片版式调整。
-- GHCR release run=`35949786477`，`test` 与 `build-push` 均成功；生产镜像 tag 为
-  `ghcr.io/huozao/ai-quota-monitor:sha-d4bdd21362f3b1947136288d3087c92c564868f0`。
-- infra 唯一源码：GitHub `huozao/infra` `main`=`1b9f25b`；该提交在 SOPS `secrets/webdock2.enc.env` 中
-  更新了 `QUOTA_IMAGE` pin。webdock2 已 fast-forward 并由 `render.sh webdock2` 更新 `/opt/webdock/deploy/laptop/.env`。
-- webdock2 生产容器回读：`quota-monitor` 为 `running | healthy`，`Config.Image` 为上述完整 SHA tag，
-  `/healthz` 返回 `ok=true`、`attach_enabled=true`、`browser_cdp=true`；`webdock` 主容器未受影响。
-- 业务功能实测：
-  - Codex 成功解析出 `resets_available: 1`、`resets_expires_at: "Oct 22, 6:31 PM"`（归一化为 UTC `2026-10-22T18:31:00+00:00`，展示时区即 `10/23 02:31`）以及 `resets_type: "Full reset (Weekly + 5 hr)"`。
-  - 新增 `limit_reset_candidate` 判定：仅当可用重置次数增加或到期时间更新时触发 `quota.limit_reset` 告警；额度减少或不变绝不误报。
-  - 飞书日报卡片版式对齐：各模型标题纯净化（`֎ Codex`、`✴️ Claude`），取消行内重复的采集时间戳；额度信息下沉为小号微注（`notation`），重置次数单独标为绿色加粗（`💡 重置额度 1 次`）；附图说明由「页面截图」精简为「截图」。实机消息通过 outbox `3483` 发送验收完成。
-  - 标签与图标预备：`PROVIDER_LABELS` 登记了 `֎ Codex`、`✴️ Claude` 以及 `∩ AGY`（淡蓝天色 `wathet` 标签）。
-- 部署恢复：重启后按 runbook 检查 CDP 页面，关闭了一个自动恢复产生的多余闲置 Codex 标签页，确保维持 Codex、Claude、X 各 1 个标签页的不变量。
+- 采集器 GitHub 唯一源码：`huozao/ai-quota-monitor` `main`=`2d0e824`（最新代码提交 `accdd26`）。
+  本地 43 个回归测试全绿（包含多账号解析、标签页去重及标签数量保护）；提交记录：
+  - `498e33f`: feat: support multi-account codex monitoring with isolated browser profiles
+  - `852d2b0`: fix: use tab join to avoid f-string syntax error in entrypoint script
+  - `7d05150`: fix: match chatgpt domain for codex and auto-close duplicate browser tabs
+  - `accdd26`: fix: cap notification tags at 3 to adhere to notify service limits
+  - `2d0e824`: docs: record browser tab invariant resolution and notification tag limit in README
+- 生产镜像与容器部署：
+  - 生产镜像 tag 为 `ghcr.io/huozao/ai-quota-monitor:sha-accdd2630fc97b28d739ee5dbe039f66ee25ba94`。
+  - webdock2 生产容器回读：`quota-monitor` 为 `running | healthy`，`Config.Image` 为上述完整 SHA tag，
+    `/healthz` 返回 `ok=true`、`attach_enabled=true`、`browser_cdp_ports=[9224, 9225]` 全部为 `true`。
+  - webdock2 环境配置 `/opt/webdock/deploy/laptop/.env`：
+    `QUOTA_CODEX_ACCOUNTS=codex:9224:ishell168,codex_2:9225:www.nada.cn`。
+- 多账号架构与会话隔离：
+  - 双 Chrome 实例并排运行在 `DISPLAY=:101`（`680x768`），端口 9224 占用 `(0,0)` 并沿用根 profile（`/app/quota_browser_data`，保护既有登录态），端口 9225 占用 `(680,0)` 并使用独立目录（`/app/quota_browser_data/account_9225`）。
+  - noVNC 访问直通：控制台 `https://hydwang.xyz/console/` 链接已自带 `password=...&autoconnect=1`，Authelia 2FA 登录后无需再输 VNC 密码。
+  - 账号标签动态括号展示：过滤常见域名后缀，使用邮箱前缀或用户名（如 `֎ Codex (ishell168)` 和 `֎ Codex (www.nada.cn)`），保持原有两列对称卡片版式。
+- 标签页单页不变量（解决历史重复标签隐患）：
+  - `_page_matches` 兼容 `codex` 与 `chatgpt.com` 域名，避免匹配失灵反复开新标签。
+  - `_find_page` 自动执行重复标签清理：每次轮询只保留首个匹配页，多余的匹配页自动执行 `await dup.close()` 彻底关闭。在生产上已实测自动关闭 port 9225 上多余的 4 个标签页，严格维持每个实例 1 个目标页的不变量。
+- 通知契约与限制：
+  - AliECS 中枢 notify 服务要求 `tags` 最多 3 项（Pydantic 校验 `max_length: 3`），`quota_monitor/app.py` 强制截断为 `tags[:3]`，彻底解决多账号下 HTTP 422 拒绝发送问题。
+  - 生产飞书日报经由 `outbox_id=3491` 成功触发投递并确认收妥。
+- 业务数据现场状态（`/v1/quota/latest`）：
+  - `codex` (`Codex (ishell168)`): `healthy`，5h 100%，周额度 0%（重置时间 9/26 09:25），重置额度 1 次（到期 10/22）。
+  - `codex_2` (`Codex (www.nada.cn)`): `healthy`，5h 97%（重置时间 14:22），周额度 93%（重置时间 10/1 08:20），重置额度 1 次（到期 10/22）。
+  - `claude`: `healthy`，5h 100%，周额度 0%（重置时间 Sat 10:00 AM）。
+  - `x-thsottiaux`: `healthy`。
 
 ## 交接快照（2026-09-19，重复 Codex 标签页）
 

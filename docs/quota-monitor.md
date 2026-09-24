@@ -305,7 +305,26 @@ return，而 `quota_meta.last_daily_report` 照样落库，那一档**不会补�
 **AliECS backend 先上线**。旧模型对多余字段是 pydantic 默认的静默忽略，先上 webdock
 的后果不是「样式没生效」而是**那一行整个消失**（2026-09-07 在生产容器里实测过）。
 
-## 交接快照（2026-09-10）
+## 交接快照（2026-09-24，Codex 重置额度解析与飞书卡片优化已上线）
+
+本节记录本次 Codex 额度重置次数解析、飞书卡片对称排版优化以及正式生产部署的现场结果：
+
+- 采集器 GitHub 唯一源码：`huozao/ai-quota-monitor` `main`=`d4bdd21362f3b1947136288d3087c92c564868f0`。
+  本地采集器仓与 `origin/main` 一致，本地 34 个回归测试全绿；本次提交为 `d4bdd21`，包含重置次数提取、归一化、事件去重及卡片版式调整。
+- GHCR release run=`35949786477`，`test` 与 `build-push` 均成功；生产镜像 tag 为
+  `ghcr.io/huozao/ai-quota-monitor:sha-d4bdd21362f3b1947136288d3087c92c564868f0`。
+- infra 唯一源码：GitHub `huozao/infra` `main`=`1b9f25b`；该提交在 SOPS `secrets/webdock2.enc.env` 中
+  更新了 `QUOTA_IMAGE` pin。webdock2 已 fast-forward 并由 `render.sh webdock2` 更新 `/opt/webdock/deploy/laptop/.env`。
+- webdock2 生产容器回读：`quota-monitor` 为 `running | healthy`，`Config.Image` 为上述完整 SHA tag，
+  `/healthz` 返回 `ok=true`、`attach_enabled=true`、`browser_cdp=true`；`webdock` 主容器未受影响。
+- 业务功能实测：
+  - Codex 成功解析出 `resets_available: 1`、`resets_expires_at: "Oct 22, 6:31 PM"`（归一化为 UTC `2026-10-22T18:31:00+00:00`，展示时区即 `10/23 02:31`）以及 `resets_type: "Full reset (Weekly + 5 hr)"`。
+  - 新增 `limit_reset_candidate` 判定：仅当可用重置次数增加或到期时间更新时触发 `quota.limit_reset` 告警；额度减少或不变绝不误报。
+  - 飞书日报卡片版式对齐：各模型标题纯净化（`֎ Codex`、`✴️ Claude`），取消行内重复的采集时间戳；额度信息下沉为小号微注（`notation`），重置次数单独标为绿色加粗（`💡 重置额度 1 次`）；附图说明由「页面截图」精简为「截图」。实机消息通过 outbox `3483` 发送验收完成。
+  - 标签与图标预备：`PROVIDER_LABELS` 登记了 `֎ Codex`、`✴️ Claude` 以及 `∩ AGY`（淡蓝天色 `wathet` 标签）。
+- 部署恢复：重启后按 runbook 检查 CDP 页面，关闭了一个自动恢复产生的多余闲置 Codex 标签页，确保维持 Codex、Claude、X 各 1 个标签页的不变量。
+
+## 交接快照（2026-09-19，重复 Codex 标签页）
 
 ⚠️ **本节覆盖 2026-09-08 的旧快照，只描述本次收尾时已核验的状态**；后续接手仍先跑下面
 〈交接时先核验〉，不要只凭快照判断实时运行状态。

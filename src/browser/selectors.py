@@ -2,16 +2,17 @@ from __future__ import annotations
 
 
 CHAT_INPUT = [
+    "div.ProseMirror[contenteditable='true']",
+    "div[contenteditable='true']",
     "#prompt-textarea",
     "div[contenteditable='true'][id='prompt-textarea']",
     "textarea[data-testid='prompt-textarea']",
-    "div[contenteditable='true']",
 ]
 
 SEND_BUTTON = [
-    "button[data-testid='send-button']",
     "button[aria-label*='Send']",
     "button[aria-label*='发送']",
+    "button[data-testid='send-button']",
 ]
 
 # ChatGPT's composer hides a multi-file <input type="file"> that the "attach"
@@ -43,10 +44,13 @@ ATTACHMENT_PREVIEW = [
 ]
 
 ASSISTANT_MESSAGE = [
-    # Current ChatGPT DOM: every message is a conversation-turn (user + assistant);
-    # image/reasoning replies no longer carry data-message-author-role nor a
-    # .markdown body, so the legacy author-role/article selectors miss them. The
-    # author-role/agent-turn entries stay as fallbacks for older/text replies.
+    # New ChatGPT DOM (2026-10): virtualized turns with assistant role / markdown text style
+    "[data-markdown-text-style='assistant-message']",
+    "[data-conversation-role='assistant']",
+    "[data-chatgpt-agent-turn-start]",
+    "[data-virtualized-turn-content]:has([data-conversation-role='assistant'])",
+    "[data-virtualized-turn-content]:has([data-markdown-text-style='assistant-message'])",
+    # Legacy ChatGPT DOM: conversation-turn (user + assistant)
     "[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])",
     "article:has([data-message-author-role='assistant'])",
     "div[data-message-author-role='assistant']",
@@ -94,11 +98,14 @@ LOGIN_INDICATORS = [
 # 无文案约束的胶囊本体。ensure_mode 先用它问一次"现在写着什么"，带文案的候选
 # 只在它落空时兜底——逐个候选各等满一轮超时曾是发送前最大的一段固定开销
 # （2026-07-28 实测 6.0s/条，且多数时候只是确认模式已经对了）。
-MODE_PICKER_BUTTON_ANY = "button[aria-haspopup='menu'][class*='__composer-pill']"
+MODE_PICKER_BUTTON_ANY = (
+    "button[aria-label*='model' i], button[aria-label*='Model' i], button[aria-haspopup='menu'][class*='__composer-pill']"
+)
 MODE_PICKER_BUTTON = [
     "button[aria-haspopup='menu'][class*='__composer-pill']:has-text('极速')",
     "button[aria-haspopup='menu'][class*='__composer-pill']:has-text('均衡')",
     "button[aria-haspopup='menu'][class*='__composer-pill']:has-text('高级')",
+    "button[aria-label*='model' i]",
     MODE_PICKER_BUTTON_ANY,
 ]
 

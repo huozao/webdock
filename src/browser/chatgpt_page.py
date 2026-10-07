@@ -268,15 +268,12 @@ class ChatGPTPage:
             if any(label in current for label in labels):
                 return
             await hover_and_click(self.page, button)
-            item = None
-            for label in labels:
-                for base in selectors.MODE_MENU_ITEM:
-                    candidate = f"{base}:has-text('{label}')"
-                    if await find_first(self.page, [candidate], visible=True, timeout_ms=1200):
-                        item = candidate
-                        break
-                if item:
-                    break
+            candidates = [
+                f"{base}:has-text('{label}')"
+                for label in labels
+                for base in selectors.MODE_MENU_ITEM
+            ]
+            item = await find_first(self.page, candidates, visible=True, timeout_ms=300)
             if not item:
                 await self.page.keyboard.press("Escape")
                 log.warning("mode_switch_failed stage=menu target=%s", target)
@@ -623,7 +620,10 @@ class ChatGPTPage:
             return None
         text = feishu_safe_markdown(text)
         try:
-            assistant = self.page.locator("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])").last
+            assistant = self.page.locator(
+                "[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer']), "
+                "[data-virtualized-turn-content], [data-turn-key]"
+            ).last
         except Exception:
             return None
         captured = 0
@@ -651,7 +651,10 @@ class ChatGPTPage:
         try:
             # Anchor on the latest conversation-turn: image/widget replies no longer
             # carry data-message-author-role, so the old selector found nothing.
-            assistant = self.page.locator("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])").last
+            assistant = self.page.locator(
+                "[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer']), "
+                "[data-virtualized-turn-content], [data-turn-key]"
+            ).last
         except Exception:
             return tokens
         # WeChat: widgets only. Feishu/WeCom: widgets + tables (their rich cards can't
@@ -873,7 +876,7 @@ async def _clone_render_screenshot(page: Any, widget: Any) -> bytes | None:
 # don't control and could change).
 _SCROLL_TO_BOTTOM_JS = r"""
 () => {
-  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])");
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer']), [data-virtualized-turn-content], [data-turn-key]");
   let el = turns[turns.length - 1];
   while (el) {
     const cs = getComputedStyle(el);

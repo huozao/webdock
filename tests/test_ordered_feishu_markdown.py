@@ -1,6 +1,11 @@
-from __future__ import annotations
-
-from src.browser.detector import _GENERATED_IMG_SRCS_JS, _MARK_EXISTING_REPLY_MEDIA_JS, _ORDERED_MARKDOWN_JS
+from src.browser.detector import (
+    _GENERATED_IMG_SRCS_JS,
+    _MARK_EXISTING_REPLY_MEDIA_JS,
+    _ORDERED_MARKDOWN_JS,
+    _RICH_MARKDOWN_JS,
+    _RICH_TEXT_JS,
+    _TURN_ACTIONS_READY_JS,
+)
 
 
 def _turn(inner_html: str) -> str:
@@ -115,3 +120,54 @@ def test_latest_widget_is_not_hidden_by_location_footer(rich_markdown_page) -> N
     ).last
     assert turn.locator("[class*='WidgetRenderer']").count() == 1
     assert rich_markdown_page.evaluate(_ORDERED_MARKDOWN_JS).strip() == "@@WEBDOCK_SLOT_0@@"
+
+
+def test_virtualized_turn_2026_10_extracts_markdown(rich_markdown_page) -> None:
+    html = """
+    <div data-virtualized-turn-content="true" data-turn-key="test-key-1">
+      <div data-user-message-bubble="true">
+        <div>用户提问</div>
+      </div>
+      <div>
+        <span data-chatgpt-agent-turn-start=""></span>
+        <h4 data-conversation-role="assistant">ChatGPT said:</h4>
+        <div data-markdown-text-style="assistant-message" class="MarkdownRoot-rZKhxa">
+          <h2>回答标题</h2>
+          <p>这是<strong>加粗正文</strong>与列表：</p>
+          <ul>
+            <li>选项一</li>
+            <li>选项二</li>
+          </ul>
+        </div>
+        <div>
+          <button type="button" aria-label="Copy">复制</button>
+        </div>
+      </div>
+    </div>
+    """
+    rich_markdown_page.set_content(html)
+    text = rich_markdown_page.evaluate(_RICH_TEXT_JS).strip()
+    assert "回答标题" in text
+    assert "选项一" in text
+
+    md = rich_markdown_page.evaluate(_RICH_MARKDOWN_JS).strip()
+    assert "## 回答标题" in md
+    assert "**加粗正文**" in md
+    assert "- 选项一" in md
+    assert "- 选项二" in md
+
+    assert rich_markdown_page.evaluate(_TURN_ACTIONS_READY_JS) is True
+
+
+def test_virtualized_turn_user_only_returns_empty(rich_markdown_page) -> None:
+    html = """
+    <div data-virtualized-turn-content="true" data-turn-key="test-key-2">
+      <div data-user-message-bubble="true">
+        <div>用户刚刚发送的问题，助手尚未回复</div>
+      </div>
+    </div>
+    """
+    rich_markdown_page.set_content(html)
+    assert rich_markdown_page.evaluate(_RICH_TEXT_JS).strip() == ""
+    assert rich_markdown_page.evaluate(_RICH_MARKDOWN_JS).strip() == ""
+

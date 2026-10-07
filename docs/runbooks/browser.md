@@ -2,7 +2,21 @@
 
 ## ⛔ 先读红线
 
-ChatGPT 登录与 Cloudflare 验证必须人工在 noVNC 完成，自动化必须 detach（全文见 `AliECS/AGENTS.md` 首节）。原因：Playwright 连 CDP 泄漏 `Runtime.enable`，Cloudflare 判定自动化后人工点击也无限循环。任何涉及浏览器启动、attach/detach、容器重建的改动先与用户确认。
+完整约束在本仓 [AGENTS：人工登录红线](../../AGENTS.md#人工登录红线本仓完整约束)，无需外部仓。ChatGPT 登录与 Cloudflare 验证必须人工在 noVNC 完成，期间自动化必须 detach；会话养熟后才能 attach。原因：Playwright 连 CDP 泄漏 `Runtime.enable`，Cloudflare 判定自动化后人工点击也无限循环。浏览器启动、attach/detach、容器重建须有覆盖具体动作的用户授权；已有明确授权不重复询问。
+
+## 按任务读取
+
+本页保留详细运行机制和带日期的取证材料。先读红线，再按任务读取对应章节；修改完成判定或超时链时，必须同时读关键机制和超时章节。旧日期样本用于解释边界，设备当前值仍需只读核验。
+
+| 任务 | 章节 |
+|---|---|
+| 完成判定、上传、下载、图改图 | [关键机制](#关键机制改代码前必知)、[超时三层](#超时三层与异步-job改任何一层前先读完这节) |
+| 项目页/新对话空页 | [项目页入口](#项目页直达已失效改走侧栏2026-09-09) |
+| 失败卡片、截图、日志证据 | [失败卡片](#失败卡片能带的取证2026-09-09-起)、[取证快照](#取证快照里有什么2026-09-09-起对齐三仓契约) |
+| 症状定位、响应慢 | [症状表](#症状表)、[请求时间线](#一次请求到底慢在哪三条日志连起来看08-17-起)、[排障工具](#排障工具) |
+| 重启恢复、部署、runtime | [重启恢复](#重启后哪些东西不会自己回来2026-09-09-定案已修)、[部署](#部署)、[runtime](#runtimejsonhost-权威改完必须重启) |
+
+本地测试和文档维护见 [开发指南](../development.md)。
 
 ## 关键机制（改代码前必知）
 
@@ -15,6 +29,13 @@ ChatGPT 登录与 Cloudflare 验证必须人工在 noVNC 完成，自动化必�
   `widget=0`，最终 `RESPONSE_TIMEOUT`，飞书看不到回程。所有“最后一个 turn”选择器都
   必须使用 `[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])`；
   回归断言见 `tests/test_ordered_feishu_markdown.py` 的真实 Chromium fixture。
+- **ChatGPT 2026-10 前端 DOM 改版与回复识别（2026-10-07 定案已修）**：
+  - **DOM 架构重构**：`conversation-turn-*`、`[data-message-author-role='assistant']`、`.markdown`、`data-testid="copy-turn-action-button"` 在官方新版页面完全消失。
+  - **新层级结构**：每个 turn 为 `<div data-virtualized-turn-content data-turn-key="...">`；助手消息为 `<div data-markdown-text-style="assistant-message" class="MarkdownRoot-...">`（包含 `data-conversation-role="assistant"`）；复制按钮为 `button[aria-label="Copy"]`。
+  - **空态判据**：用户已发送提问但助手尚未输出时的判定为：`turn.querySelector("[data-message-author-role='user'], [data-user-message-bubble]") && !turn.querySelector("[data-message-author-role='assistant'], [data-conversation-role='assistant'], [data-markdown-text-style='assistant-message']")`。
+  - **输入框与发送按钮**：输入框为 `div.ProseMirror[contenteditable="true"]`（id `prompt-textarea` 已移除）；发送按钮为 `button[aria-label*="Send"]`（`data-testid="send-button"` 已移除）。
+  - **推理强度与模型选择**：旧版“极速/均衡/高级”独立菜单废弃，新版为 `button[aria-label="Select ChatGPT model"]` 内嵌 `data-reasoning-slider="true"`（Reasoning Effort Slider，支持 ArrowLeft/Right 调整 0~2 档，当前展示为 `High`）。会话模式对齐 `advanced`（对应 `High`），进入发送阶段后毫秒级匹配直接跳过，不再重复弹开菜单。
+  - **`find_first` Fast-path**：加入 DOM 现存探测 Fast-path，只要候选之一已经在当前 DOM 中呈现并可见，1ms 内直接返回，消除前置失效选择器在 `wait_for_selector` 中按 timeout_ms 串行等待累加（曾导致 `send_stages` 出现 22.5s 延迟）。
 - 长思考超时链：cloud-provider idle watchdog 是 B 根因，`baseUrl→172.17.0.1` 判 local 禁 watchdog。
 - 登录态在 `browser_data/` 卷；重建容器登录态可存活（卷保住，无需重登），但**改浏览器启动逻辑的重建必须先问用户**。
 - 图改图：图片文件 pill 点击=开预览层非下载；预览层兜底抓图按 MEDIA 投递；copy 按钮=正向完成信号（生成中不出现），缺失时 +8s 宽限。
@@ -284,6 +305,9 @@ ssh webdock2 "wsl -d Ubuntu-24.04-WebDock -- bash -lc 'docker exec webdock sh -l
 | 多图请求后全线卡死 | 单 worker 被堵（142-153s/13图）；healthz 假绿 | 等释放或重启容器；车道隔离测试须测对车道 |
 | 同群后续消息很快收到 `LANE_BUSY` | archive 查同一 `lane.key` 的 active 请求和被拒请求 | 这是车道保护：被拒消息没有发进 ChatGPT。等待当前任务完成，或发送 `/新对话` 抢占重建 |
 | webdock2 整机失联 | WSL 是否活：容器 Up 时长 < 命令年龄 = 假活 | 保活任务已改开机+S4U+`wsl sleep infinity` 常驻（07-12） |
+| 网页已回复但超时 194s 报 `RESPONSE_TIMEOUT` | 快照 `logs/debug/` 查看 `page.html` 是否已有内容 | 2026-10 官方 DOM 改版：旧 `conversation-turn-` 选择器失效，核对 `data-virtualized-turn-content` 与 `data-markdown-text-style="assistant-message"` |
+| 飞书发消息延迟 10~20 秒才在输入框出现 | `api.log` 查 `send_stages`（`input=7.5s` / `mode=10.5s` / `send_btn=2.5s`） | 旧选择器前置导致 `find_first` 级联超时等待；已加上 Fast-path 并在 `selectors.py` 中将新 DOM 置于首位 |
+| 每次发消息网页都反复弹开“推理强度”菜单 | `api.log` 查 `mode_switch_failed stage=menu target=fast` | 飞书会话模式设为 `fast` 与页面当前 `High` 冲突，新版改为了滑动条无旧文字按钮；将飞书会话模式对齐为 `advanced`（匹配 `High`）即可跳过 |
 
 ## 发送前耗时：看 `send_stages`
 
@@ -297,6 +321,7 @@ send_stages total=2.39s login=0.19 flyout=0.01 input=0.01 mode=0.03 snapshot=0.0
 - 冷页面（`lane ready` 里 `page=` 有秒数，新开会话）：`total≈4.7s`，多出来的主要在 `mode` 和 `input`——composer 比输入框还晚渲染，等它是应该的。
 - ⚠️ `mode` 曾经稳定占 6.02s：`ensure_mode` 把三个带文案的候选逐个探、每个各等满 2s，而多数时候只是确认模式已经对了。现在只问无文案的胶囊本体（`MODE_PICKER_BUTTON_ANY`）一次，命中即返回（07-28，`cdca628`）。
 - ⛔ 那次超时预算不能再往下压：一度压到 2s，新开会话时胶囊来不及渲染 → `mode_switch_failed stage=button`，**模式静默没切成**。这比慢几秒严重得多，6000ms 是"等页面"的余量而不是浪费。
+- ⚠️ **2026-10 实测级联超时税（`total=22.47s`，2026-10-07 已修）**：新版 DOM 移除了 `#prompt-textarea` 的 id、`class*='__composer-pill'` 类名及 `data-testid='send-button'`。`find_first` 逐项等满 2.5s/6s/1.5s，造成 `input=7.51s` + `mode=10.50s` + `send_btn=2.51s`。现已：1) 在 `selectors.py` 将新 DOM（`div.ProseMirror`、`button[aria-label*='Send']`、`button[aria-label*='model' i]`）置于首位；2) `find_first` 增加 DOM 现存探测 Fast-path，已渲染元素毫秒级返回；3) 会话模式对齐 `advanced`（匹配 `High`）免去无效弹窗。耗时回降至 `total≈2-4s`（稳态 `input=0.03s`, `send_btn=0.04s`）。
 
 <!-- nav-check-python: src/browser/chatgpt_page.py:ensure_mode -->
 <!-- nav-check-python: src/browser/selectors.py:MODE_PICKER_BUTTON_ANY -->

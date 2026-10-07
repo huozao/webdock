@@ -683,8 +683,8 @@ def _sanitize_value(value: Any) -> Any:
 
 _DOM_STRUCTURE_SCRIPT = r"""
 () => {
-  const turns = Array.from(document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])"));
-  const turn = [...turns].reverse().find((node) => !node.querySelector("[data-message-author-role='user']"));
+  const turns = Array.from(document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer']), [data-virtualized-turn-content], [data-turn-key]"));
+  const turn = [...turns].reverse().find((node) => !(node.querySelector("[data-message-author-role='user'], [data-user-message-bubble]") && !node.querySelector("[data-message-author-role='assistant'], [data-conversation-role='assistant'], [data-markdown-text-style='assistant-message']")));
   if (!turn) return {assistant_turn_present: false, turn_signature: {}, animated_candidates: []};
   const visible = (el) => {
     const rect = el.getBoundingClientRect();

@@ -72,8 +72,8 @@ _GENERATED_IMG_SRCS_JS = """
   const out = [];
   const seen = new Set();
   for (const im of document.querySelectorAll('img')) {
-    const turn = im.closest("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])");
-    if (turn && turn.querySelector("[data-message-author-role='user']")) continue;
+    const turn = im.closest("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer']), [data-virtualized-turn-content], [data-turn-key]");
+    if (turn && turn.querySelector("[data-message-author-role='user'], [data-user-message-bubble]") && !turn.querySelector("[data-message-author-role='assistant'], [data-conversation-role='assistant'], [data-markdown-text-style='assistant-message']")) continue;
     // ask() marks every pre-send assistant turn.  Excluding by the turn marker,
     // rather than only by URL, keeps an old generated image out even when
     // ChatGPT refreshes its signed estuary URL after the next prompt.
@@ -104,10 +104,10 @@ _GENERATED_IMG_SRCS_JS = """
 # "still generating" signal (the 2026-07-17 "Edit"-only reply bug).
 _IMAGEGEN_PENDING_JS = """
 () => {
-  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])");
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer']), [data-virtualized-turn-content], [data-turn-key]");
   const turn = turns[turns.length - 1];
   if (!turn) return false;
-  if (turn.querySelector("[data-message-author-role='user']")) return false;
+  if (turn.querySelector("[data-message-author-role='user'], [data-user-message-bubble]") && !turn.querySelector("[data-message-author-role='assistant'], [data-conversation-role='assistant'], [data-markdown-text-style='assistant-message']")) return false;
   const scaffold = turn.querySelector("[class*='imagegen-image'], [data-testid^='image-gen']");
   if (!scaffold) return false;
   for (const im of turn.querySelectorAll("img")) {
@@ -118,10 +118,10 @@ _IMAGEGEN_PENDING_JS = """
   return true;
 }
 """
-_MARK_EXISTING_REPLY_MEDIA_JS = """
+_MARK_EXISTING_REPLY_MEDIA_JS = r"""
 () => {
-  for (const turn of document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])")) {
-    if (turn.querySelector("[data-message-author-role='user']")) continue;
+  for (const turn of document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer']), [data-virtualized-turn-content], [data-turn-key]")) {
+    if (turn.querySelector("[data-message-author-role='user'], [data-user-message-bubble]") && !turn.querySelector("[data-message-author-role='assistant'], [data-conversation-role='assistant'], [data-markdown-text-style='assistant-message']")) continue;
     turn.setAttribute("data-webdock-existing-turn", "1");
   }
   // Generated images normally live inside a conversation turn.  Keep an image
@@ -145,7 +145,7 @@ _FILE_CARD_SCAN_JS = r"""
 () => {
   const controls = [...document.querySelectorAll(
     "button[aria-label='Download file'], button[aria-label='下载文件'], button[aria-label='下載檔案']")];
-  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])");
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer']), [data-virtualized-turn-content], [data-turn-key]");
   const turn = turns.length ? turns[turns.length - 1] : null;
   const out = [];
   controls.forEach((btn, index) => {
@@ -169,10 +169,10 @@ _FILE_CARD_SCAN_JS = r"""
 
 _DOWNLOAD_SCAN_JS = """
 () => {
-  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])");
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer']), [data-virtualized-turn-content], [data-turn-key]");
   const el = turns.length ? turns[turns.length - 1] : document;
   if (!el) return [];
-  if (el.querySelector && el.querySelector("[data-message-author-role='user']")) return [];
+  if (el.querySelector && el.querySelector("[data-message-author-role='user'], [data-user-message-bubble]") && !el.querySelector("[data-message-author-role='assistant'], [data-conversation-role='assistant'], [data-markdown-text-style='assistant-message']")) return [];
   const out = [];
   for (const a of el.querySelectorAll("a[href]")) {
     out.push({
@@ -223,7 +223,7 @@ async def mark_existing_reply_media(page: Any) -> None:
 # request if matched.
 _GENERATION_ERROR_JS = """
 (needles) => {
-  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])");
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer']), [data-virtualized-turn-content], [data-turn-key]");
   const last = turns.length ? turns[turns.length - 1] : null;
   const nodes = document.querySelectorAll(
     "[data-testid='regenerate-thread-error-button'], div[class*='text-token-text-error'], div[role='alert']"
@@ -306,7 +306,7 @@ async def file_card_download_controls(page: Any) -> list[DownloadTarget]:
 # there so the selector can be fixed from a log line instead of a live session.
 _DOWNLOAD_CANDIDATES_JS = """
 () => {
-  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])");
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer']), [data-virtualized-turn-content], [data-turn-key]");
   const el = turns.length ? turns[turns.length - 1] : document;
   if (!el || !el.querySelectorAll) return [];
   const out = [];
@@ -354,11 +354,11 @@ async def image_generating(page: Any) -> bool:
 
 _TURN_ACTIONS_READY_JS = """
 () => {
-  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])");
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer']), [data-virtualized-turn-content], [data-turn-key]");
   const turn = turns[turns.length - 1];
   if (!turn) return true;
-  if (turn.querySelector("[data-message-author-role='user']")) return true;
-  return !!turn.querySelector("[data-testid='copy-turn-action-button']");
+  if (turn.querySelector("[data-message-author-role='user'], [data-user-message-bubble]") && !turn.querySelector("[data-message-author-role='assistant'], [data-conversation-role='assistant'], [data-markdown-text-style='assistant-message']")) return true;
+  return !!turn.querySelector("button[data-testid='copy-turn-action-button'], button[aria-label='Copy'], button[aria-label*='复制']");
 }
 """
 
@@ -404,11 +404,11 @@ _RICH_TEXT_JS = r"""
   // real answer in SEPARATE .markdown blocks inside the same turn, so we must walk
   // EVERY .markdown (not just the first) or we drop the answer and return only the
   // preamble.
-  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])");
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer']), [data-virtualized-turn-content], [data-turn-key]");
   const el = turns[turns.length - 1];
   if (!el) return "";
-  if (el.querySelector("[data-message-author-role='user']")) return "";
-  const roots = el.querySelectorAll(".markdown");
+  if (el.querySelector("[data-message-author-role='user'], [data-user-message-bubble]") && !el.querySelector("[data-message-author-role='assistant'], [data-conversation-role='assistant'], [data-markdown-text-style='assistant-message']")) return "";
+  const roots = el.querySelectorAll(".markdown, [data-markdown-text-style='assistant-message'], [class*='MarkdownRoot']");
   if (!roots.length) return "";
   const dw = (s) => { let w = 0; for (const ch of s) { w += (ch.codePointAt(0) > 255 ? 2 : 1); } return w; };
   const pad = (s, n) => s + " ".repeat(Math.max(0, n - dw(s)));
@@ -464,11 +464,11 @@ _RICH_TEXT_JS = r"""
 # (delivered as screenshots separately). Pure read; falls back to plain rich text.
 _RICH_MARKDOWN_JS = r"""
 () => {
-  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])");
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer']), [data-virtualized-turn-content], [data-turn-key]");
   const el = turns[turns.length - 1];
   if (!el) return "";
-  if (el.querySelector("[data-message-author-role='user']")) return "";
-  const roots = el.querySelectorAll(".markdown");
+  if (el.querySelector("[data-message-author-role='user'], [data-user-message-bubble]") && !el.querySelector("[data-message-author-role='assistant'], [data-conversation-role='assistant'], [data-markdown-text-style='assistant-message']")) return "";
+  const roots = el.querySelectorAll(".markdown, [data-markdown-text-style='assistant-message'], [class*='MarkdownRoot']");
   if (!roots.length) return "";
   const SKIP = new Set(["BUTTON", "SVG", "PATH", "USE", "SCRIPT", "STYLE"]);
   const BLOCK = new Set(["P","H1","H2","H3","H4","H5","H6","UL","OL","PRE","BLOCKQUOTE","TABLE","HR","DIV","SECTION","ARTICLE"]);
@@ -606,6 +606,20 @@ _RICH_MARKDOWN_JS = r"""
 
 
 async def find_first(page: Any, selector_list: list[str], *, visible: bool = False, timeout_ms: int = 1000) -> str | None:
+    # 快速路径：若页面中已有匹配且满足可见性要求的候选元素，立即毫秒级返回，
+    # 避免多个失效候选按 timeout_ms 串行空等累加（如 2.5s * 3 = 7.5s）。
+    if hasattr(page, "locator"):
+        for selector in selector_list:
+            try:
+                loc = page.locator(selector)
+                if hasattr(loc, "count") and hasattr(loc, "first"):
+                    loc_first = loc.first
+                    if await loc_first.count() > 0:
+                        if not visible or (hasattr(loc_first, "is_visible") and await loc_first.is_visible()):
+                            return selector
+            except Exception:
+                continue
+
     state = "visible" if visible else "attached"
     for selector in selector_list:
         try:
@@ -660,10 +674,10 @@ async def rich_assistant_text(page: Any) -> str:
 SLOT_PLACEHOLDER_RE = re.compile(r"@@WEBDOCK_SLOT_(\d+)@@")
 _ORDERED_MARKDOWN_JS = r"""
 () => {
-  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])");
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer']), [data-virtualized-turn-content], [data-turn-key]");
   const el = turns[turns.length - 1];
   if (!el) return "";
-  if (el.querySelector("[data-message-author-role='user']")) return "";
+  if (el.querySelector("[data-message-author-role='user'], [data-user-message-bubble]") && !el.querySelector("[data-message-author-role='assistant'], [data-conversation-role='assistant'], [data-markdown-text-style='assistant-message']")) return "";
   const SKIP = new Set(["BUTTON","SVG","PATH","USE","SCRIPT","STYLE"]);
   const skip = (n) => {
     if (SKIP.has(n.tagName)) return true;
@@ -772,7 +786,7 @@ _ORDERED_MARKDOWN_JS = r"""
   targets.forEach((t, k) => t.setAttribute("data-webdock-slot", String(k)));
   const units = [];
   targets.forEach((t) => units.push({ type: "img", el: t }));
-  el.querySelectorAll(".markdown").forEach((root) => {
+  el.querySelectorAll(".markdown, [data-markdown-text-style='assistant-message'], [class*='MarkdownRoot']").forEach((root) => {
     for (const c of root.children) {
       if (c.nodeType !== 1 || skip(c)) continue;
       if (c.hasAttribute("data-webdock-slot")) continue;       // a target table itself
@@ -889,10 +903,10 @@ _WORK_SUMMARY_PATTERNS = (
 )
 _TURN_RAW_TEXT_JS = """
 () => {
-  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])");
+  const turns = document.querySelectorAll("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer']), [data-virtualized-turn-content], [data-turn-key]");
   const turn = turns[turns.length - 1];
   if (!turn) return "";
-  if (turn.querySelector("[data-message-author-role='user']")) return "";
+  if (turn.querySelector("[data-message-author-role='user'], [data-user-message-bubble]") && !turn.querySelector("[data-message-author-role='assistant'], [data-conversation-role='assistant'], [data-markdown-text-style='assistant-message']")) return "";
   return (turn.innerText || "").slice(0, 400);
 }
 """
@@ -921,8 +935,16 @@ async def latest_message_has_widget(page: Any) -> bool:
     etc card). Such replies can have NO markdown text — rich_assistant_text skips
     widget content — so completion detection can't rely on text alone."""
     try:
-        turn = page.locator("[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])").last
-        if await turn.locator("[data-message-author-role='user']").count() > 0:
+        turn = page.locator(
+            "[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer']), "
+            "[data-virtualized-turn-content], [data-turn-key]"
+        ).last
+        has_user = await turn.locator("[data-message-author-role='user'], [data-user-message-bubble]").count() > 0
+        has_asst = await turn.locator(
+            "[data-message-author-role='assistant'], [data-conversation-role='assistant'], "
+            "[data-markdown-text-style='assistant-message']"
+        ).count() > 0
+        if has_user and not has_asst:
             return False  # latest turn is the user's message, not an assistant reply
         return await turn.locator("[class*='WidgetRenderer']").count() > 0
     except Exception:

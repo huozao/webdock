@@ -28,7 +28,9 @@ log = logging.getLogger(__name__)
 INDEX_NAME = "index.jsonl"
 
 
-async def save_debug_dump(page: Any | None, error: BaseException | str) -> str | None:
+async def save_debug_dump(
+    page: Any | None, error: BaseException | str, prompt: str | None = None
+) -> str | None:
     if page is None:
         return None
 
@@ -36,6 +38,13 @@ async def save_debug_dump(page: Any | None, error: BaseException | str) -> str |
     captured_at = datetime.now(timezone.utc)
     debug_dir = settings.debug_dir / datetime.now().strftime("%Y-%m-%d_%H%M%S")
     debug_dir.mkdir(parents=True, exist_ok=True)
+
+    if prompt:
+        try:
+            (debug_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+        except Exception:
+            pass
+
 
     shot_error = ""
     try:

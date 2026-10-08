@@ -44,6 +44,13 @@ STUCK_GRACE_SECONDS = 8
 # the action row (aborted turns, account banners) still return after the grace.
 TURN_ACTIONS_GRACE_SECONDS = 8
 
+_last_wait_summary: str = ""
+
+
+def get_last_wait_summary() -> str:
+    global _last_wait_summary
+    return _last_wait_summary
+
 # While ChatGPT generates an image it shows a loading placeholder whose
 # data-testid starts with 'image-gen-loading-state'; it disappears once the <img>
 # renders. This is the reliable "an image reply is in progress" signal — unlike
@@ -1117,6 +1124,14 @@ async def wait_for_response_complete(
             or status_component_pending
             or bool(_INTERIM_RE.search(current or ""))
         ) and not new_image
+
+        global _last_wait_summary
+        _last_wait_summary = (
+            f"stop={int(stop_button)}, stream={int(streaming)}, "
+            f"imgs={len(current_image_srcs)}, scaffold={int(scaffold_pending)}, "
+            f"in_progress={int(in_progress)}, stable={stable_for}s"
+        )
+
         # Periodic signal report. `sig_age` is the one that explains a run to the
         # hard cap: the idle fallback below only fires once the progress signature
         # has been still for idle_timeout_seconds, and the signature includes every

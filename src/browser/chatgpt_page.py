@@ -31,6 +31,7 @@ from src.browser.detector import (
     rich_assistant_text,
     self_reported_work_seconds,
     wait_for_response_complete,
+    get_last_wait_summary,
 )
 from src.browser.feishu_format import feishu_safe_markdown
 from src.browser.file_download import (
@@ -426,9 +427,11 @@ class ChatGPTPage:
                 image_watch=image_watch,
             )
             if answer is None:
+                summary = get_last_wait_summary()
+                detail_msg = f"ChatGPT response did not finish before timeout ({summary})." if summary else "ChatGPT response did not finish before timeout."
                 raise RelayError(
                     ErrorCode.RESPONSE_TIMEOUT,
-                    "ChatGPT response did not finish before timeout.",
+                    detail_msg,
                 )
 
             # answer may be "" for a widget-only reply (no markdown text). The
@@ -499,10 +502,10 @@ class ChatGPTPage:
             probe_outcome = "cancelled"
             raise
         except RelayError as exc:
-            exc.debug_dir = await save_debug_dump(self.page, exc)
+            exc.debug_dir = await save_debug_dump(self.page, exc, prompt=message)
             raise
         except Exception as exc:
-            debug_dir = await save_debug_dump(self.page, exc)
+            debug_dir = await save_debug_dump(self.page, exc, prompt=message)
             raise RelayError(ErrorCode.UNKNOWN_ERROR, str(exc), debug_dir=debug_dir) from exc
         finally:
             await stop_response_probe(probe, probe_outcome)

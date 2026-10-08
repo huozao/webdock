@@ -151,3 +151,48 @@ def test_keeps_large_main_image_without_alt(rich_markdown_page):
     srcs = rich_markdown_page.evaluate(_GENERATED_IMG_SRCS_JS, 200)
 
     assert any("file_BARE_MAIN" in s for s in srcs), srcs
+
+
+def test_collects_blob_generated_image(rich_markdown_page):
+    # 2026-10 ChatGPT DOM: generated images render as blob: URLs with Generated image alt
+    rich_markdown_page.set_content(
+        """
+        <div data-testid="conversation-turn-1">
+          <div data-message-author-role="user">画一幅可爱漫画</div>
+        </div>
+        <div data-testid="conversation-turn-2">
+          <div class="relative flex flex-col">
+            <div class="ImageTransparencyBackdrop-P7GvVY">
+              <img src="blob:https://chatgpt.com/c5f9d0f4-de87-4112-bddc-6d5d494eaf5a"
+                   alt="Generated image 1" width="1122" height="1402"
+                   style="width:500px;height:625px;">
+            </div>
+          </div>
+        </div>
+        """
+    )
+
+    srcs = rich_markdown_page.evaluate(_GENERATED_IMG_SRCS_JS, 200)
+
+    assert srcs == ["blob:https://chatgpt.com/c5f9d0f4-de87-4112-bddc-6d5d494eaf5a"], srcs
+
+
+def test_imagegen_pending_false_for_blob_rendered(rich_markdown_page):
+    # 2026-10: Once blob image renders in the imagegen scaffold, imagegen_pending must be False
+    rich_markdown_page.set_content(
+        """
+        <div data-testid="conversation-turn-1">
+          <div data-message-author-role="user">画一幅可爱漫画</div>
+        </div>
+        <div data-testid="conversation-turn-2">
+          <div class="group/imagegen-image relative w-full overflow-hidden">
+            <img src="blob:https://chatgpt.com/c5f9d0f4-de87-4112-bddc-6d5d494eaf5a"
+                 alt="Generated image 1" width="1122" height="1402"
+                 style="width:500px;height:625px;">
+          </div>
+        </div>
+        """
+    )
+
+    assert rich_markdown_page.evaluate(_IMAGEGEN_PENDING_JS) is False
+

@@ -614,9 +614,10 @@ _PREVIEW_IMAGE_SRC_JS = """
 (containers) => {
   for (const sel of containers) {
     for (const layer of document.querySelectorAll(sel)) {
-      const imgs = [...layer.querySelectorAll("img")].filter((im) =>
-        /backend-api\\/(estuary|files)\\/|oaiusercontent/.test(im.currentSrc || im.src || "")
-      );
+      const imgs = [...layer.querySelectorAll("img")].filter((im) => {
+        const src = im.currentSrc || im.src || "";
+        return /backend-api\\/(estuary|files)\\/|oaiusercontent/.test(src) || src.startsWith("blob:");
+      });
       // Normally the layer holds exactly one image; sort by rendered area so a
       // future icon-sized <img> in the layer chrome cannot win over the picture.
       imgs.sort((a, b) => b.clientWidth * b.clientHeight - a.clientWidth * a.clientHeight);
@@ -663,20 +664,33 @@ _PREVIEW_IMAGE_CANDIDATES_JS = """
 }
 """
 # In-page fetch so the logged-in session cookies apply (estuary URLs need them).
+# Falls back to canvas image extraction if fetch fails.
 _FETCH_PREVIEW_B64_JS = """
 async (src) => {
   try {
     const res = await fetch(src, { credentials: "include" });
-    if (!res.ok) return "!http " + res.status;
-    const bytes = new Uint8Array(await res.arrayBuffer());
-    let bin = "";
-    for (let i = 0; i < bytes.length; i += 0x8000) {
-      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    if (res.ok) {
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      let bin = "";
+      for (let i = 0; i < bytes.length; i += 0x8000) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+      }
+      return btoa(bin);
     }
-    return btoa(bin);
-  } catch (e) {
-    return "!err " + (e && e.name ? e.name : "unknown");
-  }
+  } catch (e) {}
+  try {
+    const img = Array.from(document.querySelectorAll('img')).find(im => (im.currentSrc || im.src) === src);
+    if (img && (img.naturalWidth > 0 || img.width > 0)) {
+      const canvas = document.createElement('canvas');
+      canvas.width = img.naturalWidth || img.width;
+      canvas.height = img.naturalHeight || img.height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      const dataUrl = canvas.toDataURL('image/png');
+      return dataUrl.split(',')[1] || '';
+    }
+  } catch (e2) {}
+  return "!err failed_to_fetch";
 }
 """
 

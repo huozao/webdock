@@ -166,15 +166,27 @@ _FETCH_IMG_B64_JS = """
 async (src) => {
   try {
     const r = await fetch(src);
-    if (!r.ok) return '';
-    const bytes = new Uint8Array(await r.arrayBuffer());
-    let bin = '';
-    const CH = 8192;
-    for (let i = 0; i < bytes.length; i += CH) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
-    return btoa(bin);
-  } catch (e) {
-    return '';
-  }
+    if (r.ok) {
+      const bytes = new Uint8Array(await r.arrayBuffer());
+      let bin = '';
+      const CH = 8192;
+      for (let i = 0; i < bytes.length; i += CH) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+      return btoa(bin);
+    }
+  } catch (e) {}
+  try {
+    const img = Array.from(document.querySelectorAll('img')).find(im => (im.currentSrc || im.src) === src);
+    if (img && (img.naturalWidth > 0 || img.width > 0)) {
+      const canvas = document.createElement('canvas');
+      canvas.width = img.naturalWidth || img.width;
+      canvas.height = img.naturalHeight || img.height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      const dataUrl = canvas.toDataURL('image/png');
+      return dataUrl.split(',')[1] || '';
+    }
+  } catch (e2) {}
+  return '';
 }
 """
 

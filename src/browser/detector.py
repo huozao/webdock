@@ -81,14 +81,21 @@ _GENERATED_IMG_SRCS_JS = """
     if (im.hasAttribute("data-webdock-existing-image")) continue;
     const src = im.currentSrc || im.src || '';
     if (!src || seen.has(src)) continue;
-    if (!/backend-api\\/(estuary|files)\\/|oaiusercontent/.test(src)) continue;
+
+    const alt = im.alt || '';
+    const generatedAlt = alt.startsWith('已生成图片') || alt.startsWith('Generated image');
+    const isGeneratedBackendUrl = /backend-api\\/(estuary|files)\\/|oaiusercontent/.test(src);
+    const isBlobGenerated = src.startsWith('blob:') && (generatedAlt || !!im.closest("[class*='imagegen'], [class*='ImageTransparencyBackdrop'], [data-testid^='image-gen']"));
+
+    if (!isGeneratedBackendUrl && !isBlobGenerated) continue;
+
     // Two acceptance rules — multi-image replies render extra candidates as 48x48
     // side-rail thumbnails (user must click one to swap it into the main view);
     // a size-only filter delivers just the currently-selected main image to the
     // chat. Recognize the thumbnails via alt="已生成图片"/"Generated image".
-    const largeEnough = im.clientWidth >= minPx && im.clientHeight >= minPx;
-    const alt = im.alt || '';
-    const generatedAlt = alt.startsWith('已生成图片') || alt.startsWith('Generated image');
+    const width = im.clientWidth || parseInt(im.getAttribute("width") || "0", 10);
+    const height = im.clientHeight || parseInt(im.getAttribute("height") || "0", 10);
+    const largeEnough = width >= minPx && height >= minPx;
     if (!largeEnough && !generatedAlt) continue;
     seen.add(src);
     out.push(src);
@@ -112,8 +119,12 @@ _IMAGEGEN_PENDING_JS = """
   if (!scaffold) return false;
   for (const im of turn.querySelectorAll("img")) {
     const src = im.currentSrc || im.src || "";
-    if (!/backend-api\\/(estuary|files)\\/|oaiusercontent/.test(src)) continue;
-    if (im.clientWidth >= 200 && im.clientHeight >= 200) return false;
+    const isImageSrc = /backend-api\\/(estuary|files)\\/|oaiusercontent/.test(src) || src.startsWith("blob:");
+    if (!isImageSrc) continue;
+    const width = im.clientWidth || parseInt(im.getAttribute("width") || "0", 10);
+    const height = im.clientHeight || parseInt(im.getAttribute("height") || "0", 10);
+    const alt = im.alt || "";
+    if ((width >= 200 && height >= 200) || alt.startsWith("已生成图片") || alt.startsWith("Generated image")) return false;
   }
   return true;
 }
@@ -128,7 +139,10 @@ _MARK_EXISTING_REPLY_MEDIA_JS = r"""
   // marker as a fallback for transient overlays/lightboxes outside that tree.
   for (const im of document.querySelectorAll("img")) {
     const src = im.currentSrc || im.src || "";
-    if (/backend-api\/(estuary|files)\/|oaiusercontent/.test(src)) {
+    const alt = im.alt || "";
+    const isGenerated = /backend-api\/(estuary|files)\/|oaiusercontent/.test(src) ||
+      (src.startsWith("blob:") && (alt.startsWith("已生成图片") || alt.startsWith("Generated image") || !!im.closest("[class*='imagegen'], [class*='ImageTransparencyBackdrop']")));
+    if (isGenerated) {
       im.setAttribute("data-webdock-existing-image", "1");
     }
   }

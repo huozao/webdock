@@ -39,6 +39,8 @@ ATTACHMENT_PREVIEW = [
     "[data-testid$='-attachment']",
     "img[alt='Uploaded image']",
     "div[class*='attachment'] img",
+    "[data-composer-attachments] [role='button']",
+    "[class*='composer-attachment']",
     "button[aria-label*='Remove']",
     "button[aria-label*='移除']",
 ]

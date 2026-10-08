@@ -21,7 +21,7 @@ NEVER_LANDED = "webdock-upload-cccccccc.jpg"
 
 
 def test_states_separate_uploading_from_finished_and_missing(rich_markdown_page):
-    rich_markdown_page.set_content(RAW_FIXTURE.read_text(encoding="utf-8"))
+    rich_markdown_page.set_content(RAW_FIXTURE.read_text(encoding="utf-8"), wait_until="domcontentloaded")
 
     states = rich_markdown_page.evaluate(_ATTACHMENT_STATES_JS, [UPLOADING, DONE, NEVER_LANDED])
 
@@ -30,7 +30,7 @@ def test_states_separate_uploading_from_finished_and_missing(rich_markdown_page)
 
 def test_progress_ring_alone_would_still_be_early(rich_markdown_page):
     """环消失早于 file id 到位（09:11:17 vs 09:11:49），所以两个标记都要。"""
-    rich_markdown_page.set_content(RAW_FIXTURE.read_text(encoding="utf-8"))
+    rich_markdown_page.set_content(RAW_FIXTURE.read_text(encoding="utf-8"), wait_until="domcontentloaded")
 
     ring_gone_but_blob = rich_markdown_page.evaluate(
         """
@@ -52,7 +52,7 @@ def test_progress_ring_alone_would_still_be_early(rich_markdown_page):
 
 def test_old_chip_count_judge_calls_the_1_percent_upload_landed(rich_markdown_page):
     """反证：旧判据在同一份 DOM 上把上传中的附件判成已落地。"""
-    rich_markdown_page.set_content(RAW_FIXTURE.read_text(encoding="utf-8"))
+    rich_markdown_page.set_content(RAW_FIXTURE.read_text(encoding="utf-8"), wait_until="domcontentloaded")
 
     chips = 0
     for selector in selectors.ATTACHMENT_PREVIEW:
@@ -65,3 +65,41 @@ def test_old_chip_count_judge_calls_the_1_percent_upload_landed(rich_markdown_pa
         "uploading",
         "done",
     ]
+
+
+RAW_FIXTURE_20261008 = Path(__file__).parent / "fixtures" / "feishu" / "raw" / "composer_attachments_20261008.html"
+PROD_FILE_A = "webdock-upload-gri17bkc.jpg"
+PROD_FILE_B = "webdock-upload-r2y8pm9u.jpg"
+PROD_FILE_ABSENT = "webdock-upload-absent.jpg"
+
+
+def test_states_on_20261008_composer_dom(rich_markdown_page):
+    """2026-10-08 生产真实 DOM（role='button' 附件卡片与 data: 预览），新判据正常识别为 done。"""
+    rich_markdown_page.set_content(RAW_FIXTURE_20261008.read_text(encoding="utf-8"), wait_until="domcontentloaded")
+
+    states = rich_markdown_page.evaluate(_ATTACHMENT_STATES_JS, [PROD_FILE_A, PROD_FILE_B, PROD_FILE_ABSENT])
+    assert states == ["done", "done", "missing"]
+
+
+def test_legacy_role_group_only_judge_fails_on_20261008_dom(rich_markdown_page):
+    """反证：旧版仅查 [role='group'] 的判据在 2026-10-08 DOM 上全部报 missing，精确复现故障根因。"""
+    rich_markdown_page.set_content(RAW_FIXTURE_20261008.read_text(encoding="utf-8"), wait_until="domcontentloaded")
+
+    legacy_js = """
+    (names) => {
+      const tiles = Array.from(document.querySelectorAll("[role='group'][aria-label]"));
+      return names.map((name) => {
+        const tile = tiles.find((t) => (t.getAttribute('aria-label') || '').includes(name));
+        if (!tile) return 'missing';
+        if (tile.querySelector('.cursor-wait') || tile.querySelector('svg circle')) return 'uploading';
+        const img = tile.querySelector('img');
+        if (!img) return 'done';
+        const src = img.getAttribute('src') || '';
+        if (/[?&]id=file_/.test(src)) return 'done';
+        return src.startsWith('blob:') ? 'uploading' : 'done';
+      });
+    }
+    """
+    legacy_states = rich_markdown_page.evaluate(legacy_js, [PROD_FILE_A, PROD_FILE_B])
+    assert legacy_states == ["missing", "missing"], "证明旧判据确实因为 role 漂移把新版已完成附件误判为 missing"
+

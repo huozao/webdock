@@ -1044,23 +1044,45 @@ def _safe_page_url(page: Any) -> str:
 #              progress ring (two <circle>s, the second animating
 #              stroke-dashoffset). Present from 1% onward.
 #   done       ring gone AND the preview <img> switched from `blob:` to the
-#              server URL carrying `id=file_…` — that id IS the upload receipt.
-#              Documents render no <img>, so for them "ring gone" is the signal.
+#              server URL carrying `id=file_…` or data: URI — that id/data IS the
+#              upload receipt. Documents render no <img>, so for them "ring gone"
+#              is the signal.
 #   missing    no tile with that filename: never landed, or dropped mid-upload.
 #
 # 2026-08-24 measured order: ring cleared at 09:11:17 with the src still `blob:`,
 # the file id appeared by 09:11:49. The ring alone would have sent up to ~30s
 # early, which is exactly the class of bug this replaces — hence both markers.
+#
+# 2026-10-08 measured drift: ChatGPT switched composer attachment tiles from
+# `role="group"` to `role="button"` inside `[data-composer-attachments]`, with
+# thumbnail <img> holding `alt="<name>"` and `src="data:image/..."`. Querying
+# `role="group"` alone reported all files missing, triggering 3 duplicate upload
+# attempts (6 images stacked) and UPLOAD_FAILED. Match both generations plus
+# `img[alt]` container fallback.
 _ATTACHMENT_STATES_JS = """
 (names) => {
-  const tiles = Array.from(document.querySelectorAll("[role='group'][aria-label]"));
+  const candidateSelectors = [
+    "[data-composer-attachments] [aria-label]",
+    "[class*='composer-attachment'][aria-label]",
+    "[class*='file-tile'][aria-label]",
+    "[role='group'][aria-label]",
+    "[role='button'][aria-label]",
+  ].join(",");
+  const tiles = Array.from(document.querySelectorAll(candidateSelectors));
   return names.map((name) => {
-    const tile = tiles.find((t) => (t.getAttribute('aria-label') || '').includes(name));
+    let tile = tiles.find((t) => (t.getAttribute('aria-label') || '').includes(name));
+    if (!tile) {
+      const imgByAlt = document.querySelector(`img[alt*="${name}"]`);
+      if (imgByAlt) {
+        tile = imgByAlt.closest("[role='button'], [role='group'], [class*='composer-attachment'], [class*='file-tile']") || imgByAlt.parentElement;
+      }
+    }
     if (!tile) return 'missing';
     if (tile.querySelector('.cursor-wait') || tile.querySelector('svg circle')) return 'uploading';
     const img = tile.querySelector('img');
     if (!img) return 'done';
     const src = img.getAttribute('src') || '';
+    if (!src) return 'uploading';
     if (/[?&]id=file_/.test(src)) return 'done';
     return src.startsWith('blob:') ? 'uploading' : 'done';
   });

@@ -124,9 +124,14 @@
 - **ChatGPT 自己的失败横幅**（`Something went wrong while generating the response` + Retry）现由 `generation_error_text()` 识别，立即报 `GENERATION_FAILED`。只认最后一轮的横幅——历史失败轮会永远留在会话里，匹配到就会毒化之后每个请求。
 - **同车道不再长时间排队**：普通请求等待同一 `lane.key` 的锁最多 5s；仍忙则返回 HTTP 429 / `LANE_BUSY`，明确说明等待时间和“本次请求未执行”，并写入 archive。不同 lane 仍按 `max_concurrent_chats` 并发。例外是微信同一入站消息拆出的 metadata-less 图片分片，它继续沿用既有 lane 继承与排队行为，不能被误判成独立追问。
 - **`/新对话` 是抢占控制指令**：它先使旧一代排队请求失效，再取消当前 in-flight task、重建该 lane 的 tab。被取消任务以 `REQUEST_CANCELLED` 归档；旧排队请求醒来后只返回 `LANE_BUSY`，不得调用 ChatGPT。
+- **2026-10 ChatGPT 生图与图片回复机制（blob: 与 data:image/ 原图）**（2026-10-08 实测定案）：
+  - **初次生图流（新对话/新建生图）**：页面不再立即将图片替换为 `backend-api/estuary/content?id=file_...`，而是直接渲染客户端直出高清 `blob:https://chatgpt.com/<uuid>`（外层有 `class="ImageTransparencyBackdrop-P7GvVY"`、`alt="Generated image 1"` 或在生图骨架 `imagegen-image` 内）。`_GENERATED_IMG_SRCS_JS` 现已支持 `blob:`，提取时 `_FETCH_IMG_B64_JS` / `_FETCH_PREVIEW_B64_JS` 具备 Canvas 内存绘制兜底，即使 blob 在当前上下文跨域限制无法 fetch，也能通过 DOM 节点直出 Base64。
+  - **已有对话重发图流（“重新发下图”/Markdown 内联图）**：在同一会话中要求模型重新发图或输出正文图片时，ChatGPT 不再挂起 DALLE 生成骨架，而是直接在 Assistant Markdown 中以 `<button data-message-image="original"><img src="data:image/png;base64,..." alt="<prompt>"></button>` 输出高清内联 PNG（实测单图达 3MB，包含 C2PA 元数据）。`_GENERATED_IMG_SRCS_JS` 通过识别 `src.startsWith('data:image/')` 与 `[data-message-image]` 容器直接捕获，后端在 `_capture_image_tokens` 中秒级提取 Base64 解码入库；并在新轮次发送前以 `_MARK_EXISTING_REPLY_MEDIA_JS` 打上 `data-webdock-existing-image` 标记，彻底杜绝历史图被反复发送。
+  - **超时故障诊断透明化**：`wait_for_response_complete` 循环输出最后等待状态向量（例如 `(stop=0, stream=0, imgs=0, scaffold=0, in_progress=0, stable=62s)`），并在 `RESPONSE_TIMEOUT` 异常中直接透传；同时在快照 `logs/debug/` 下落盘 `prompt.txt`，飞书卡片自动展示输入摘要与状态向量，实现无需登录即可秒级定界。
 
 <!-- nav-check-python: src/browser/detector.py:generation_error_text -->
 <!-- nav-check-python: src/utils/errors.py:GENERATION_FAILED -->
+
 
 ## 项目页直达已失效，改走侧栏（2026-09-09）
 
@@ -308,6 +313,9 @@ ssh webdock2 "wsl -d Ubuntu-24.04-WebDock -- bash -lc 'docker exec webdock sh -l
 | 网页已回复但超时 194s 报 `RESPONSE_TIMEOUT` | 快照 `logs/debug/` 查看 `page.html` 是否已有内容 | 2026-10 官方 DOM 改版：旧 `conversation-turn-` 选择器失效，核对 `data-virtualized-turn-content` 与 `data-markdown-text-style="assistant-message"` |
 | 飞书发消息延迟 10~20 秒才在输入框出现 | `api.log` 查 `send_stages`（`input=7.5s` / `mode=10.5s` / `send_btn=2.5s`） | 旧选择器前置导致 `find_first` 级联超时等待；已加上 Fast-path 并在 `selectors.py` 中将新 DOM 置于首位 |
 | 每次发消息网页都反复弹开“推理强度”菜单 | `api.log` 查 `mode_switch_failed stage=menu target=fast` | 飞书会话模式设为 `fast` 与页面当前 `High` 冲突，新版改为了滑动条无旧文字按钮；将飞书会话模式对齐为 `advanced`（匹配 `High`）即可跳过 |
+| 页面已画完图但超时 356s 报 `RESPONSE_TIMEOUT`，飞书未收到图 | 卡片透传 `imgs=0` 且快照截图有高清图 | 2026-10 官方改版：生图直接以 `blob:` 渲染，不再立即换成 `backend-api`。旧正则过滤了 blob，导致死等 `imagegen_pending`。已支持 `blob:` + Canvas 提取兜底 |
+| 在旧对话发送“重新发下图”超时 158s，飞书未收到图 | 卡片透传 `(stop=0, stream=0, imgs=0, scaffold=0, in_progress=0, stable=62s)` | 模型直接在 Assistant Markdown 输出 `<button data-message-image="original"><img src="data:image/png;base64,...">`。旧代码过滤了 `data:image/` 导致漏判。已支持内联 data URL 直接 Base64 入库并排重 |
+
 
 ## 发送前耗时：看 `send_stages`
 

@@ -93,8 +93,9 @@ _GENERATED_IMG_SRCS_JS = """
     const generatedAlt = alt.startsWith('已生成图片') || alt.startsWith('Generated image');
     const isGeneratedBackendUrl = /backend-api\\/(estuary|files)\\/|oaiusercontent/.test(src);
     const isBlobGenerated = src.startsWith('blob:') && (generatedAlt || !!im.closest("[class*='imagegen'], [class*='ImageTransparencyBackdrop'], [data-testid^='image-gen']"));
+    const isDataGenerated = src.startsWith('data:image/') && (!!im.closest("[data-message-image], [data-markdown-text-style='assistant-message']") || generatedAlt);
 
-    if (!isGeneratedBackendUrl && !isBlobGenerated) continue;
+    if (!isGeneratedBackendUrl && !isBlobGenerated && !isDataGenerated) continue;
 
     // Two acceptance rules — multi-image replies render extra candidates as 48x48
     // side-rail thumbnails (user must click one to swap it into the main view);
@@ -102,8 +103,8 @@ _GENERATED_IMG_SRCS_JS = """
     // chat. Recognize the thumbnails via alt="已生成图片"/"Generated image".
     const width = im.clientWidth || parseInt(im.getAttribute("width") || "0", 10);
     const height = im.clientHeight || parseInt(im.getAttribute("height") || "0", 10);
-    const largeEnough = width >= minPx && height >= minPx;
-    if (!largeEnough && !generatedAlt) continue;
+    const largeEnough = (width >= minPx && height >= minPx) || src.length > 10000;
+    if (!largeEnough && !generatedAlt && !im.closest("[data-message-image]")) continue;
     seen.add(src);
     out.push(src);
   }
@@ -126,12 +127,12 @@ _IMAGEGEN_PENDING_JS = """
   if (!scaffold) return false;
   for (const im of turn.querySelectorAll("img")) {
     const src = im.currentSrc || im.src || "";
-    const isImageSrc = /backend-api\\/(estuary|files)\\/|oaiusercontent/.test(src) || src.startsWith("blob:");
+    const isImageSrc = /backend-api\\/(estuary|files)\\/|oaiusercontent/.test(src) || src.startsWith("blob:") || src.startsWith("data:image/");
     if (!isImageSrc) continue;
     const width = im.clientWidth || parseInt(im.getAttribute("width") || "0", 10);
     const height = im.clientHeight || parseInt(im.getAttribute("height") || "0", 10);
     const alt = im.alt || "";
-    if ((width >= 200 && height >= 200) || alt.startsWith("已生成图片") || alt.startsWith("Generated image")) return false;
+    if ((width >= 200 && height >= 200) || src.length > 10000 || alt.startsWith("已生成图片") || alt.startsWith("Generated image") || im.closest("[data-message-image]")) return false;
   }
   return true;
 }
@@ -148,7 +149,8 @@ _MARK_EXISTING_REPLY_MEDIA_JS = r"""
     const src = im.currentSrc || im.src || "";
     const alt = im.alt || "";
     const isGenerated = /backend-api\/(estuary|files)\/|oaiusercontent/.test(src) ||
-      (src.startsWith("blob:") && (alt.startsWith("已生成图片") || alt.startsWith("Generated image") || !!im.closest("[class*='imagegen'], [class*='ImageTransparencyBackdrop']")));
+      (src.startsWith("blob:") && (alt.startsWith("已生成图片") || alt.startsWith("Generated image") || !!im.closest("[class*='imagegen'], [class*='ImageTransparencyBackdrop']"))) ||
+      (src.startsWith("data:image/") && (!!im.closest("[data-message-image], [data-markdown-text-style='assistant-message']") || alt.startsWith("已生成图片") || alt.startsWith("Generated image")));
     if (isGenerated) {
       im.setAttribute("data-webdock-existing-image", "1");
     }

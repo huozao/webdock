@@ -196,3 +196,47 @@ def test_imagegen_pending_false_for_blob_rendered(rich_markdown_page):
 
     assert rich_markdown_page.evaluate(_IMAGEGEN_PENDING_JS) is False
 
+
+def test_collects_data_url_generated_image(rich_markdown_page):
+    # 2026-10: In existing conversation resend flows, ChatGPT renders data:image/png;base64,... inside [data-message-image]
+    rich_markdown_page.set_content(
+        """
+        <div data-testid="conversation-turn-1">
+          <div data-message-author-role="user">重新发下图</div>
+        </div>
+        <div data-testid="conversation-turn-2">
+          <div data-markdown-text-style="assistant-message">
+            <button type="button" data-message-image="original">
+              <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+                   alt="卡通可爱漫画" width="500" height="625">
+            </button>
+          </div>
+        </div>
+        """
+    )
+
+    srcs = rich_markdown_page.evaluate(_GENERATED_IMG_SRCS_JS, 200)
+
+    assert len(srcs) == 1 and srcs[0].startswith("data:image/png;base64,"), srcs
+
+
+def test_imagegen_pending_false_for_data_url_rendered(rich_markdown_page):
+    rich_markdown_page.set_content(
+        """
+        <div data-testid="conversation-turn-1">
+          <div data-message-author-role="user">重新发下图</div>
+        </div>
+        <div data-testid="conversation-turn-2">
+          <div class="group/imagegen-image">
+            <button type="button" data-message-image="original">
+              <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+                   alt="卡通可爱漫画" width="500" height="625">
+            </button>
+          </div>
+        </div>
+        """
+    )
+
+    assert rich_markdown_page.evaluate(_IMAGEGEN_PENDING_JS) is False
+
+

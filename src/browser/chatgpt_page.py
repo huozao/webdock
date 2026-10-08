@@ -707,10 +707,13 @@ class ChatGPTPage:
         tokens: list[str] = []
         seen_digests: set[str] = set()
         for src in srcs:
-            try:
-                b64 = await self.page.evaluate(_FETCH_IMG_B64_JS, src)
-            except Exception:
-                continue
+            if src.startswith("data:image/") and ";base64," in src:
+                b64 = src.split(";base64,", 1)[1]
+            else:
+                try:
+                    b64 = await self.page.evaluate(_FETCH_IMG_B64_JS, src)
+                except Exception:
+                    continue
             if not b64:
                 continue
             try:

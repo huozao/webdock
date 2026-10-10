@@ -119,3 +119,28 @@ Get-PnpDevice -Class Mouse
 作为已确认根因或必需修复。若要尝试注册表修复，先导出当前键并保留回滚文件；
 不要为此重启 WebDock 容器。确认方案仍是检查/重新插拔物理鼠标或接收器，再重新
 连接桌面验证光标。
+
+## Windows 桌面 TightVNC 托盘图标静默治理（无托盘图标自启）
+
+适用入口：`webdock2` / `webdock3` Windows 宿主机（Windows TightVNC :5900）。
+
+2026-10-10 治理诉求与方案确认：TightVNC Server MSI 安装后，默认会在 `HKLM\Software\Microsoft\Windows\CurrentVersion\Run`
+注册 `tvncontrol = "C:\Program Files\TightVNC\tvnserver.exe" -controlservice -slave`。当用户登录 Windows 时，该进程会在
+当前桌面 Session 1 的任务栏通知区域/折叠抽屉中生成一个 "V" 字托盘图标。
+
+**原理与无害性**：
+1. 真正的远程控制是由 Windows 系统服务 `tvnserver`（运行在 Session 0，服务命令行 `"C:\Program Files\TightVNC\tvnserver.exe" -service`）
+   承载，负责监听 TCP 5900 端口并处理远程桌面会话，完全独立于桌面托盘进程。
+2. 托盘图标仅为一个管理与状态外壳。将其自启动项移除后，电脑重启依然完全保持静默自启，不会在桌面弹出任何图标，
+   且 5900 端口服务不受任何影响。
+3. 新装机（如 webdock3）已纳入 `apply-windows-host.ps1` 宿主层幂等对账，装机自动移除；存量机手动对账可直接运行：
+
+```powershell
+# 移除开机托盘自启动
+Remove-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'tvncontrol' -ErrorAction SilentlyContinue
+# 结束当前桌面托盘辅助进程（不影响 Session 0 后台核心服务）
+Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'tvnserver.exe' -and $_.CommandLine -like '*controlservice -slave*' } | Stop-Process -Force
+```
+
+若未来临时需要修改 TightVNC 设置参数，在管理员终端手动执行一次 `"C:\Program Files\TightVNC\tvnserver.exe" -controlservice`
+即可临时呼出图形设置界面，配置完成后关闭即可，不会破坏开机静默状态。

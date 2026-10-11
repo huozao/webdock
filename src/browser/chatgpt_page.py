@@ -117,7 +117,7 @@ _IMAGE_SETTLE_POLL_SECONDS = 0.5
 # the pill sitting right there, parsed correctly. So when the answer talks about
 # a file but the scan came up empty, keep looking for a bounded while. Costs
 # nothing on a plain-text reply: the intent check gates the wait.
-DOWNLOAD_TARGET_RESCAN_SECONDS = 12.0
+DOWNLOAD_TARGET_RESCAN_SECONDS = 4.0
 _DOWNLOAD_TARGET_POLL_SECONDS = 0.5
 
 # A reply that is nothing but a filename is the signature of an unrecognised file
@@ -281,6 +281,61 @@ class ChatGPTPage:
             if any(label in current for label in labels):
                 return
             await hover_and_click(self.page, button)
+
+            # ChatGPT 2026-10: Reasoning Effort Slider & Model selection
+            slider_selector = "[data-reasoning-slider='true'], [aria-label='Power'], [role='slider']"
+            slider = self.page.locator(slider_selector).first
+            has_slider = False
+            try:
+                if hasattr(slider, "count") and await slider.count() > 0:
+                    has_slider = True
+            except Exception:
+                has_slider = False
+
+            if has_slider:
+                # 1. 优先确保选择最新模型（列表首个 radio，如 GPT-6）
+                try:
+                    models = self.page.locator("[role='menuitemradio']")
+                    if hasattr(models, "count") and await models.count() > 0:
+                        first_model = models.first
+                        if hasattr(first_model, "get_attribute"):
+                            is_checked = await first_model.get_attribute("aria-checked")
+                            if is_checked != "true":
+                                try:
+                                    if hasattr(first_model, "hover"):
+                                        await first_model.hover()
+                                except Exception:
+                                    pass
+                                await first_model.click()
+                except Exception as exc:
+                    log.debug("ensure latest model selection skipped: %s", exc)
+
+                # 2. 调节推理滑块至目标强度
+                try:
+                    if hasattr(slider, "focus"):
+                        await slider.focus()
+                    norm_target = (target or "").strip().lower()
+                    if norm_target in ("advanced", "high"):
+                        await self.page.keyboard.press("ArrowRight")
+                        await asyncio.sleep(0.05)
+                        await self.page.keyboard.press("ArrowRight")
+                    elif norm_target in ("fast", "instant", "low"):
+                        await self.page.keyboard.press("ArrowLeft")
+                        await asyncio.sleep(0.05)
+                        await self.page.keyboard.press("ArrowLeft")
+                    elif norm_target in ("balanced", "medium", "auto"):
+                        await self.page.keyboard.press("ArrowLeft")
+                        await asyncio.sleep(0.05)
+                        await self.page.keyboard.press("ArrowRight")
+                except Exception as exc:
+                    log.warning("slider adjustment failed: %s", exc)
+
+                await self.page.keyboard.press("Escape")
+                confirmed = await self.page.locator(button).first.inner_text(timeout=1500)
+                if any(label in (confirmed or "") for label in labels):
+                    return
+                log.info("slider adjusted, button shows %r (target %s)", confirmed, target)
+
             candidates = [
                 f"{base}:has-text('{label}')"
                 for label in labels
@@ -288,8 +343,9 @@ class ChatGPTPage:
             ]
             item = await find_first(self.page, candidates, visible=True, timeout_ms=300)
             if not item:
-                await self.page.keyboard.press("Escape")
-                log.warning("mode_switch_failed stage=menu target=%s", target)
+                if not has_slider:
+                    await self.page.keyboard.press("Escape")
+                    log.warning("mode_switch_failed stage=menu target=%s", target)
                 return
             await hover_and_click(self.page, item)
             confirmed = await self.page.locator(button).first.inner_text(timeout=1500)
@@ -374,8 +430,7 @@ class ChatGPTPage:
                     "Cannot find ChatGPT input box. Open noVNC to inspect the page.",
                 )
             marks.append(("input", time.monotonic()))
-            if mode:
-                await self.ensure_mode(mode)
+            await self.ensure_mode(mode or "advanced")
             marks.append(("mode", time.monotonic()))
             previous_assistant_count = await assistant_message_count(self.page)
             previous_assistant_text = await rich_assistant_text(self.page)
@@ -637,7 +692,7 @@ class ChatGPTPage:
         try:
             assistant = self.page.locator(
                 "[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer']), "
-                "[data-virtualized-turn-content], [data-turn-key]"
+                "[data-virtualized-turn-content], [data-turn-key], [data-talvt-turn-state]"
             ).last
         except Exception:
             return None
@@ -648,6 +703,8 @@ class ChatGPTPage:
             if captured < MAX_WIDGETS_PER_REPLY:
                 try:
                     target = assistant.locator(f"[data-webdock-slot='{slot}']").first
+                    if await target.count() == 0:
+                        target = self.page.locator(f"[data-webdock-slot='{slot}']").first
                     if await target.count() > 0:
                         prefer_clone = (await target.evaluate("(n) => n.tagName")) == "TABLE"
                         await _wait_widget_rendered(target)

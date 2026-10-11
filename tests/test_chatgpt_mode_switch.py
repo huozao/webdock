@@ -29,6 +29,15 @@ class FakeLocator:
     async def inner_text(self, timeout=None):
         return self._page.texts.get(self._selector, "")
 
+    async def count(self):
+        return 1 if self._selector in self._page.present else 0
+
+    async def focus(self):
+        self._page.focused.append(self._selector)
+
+    async def get_attribute(self, name):
+        return self._page.attrs.get((self._selector, name), "")
+
 
 class FakeKeyboard:
     def __init__(self, page):
@@ -39,11 +48,13 @@ class FakeKeyboard:
 
 
 class FakePage:
-    def __init__(self, present, texts, on_click=None):
+    def __init__(self, present, texts, on_click=None, attrs=None):
         self.present = set(present)
         self.texts = dict(texts)
+        self.attrs = dict(attrs or {})
         self.clicks = []
         self.pressed = []
+        self.focused = []
         self.waits = []
         self.wait_timeouts = {}
         self.keyboard = FakeKeyboard(self)
@@ -172,3 +183,51 @@ def test_ensure_mode_gives_a_slow_page_room_to_render_the_pill():
 
     assert page.waits == [ANY_BUTTON]
     assert page.wait_timeouts[ANY_BUTTON] >= 6000
+
+
+def test_ensure_mode_adjusts_reasoning_slider_to_high():
+    slider_sel = "[data-reasoning-slider='true'], [aria-label='Power'], [role='slider']"
+
+    def on_click(selector):
+        if selector == ANY_BUTTON:
+            # 模拟按了 ArrowRight 并 Escape 之后文本变为 High
+            pass
+
+    page = FakePage(
+        present={ANY_BUTTON, slider_sel},
+        texts={ANY_BUTTON: "Medium"},
+        on_click=on_click,
+    )
+
+    # 模拟在 Escape 发生后文本更新为 High
+    orig_press = page.keyboard.press
+
+    async def mock_press(key):
+        await orig_press(key)
+        if key == "Escape":
+            page.texts[ANY_BUTTON] = "High"
+
+    page.keyboard.press = mock_press
+
+    asyncio.run(ChatGPTPage(page).ensure_mode("advanced"))
+
+    assert ANY_BUTTON in page.clicks
+    assert slider_sel in page.focused
+    assert page.pressed.count("ArrowRight") >= 2
+    assert "Escape" in page.pressed
+
+
+def test_ensure_mode_selects_latest_model_when_unchecked():
+    slider_sel = "[data-reasoning-slider='true'], [aria-label='Power'], [role='slider']"
+    model_sel = "[role='menuitemradio']"
+
+    page = FakePage(
+        present={ANY_BUTTON, slider_sel, model_sel},
+        texts={ANY_BUTTON: "Medium"},
+        attrs={(model_sel, "aria-checked"): "false"},
+    )
+
+    asyncio.run(ChatGPTPage(page).ensure_mode("advanced"))
+
+    assert model_sel in page.clicks
+

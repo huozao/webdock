@@ -20,21 +20,18 @@
 
 ## 关键机制（改代码前必知）
 
-- **完成判定权威信号 = stop 按钮**（`data-testid='stop-button'`，选择器已收窄）。按钮在 = 没结束，绝不提前返回；别改回以 `.result-streaming` 为准，否则"只收开场白"截断 bug 回归。
-- 回复取全部 `.markdown` 块拼接（开场白和正文可能是同 turn 两个独立块）。
-- detector 锚 `conversation-turn`；CDP 连接用 patchright（非原版 playwright）。
-- **不要把 `conversation-turn-location-footer` 当成最新回答**（2026-09-05）。真实
-  webdock2 DOM 在 assistant 的 `WidgetRenderer` 之后还会追加这个位置确认 footer；
-  旧的 `[data-testid^='conversation-turn']`.last 因此读到 footer，widget 回复被判成
-  `widget=0`，最终 `RESPONSE_TIMEOUT`，飞书看不到回程。所有“最后一个 turn”选择器都
-  必须使用 `[data-testid^='conversation-turn-']:not([data-testid='conversation-turn-location-footer'])`；
-  回归断言见 `tests/test_ordered_feishu_markdown.py` 的真实 Chromium fixture。
-- **ChatGPT 2026-10 前端 DOM 改版与回复识别（2026-10-07 定案已修）**：
+- **完成判定权威信号 = composer 内的 stop 按钮**（2026-10-11 定案）。
+  - **新版选择器收窄至输入区**：新版移除了所有 `data-testid`（包括 `data-testid='stop-button'`）。停止按钮位于输入框内部（`form button[aria-label*='Stop' i]`、`[data-chatgpt-composer] button[aria-label*='Stop' i]`、`button[aria-label*='停止' i]`）。
+  - **根绝 20 字开场白截断（Early Termination）**：高推理模式（High）或复杂思考下，模型打完前导句常停顿 >5s 进行深度思考或生成大表格。如果 Stop 按钮未命中，系统误判为静默完成，会把开场白当最终答案返回。将 Stop 按钮限定在 composer 内部，既 100% 捕获生成中状态，又绝不误触消息卡片底部的“停止朗读”。
+- **ChatGPT 2026-10 前端 DOM 改版与回复识别（2026-10-11 最终定案已修）**：
   - **DOM 架构重构**：`conversation-turn-*`、`[data-message-author-role='assistant']`、`.markdown`、`data-testid="copy-turn-action-button"` 在官方新版页面完全消失。
-  - **新层级结构**：每个 turn 为 `<div data-virtualized-turn-content data-turn-key="...">`；助手消息为 `<div data-markdown-text-style="assistant-message" class="MarkdownRoot-...">`（包含 `data-conversation-role="assistant"`）；复制按钮为 `button[aria-label="Copy"]`。
+  - **新层级结构**：每个 turn 为 `<div data-virtualized-turn-content data-turn-key="...">` 或 `<div data-talvt-turn-state="complete">`；助手消息为 `<div data-markdown-text-style="assistant-message" class="MarkdownRoot-...">`（包含 `data-conversation-role="assistant"`）；复制按钮为 `button[aria-label="Copy"]` 或 `button[aria-label="Copy message"]`。
+  - **新版代码块（DIL CodeBlock）**：新版代码块封装在 `[data-markdown-copy="code-block"]` 或 `div.CodeBlock-*` 内，顶部带 `[data-markdown-copy="exclude"]` 语言标头与复制按钮；部分代码块无 `<pre>` 直接使用 `<code>`。提取器通过 `isCodeBlockNode` 与 `extractCodeBlock` 提取标准 GFM 围栏并识别语言标签，排除 exclude 干扰。
+  - **富可视化组件（DIL Grid/Box 架构图）**：新版可视化架构图卡片采用 `[data-d-component="grid"]` 与边框容器。将其纳入插槽 `@@WEBDOCK_SLOT_k@@`，原位触发高保真现场截图，确保飞书端图文混排呈现。
   - **空态判据**：用户已发送提问但助手尚未输出时的判定为：`turn.querySelector("[data-message-author-role='user'], [data-user-message-bubble]") && !turn.querySelector("[data-message-author-role='assistant'], [data-conversation-role='assistant'], [data-markdown-text-style='assistant-message']")`。
   - **输入框与发送按钮**：输入框为 `div.ProseMirror[contenteditable="true"]`（id `prompt-textarea` 已移除）；发送按钮为 `button[aria-label*="Send"]`（`data-testid="send-button"` 已移除）。
-  - **推理强度与模型选择**：旧版“极速/均衡/高级”独立菜单废弃，新版为 `button[aria-label="Select ChatGPT model"]` 内嵌 `data-reasoning-slider="true"`（Reasoning Effort Slider，支持 ArrowLeft/Right 调整 0~2 档，当前展示为 `High`）。会话模式对齐 `advanced`（对应 `High`），进入发送阶段后毫秒级匹配直接跳过，不再重复弹开菜单。
+  - **推理强度与默认模式**：新版使用 `button[aria-label="Select ChatGPT model"]` 内嵌 `data-reasoning-slider="true"`（Reasoning Effort Slider，支持 ArrowLeft/Right 调整 0~2 档，当前展示为 `High`）。默认采用最新旗舰模型与最高推理模式（`advanced`），进入发送阶段后毫秒级匹配直接跳过，不再重复弹开菜单。
+  - **下载意图正则收窄**：`mentions_download_intent` 正则收窄为明确的导出/下载行为意图，彻底排除技术讨论词（“项目文件”、“表格对比”）导致的 12s 空等。
   - **`find_first` Fast-path**：加入 DOM 现存探测 Fast-path，只要候选之一已经在当前 DOM 中呈现并可见，1ms 内直接返回，消除前置失效选择器在 `wait_for_selector` 中按 timeout_ms 串行等待累加（曾导致 `send_stages` 出现 22.5s 延迟）。
 - 长思考超时链：cloud-provider idle watchdog 是 B 根因，`baseUrl→172.17.0.1` 判 local 禁 watchdog。
 - 登录态在 `browser_data/` 卷；重建容器登录态可存活（卷保住，无需重登），但**改浏览器启动逻辑的重建必须先问用户**。

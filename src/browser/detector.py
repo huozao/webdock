@@ -381,7 +381,7 @@ _TURN_ACTIONS_READY_JS = """
   const turn = turns[turns.length - 1];
   if (!turn) return true;
   if (turn.querySelector("[data-message-author-role='user'], [data-user-message-bubble]") && !turn.querySelector("[data-message-author-role='assistant'], [data-conversation-role='assistant'], [data-markdown-text-style='assistant-message']")) return true;
-  return !!turn.querySelector("button[data-testid='copy-turn-action-button'], button[aria-label='Copy'], button[aria-label*='复制']");
+  return !!turn.querySelector("button[data-testid='copy-turn-action-button'], button[aria-label='Copy'], button[aria-label='Copy message'], button[aria-label*='Copy' i], button[aria-label*='复制']");
 }
 """
 
@@ -458,6 +458,7 @@ _RICH_TEXT_JS = r"""
       const tag = child.tagName;
       if (SKIP.has(tag)) continue;
       if (child.getAttribute && child.getAttribute("role") === "button") continue;
+      if (child.getAttribute && child.getAttribute("data-markdown-copy") === "exclude") continue;
       // Skip ChatGPT widget containers (clock/weather/etc) - they are captured
       // as screenshots separately; their text is noise (e.g. clock dial digits).
       const cls = typeof child.className === "string" ? child.className : "";
@@ -498,6 +499,7 @@ _RICH_MARKDOWN_JS = r"""
   const skip = (n) => {
     if (SKIP.has(n.tagName)) return true;
     if (n.getAttribute && n.getAttribute("role") === "button") return true;
+    if (n.getAttribute && n.getAttribute("data-markdown-copy") === "exclude") return true;
     const cls = typeof n.className === "string" ? n.className : "";
     if (cls.indexOf("WidgetRenderer") >= 0 || cls.indexOf("not-markdown") >= 0) return true;
     if (n.getAttribute && n.getAttribute("data-w-component")) return true;
@@ -562,6 +564,17 @@ _RICH_MARKDOWN_JS = r"""
     rows.slice(1).forEach((r) => lines.push("| " + fill(r).join(" | ") + " |"));
     return lines.join("\n");
   };
+  const extractListItemText = (node) => {
+    let t = inline(node).trim();
+    if (t) return t;
+    const chunks = [];
+    for (const ch of node.children) {
+      if (ch.tagName === "UL" || ch.tagName === "OL") continue;
+      const sub = extractListItemText(ch);
+      if (sub) chunks.push(sub);
+    }
+    return chunks.join(" ");
+  };
   const list = (node, ordered, depth) => {
     let out = "";
     let i = ordered ? (parseInt(node.getAttribute("start") || "1", 10) || 1) : 1;
@@ -570,16 +583,7 @@ _RICH_MARKDOWN_JS = r"""
       const cb = li.querySelector('input[type="checkbox"]');
       let marker = ordered ? (i++ + ". ") : "- ";
       if (cb) marker = "- [" + (cb.checked ? "x" : " ") + "] ";
-      let text = inline(li).trim();
-      if (!text) {
-        const chunks = [];
-        for (const ch of li.children) {
-          if (ch.tagName === "UL" || ch.tagName === "OL") continue;
-          const t = inline(ch).trim();
-          if (t) chunks.push(t);
-        }
-        text = chunks.join(" ");
-      }
+      let text = extractListItemText(li);
       out += "  ".repeat(depth) + marker + text + "\n";
       const nested = [];
       for (const ch of li.children) {
@@ -607,12 +611,29 @@ _RICH_MARKDOWN_JS = r"""
       if (tag === "P") { const t = inline(c).trim(); if (t) out += t + "\n\n"; continue; }
       if (tag === "UL") { out += list(c, false, 0) + "\n"; continue; }
       if (tag === "OL") { out += list(c, true, 0) + "\n"; continue; }
-      if (tag === "PRE") {
-        const code = c.querySelector("code");
-        const cls = code && typeof code.className === "string" ? code.className : "";
-        const m = cls.match(/language-([\w+#.-]+)/);
-        const txt = ((code || c).innerText || (code || c).textContent || "").replace(/\n+$/, "");
-        out += "```" + (m ? m[1] : "") + "\n" + txt + "\n```\n\n"; continue;
+      if (tag === "PRE" || (c.getAttribute && c.getAttribute("data-markdown-copy") === "code-block") || (typeof c.className === "string" && c.className.indexOf("CodeBlock") >= 0)) {
+        const cb = (c.getAttribute && c.getAttribute("data-markdown-copy") === "code-block") ? c : (c.querySelector("[data-markdown-copy='code-block']") || c);
+        let lang = "";
+        const headerLang = cb.querySelector("[data-markdown-copy='exclude'] div.truncate, [data-markdown-copy='exclude'] .truncate");
+        if (headerLang) {
+          const lt = (headerLang.innerText || "").trim().toLowerCase();
+          if (lt && lt !== "plain text" && lt !== "text") lang = lt;
+        }
+        const codeEl = cb.querySelector("code, pre");
+        if (!lang && codeEl) {
+          const cls = typeof codeEl.className === "string" ? codeEl.className : "";
+          const m = cls.match(/language-([\w+#.-]+)/);
+          if (m) lang = m[1];
+        }
+        const innerCode = cb.querySelector("code");
+        let txt = "";
+        if (innerCode) {
+          txt = (innerCode.innerText || "").replace(/\n+$/, "");
+        } else {
+          const innerPre = cb.querySelector("pre");
+          txt = ((innerPre || cb).innerText || "").replace(/\n+$/, "");
+        }
+        out += "```" + lang + "\n" + txt + "\n```\n\n"; continue;
       }
       if (tag === "BLOCKQUOTE") { out += block(c).trim().split("\n").map((l) => "> " + l).join("\n") + "\n\n"; continue; }
       if (tag === "TABLE") { out += table(c) + "\n\n"; continue; }
@@ -705,6 +726,7 @@ _ORDERED_MARKDOWN_JS = r"""
   const skip = (n) => {
     if (SKIP.has(n.tagName)) return true;
     if (n.getAttribute && n.getAttribute("role") === "button") return true;
+    if (n.getAttribute && n.getAttribute("data-markdown-copy") === "exclude") return true;
     const cls = typeof n.className === "string" ? n.className : "";
     if (cls.indexOf("WidgetRenderer") >= 0 || cls.indexOf("not-markdown") >= 0) return true;
     if (n.getAttribute && n.getAttribute("data-w-component")) return true;
@@ -738,6 +760,17 @@ _ORDERED_MARKDOWN_JS = r"""
     }
     return out;
   };
+  const extractListItemText = (node) => {
+    let t = inline(node).trim();
+    if (t) return t;
+    const chunks = [];
+    for (const ch of node.children) {
+      if (ch.tagName === "UL" || ch.tagName === "OL") continue;
+      const sub = extractListItemText(ch);
+      if (sub) chunks.push(sub);
+    }
+    return chunks.join(" ");
+  };
   const list = (node, ordered, depth) => {
     let out = "";
     let i = ordered ? (parseInt(node.getAttribute("start") || "1", 10) || 1) : 1;
@@ -746,18 +779,7 @@ _ORDERED_MARKDOWN_JS = r"""
       const cb = li.querySelector('input[type="checkbox"]');
       let marker = ordered ? (i++ + ". ") : "- ";
       if (cb) marker = "- [" + (cb.checked ? "x" : " ") + "] ";
-      let text = inline(li).trim();
-      if (!text) {
-        // Loose GFM lists render as <li><p>…</p></li>; inline() skips block
-        // children, so pull the text out of each non-list child block instead.
-        const chunks = [];
-        for (const ch of li.children) {
-          if (ch.tagName === "UL" || ch.tagName === "OL") continue;
-          const t = inline(ch).trim();
-          if (t) chunks.push(t);
-        }
-        text = chunks.join(" ");
-      }
+      let text = extractListItemText(li);
       out += "  ".repeat(depth) + marker + text + "\n";
       const nested = [];
       for (const ch of li.children) {
@@ -771,19 +793,46 @@ _ORDERED_MARKDOWN_JS = r"""
     }
     return out;
   };
+  const isCodeBlockNode = (c) => {
+    if (c.tagName === "PRE") return true;
+    if (c.getAttribute && c.getAttribute("data-markdown-copy") === "code-block") return true;
+    if (typeof c.className === "string" && c.className.indexOf("CodeBlock") >= 0) return true;
+    if (c.querySelector && (c.querySelector("[data-markdown-copy='code-block'], [class*='CodeBlock'], pre") && !c.querySelector("table"))) return true;
+    return false;
+  };
+  const extractCodeBlock = (node) => {
+    const cb = (node.getAttribute && node.getAttribute("data-markdown-copy") === "code-block")
+      ? node
+      : (node.querySelector && node.querySelector("[data-markdown-copy='code-block']")) || node;
+    let lang = "";
+    const headerLang = cb.querySelector("[data-markdown-copy='exclude'] div.truncate, [data-markdown-copy='exclude'] .truncate");
+    if (headerLang) {
+      const lt = (headerLang.innerText || "").trim().toLowerCase();
+      if (lt && lt !== "plain text" && lt !== "text") lang = lt;
+    }
+    const codeEl = cb.querySelector("code, pre");
+    if (!lang && codeEl) {
+      const cls = typeof codeEl.className === "string" ? codeEl.className : "";
+      const m = cls.match(/language-([\w+#.-]+)/);
+      if (m) lang = m[1];
+    }
+    const innerCode = cb.querySelector("code");
+    let txt = "";
+    if (innerCode) {
+      txt = (innerCode.innerText || "").replace(/\n+$/, "");
+    } else {
+      const innerPre = cb.querySelector("pre");
+      txt = ((innerPre || cb).innerText || "").replace(/\n+$/, "");
+    }
+    return "```" + lang + "\n" + txt + "\n```";
+  };
   const emitBlock = (c) => {
+    if (isCodeBlockNode(c)) return extractCodeBlock(c);
     const tag = c.tagName;
     if (/^H[1-6]$/.test(tag)) return "#".repeat(+tag[1]) + " " + inline(c).trim();
     if (tag === "P") return inline(c).trim();
     if (tag === "UL") return list(c, false, 0).replace(/\n+$/, "");
     if (tag === "OL") return list(c, true, 0).replace(/\n+$/, "");
-    if (tag === "PRE") {
-      const code = c.querySelector("code");
-      const cls = code && typeof code.className === "string" ? code.className : "";
-      const m = cls.match(/language-([\w+#.-]+)/);
-      const txt = ((code || c).innerText || "").replace(/\n+$/, "");
-      return "```" + (m ? m[1] : "") + "\n" + txt + "\n```";
-    }
     if (tag === "BLOCKQUOTE") {
       // Quotes render as <blockquote><p>…</p></blockquote>; inline() skips block
       // children, so recurse into child blocks (same family as the loose-list fix).
@@ -797,6 +846,15 @@ _ORDERED_MARKDOWN_JS = r"""
       return inner.split("\n").map((l) => "> " + l).join("\n");
     }
     if (tag === "HR") return "---";
+    if (tag === "DIV" || tag === "SECTION" || tag === "ARTICLE") {
+      const chunks = [];
+      for (const ch of c.children) {
+        if (skip(ch)) continue;
+        const t = emitBlock(ch);
+        if (t && t.trim()) chunks.push(t);
+      }
+      if (chunks.length) return chunks.join("\n\n");
+    }
     return inline(c).trim();
   };
   const isTargetTable = (n) => n.tagName === "TABLE" && !n.closest("[class*='WidgetRenderer']");
@@ -804,18 +862,29 @@ _ORDERED_MARKDOWN_JS = r"""
     const cls = typeof n.className === "string" ? n.className : "";
     return cls.indexOf("WidgetRenderer") >= 0;
   };
-  const allTargets = [...el.querySelectorAll("[class*='WidgetRenderer'], table")].filter((n) => isWidget(n) || isTargetTable(n));
+  const isVisualCard = (n) => {
+    if (n.getAttribute && n.getAttribute("data-d-component") === "grid") return true;
+    if (n.hasAttribute && n.hasAttribute("data-d-has-border") && n.querySelector && n.querySelector("[data-d-component='grid']")) return true;
+    return false;
+  };
+  const allTargets = [...el.querySelectorAll("[class*='WidgetRenderer'], table, [data-d-has-border]:has([data-d-component='grid']), [data-d-component='grid']")].filter((n) => isWidget(n) || isTargetTable(n) || isVisualCard(n));
   const targets = allTargets.filter((t) => !allTargets.some((o) => o !== t && o.contains(t)));
   targets.forEach((t, k) => t.setAttribute("data-webdock-slot", String(k)));
   const units = [];
   targets.forEach((t) => units.push({ type: "img", el: t }));
-  el.querySelectorAll(".markdown, [data-markdown-text-style='assistant-message'], [class*='MarkdownRoot']").forEach((root) => {
-    for (const c of root.children) {
+  const collectMdUnits = (node) => {
+    for (const c of node.children) {
       if (c.nodeType !== 1 || skip(c)) continue;
-      if (c.hasAttribute("data-webdock-slot")) continue;       // a target table itself
-      if (c.querySelector("[data-webdock-slot]")) continue;    // wraps a target -> the target unit covers it
-      units.push({ type: "md", el: c });
+      if (c.hasAttribute("data-webdock-slot")) continue;
+      if (c.querySelector("[data-webdock-slot]")) {
+        collectMdUnits(c);
+      } else {
+        units.push({ type: "md", el: c });
+      }
     }
+  };
+  el.querySelectorAll(".markdown, [data-markdown-text-style='assistant-message'], [class*='MarkdownRoot']").forEach((root) => {
+    collectMdUnits(root);
   });
   const key = (u) => { const r = u.el.getBoundingClientRect(); return [Math.round(r.top), Math.round(r.left)]; };
   units.sort((a, b) => { const A = key(a), B = key(b); return (A[0] - B[0]) || (A[1] - B[1]); });

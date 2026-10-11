@@ -171,3 +171,120 @@ def test_virtualized_turn_user_only_returns_empty(rich_markdown_page) -> None:
     assert rich_markdown_page.evaluate(_RICH_TEXT_JS).strip() == ""
     assert rich_markdown_page.evaluate(_RICH_MARKDOWN_JS).strip() == ""
 
+
+def test_wrapper_containing_text_and_table_preserves_both(rich_markdown_page) -> None:
+    # 2026-10 ChatGPT DOM: a shared outer wrapper (div.my-4) wraps all paragraphs
+    # AND the table. The ordered walk must NOT drop the paragraphs just because
+    # the outer div wraps the table slot.
+    html = """
+    <div data-virtualized-turn-content="true" data-turn-key="test-key-3">
+      <div>
+        <h4 data-conversation-role="assistant">ChatGPT said:</h4>
+        <div data-markdown-text-style="assistant-message" class="MarkdownRoot-rZKhxa">
+          <div class="my-4 first:mt-0 last:mb-0 empty:hidden">
+            <p>这是回答的第一段正文。</p>
+            <table>
+              <thead><tr><th>工具</th><th>用途</th></tr></thead>
+              <tbody><tr><td>Codex</td><td>编程</td></tr></tbody>
+            </table>
+            <p>这是回答的第二段总结。</p>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+    rich_markdown_page.set_content(html)
+    out = rich_markdown_page.evaluate(_ORDERED_MARKDOWN_JS).strip()
+    assert "这是回答的第一段正文。" in out
+    assert "@@WEBDOCK_SLOT_0@@" in out
+    assert "这是回答的第二段总结。" in out
+    # 且 slot 处于正文一与总结之间
+    pos_p1 = out.index("这是回答的第一段正文。")
+    pos_slot = out.index("@@WEBDOCK_SLOT_0@@")
+    pos_p2 = out.index("这是回答的第二段总结。")
+    assert pos_p1 < pos_slot < pos_p2
+
+
+def test_nested_divs_in_list_item_preserves_text(rich_markdown_page) -> None:
+    # 2026-10 ChatGPT DOM: li > div.Content > div.Label > p > span
+    html = """
+    <div data-virtualized-turn-content="true" data-turn-key="test-key-4">
+      <div>
+        <h4 data-conversation-role="assistant">ChatGPT said:</h4>
+        <div data-markdown-text-style="assistant-message" class="MarkdownRoot-rZKhxa">
+          <ol>
+            <li>
+              <div class="Content-OKAHK6">
+                <div class="Label-B5tj_e">
+                  <p><strong>第一项</strong>：详细说明内容。</p>
+                </div>
+              </div>
+            </li>
+          </ol>
+        </div>
+      </div>
+    </div>
+    """
+    rich_markdown_page.set_content(html)
+    out = rich_markdown_page.evaluate(_ORDERED_MARKDOWN_JS).strip()
+    assert "1. **第一项**：详细说明内容。" in out
+
+
+def test_modern_chatgpt_codeblock_extraction(rich_markdown_page) -> None:
+    html = """
+    <div data-virtualized-turn-content="true" data-turn-key="test-key-code">
+      <div>
+        <h4 data-conversation-role="assistant">ChatGPT said:</h4>
+        <div data-markdown-text-style="assistant-message" class="MarkdownRoot-rZKhxa">
+          <p>前置说明：</p>
+          <div>
+            <div class="CodeBlock-zu1QM3">
+              <div data-markdown-copy="code-block" class="Surface-dfq13n">
+                <div data-markdown-copy="exclude" class="StickyActionBar-XvAQxh">
+                  <div class="min-w-0 flex-1 truncate">Bash</div>
+                  <button aria-label="Copy">复制</button>
+                </div>
+                <div class="chatgpt-code-scrollport">
+                  <code><span>shop orders export --type refund</span></code>
+                </div>
+              </div>
+            </div>
+          </div>
+          <p>后置说明。</p>
+        </div>
+      </div>
+    </div>
+    """
+    rich_markdown_page.set_content(html)
+    out = rich_markdown_page.evaluate(_ORDERED_MARKDOWN_JS).strip()
+    assert "前置说明：" in out
+    assert "```bash\nshop orders export --type refund\n```" in out
+    assert "后置说明。" in out
+
+
+def test_modern_chatgpt_dil_grid_component_slot(rich_markdown_page) -> None:
+    html = """
+    <div data-virtualized-turn-content="true" data-turn-key="test-key-grid">
+      <div>
+        <h4 data-conversation-role="assistant">ChatGPT said:</h4>
+        <div data-markdown-text-style="assistant-message" class="MarkdownRoot-rZKhxa">
+          <p>架构介绍如下：</p>
+          <div class="Box-qIMv6G" data-d-component="box" data-d-has-border="">
+            <div class="Grid-CGRmTR" data-d-component="grid">
+              <div data-d-component="grid-item">GUI</div>
+              <div data-d-component="grid-item">CLI</div>
+            </div>
+          </div>
+          <p>总结评价。</p>
+        </div>
+      </div>
+    </div>
+    """
+    rich_markdown_page.set_content(html)
+    out = rich_markdown_page.evaluate(_ORDERED_MARKDOWN_JS).strip()
+    assert "架构介绍如下：" in out
+    assert "@@WEBDOCK_SLOT_0@@" in out
+    assert "总结评价。" in out
+
+
+

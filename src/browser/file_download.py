@@ -888,6 +888,16 @@ _DOWNLOAD_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Text-level download intention in replies: must have clear action/intent (下载/导出/
+# 生成了...文件), avoiding false positives on common words like "阅读项目文件" or "表格对比".
+_REPLY_DOWNLOAD_MENTION_RE = re.compile(
+    r"下载|下載|导出|導出|另存|保存|download|export"
+    r"|\b[\w-]+\.(?:pdf|word|excel|csv|pptx?|docx?|xlsx?|txt|zip|tar|gz)\b"
+    r"|(?:已|为你|为您|已经)?(?:生成了?|导出了?).*(?:文档|文檔|表格|文件|附件|报告|数据表)"
+    r"|(?:文档|文檔|表格|文件|附件|报告).*(?:已生成|请查收|供下载|下载链接|点击下载)",
+    re.IGNORECASE,
+)
+
 
 def _is_download_intent(label: str | None) -> bool:
     return bool(label and _DOWNLOAD_INTENT_RE.search(label))
@@ -896,9 +906,9 @@ def _is_download_intent(label: str | None) -> bool:
 def mentions_download_intent(text: str | None) -> bool:
     """Does this reply talk about a file the reader is meant to download?
 
-    Same vocabulary as the pill matcher — used to decide whether it is worth
-    waiting for a pill that has not rendered yet."""
-    return _is_download_intent(text)
+    Uses _REPLY_DOWNLOAD_MENTION_RE to ensure active download intent rather than
+    coincidental technical terms like '文件' or '表格'."""
+    return bool(text and _REPLY_DOWNLOAD_MENTION_RE.search(text))
 
 
 def _safe_filename(value: str | None) -> str | None:

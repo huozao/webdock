@@ -64,14 +64,24 @@ ASSISTANT_MESSAGE = [
 COPY_BUTTON = [
     "button[data-testid='copy-turn-action-button']",
     "button[aria-label='Copy']",
+    "button[aria-label='Copy message']",
+    "button[aria-label*='Copy' i]",
     "button[aria-label*='复制']",
 ]
 
-# Only the real "stop generating" button. The previous broad aria-label*='Stop'
-# / '停止' matched unrelated buttons that appear AFTER generation finishes (e.g.
-# "停止朗读" / read-aloud), which made the completion check hang until timeout.
+# Only the real "stop generating" button. Scoped strictly to the composer/form
+# so it never matches post-generation buttons elsewhere on the page (e.g.
+# "停止朗读" / read-aloud).
+# ChatGPT (2026-10) dropped data-testid attributes; the stop button lives in
+# the composer form with aria-label="Stop" / "停止".
 STOP_BUTTON = [
+    "form button[aria-label*='Stop' i]",
+    "form button[aria-label*='停止' i]",
+    "[data-chatgpt-composer] button[aria-label*='Stop' i]",
+    "[data-chatgpt-composer] button[aria-label*='停止' i]",
     "button[data-testid='stop-button']",
+    "button[aria-label='Stop streaming']",
+    "button[aria-label='Stop generating']",
 ]
 
 # Present only while a reply is actively streaming. Primary "still generating"

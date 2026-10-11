@@ -722,3 +722,19 @@ def test_both_fetch_routes_failing_names_both_in_the_log(monkeypatch, caplog):
     assert file is None
     failure = next(r.getMessage() for r in caplog.records if "preview image capture failed" in r.message)
     assert "TypeError" in failure and "api:http 403" in failure, "两条路各自怎么挂的都得留在日志里"
+
+
+def test_mentions_download_intent_avoids_plain_technical_terms():
+    from src.browser.file_download import mentions_download_intent
+
+    # 普通提及词，不含下载/生成意图，必须返回 False，避免 12 秒白等
+    assert not mentions_download_intent("阅读项目文件，搜索代码，修改文件，创建文件，运行命令")
+    assert not mentions_download_intent("CLI 是命令行界面，支持查看配置文件和临时表格对比")
+    assert not mentions_download_intent("下面为你解释文件权限与终端操作")
+
+    # 包含明确下载或文件生成意图，返回 True
+    assert mentions_download_intent("已为您生成数据报告，点击下载：data.csv")
+    assert mentions_download_intent("附件文件已生成，请查收")
+    assert mentions_download_intent("你可以点击下方链接下载文档")
+    assert mentions_download_intent("Download the generated PDF report")
+

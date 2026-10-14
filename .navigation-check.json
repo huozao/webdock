@@ -1,13 +1,18 @@
 {
+  "entrypoint_max_bytes": {
+    "AGENTS.md": 6000
+  },
   "documents": [
     "AGENTS.md",
     "README.md",
+    "docs/development.md",
     "docs/runbooks/browser.md",
     "docs/ubuntu-laptop-setup.md",
     "docs/tailscale-network.md",
     "docs/openclaw-integration.md",
     "docs/operations.md",
-    "docs/quota-monitor.md"
+    "docs/quota-monitor.md",
+    "CLAUDE.md"
   ],
   "paths": [
     "src/main.py",
@@ -17,8 +22,21 @@
     "docs/runbooks/browser.md"
   ],
   "python_symbols": [
-    {"file": "src/main.py", "symbol": "create_app"},
-    {"file": "src/main.py", "symbol": "app"}
+    {
+      "file": "src/main.py",
+      "symbol": "create_app"
+    },
+    {
+      "file": "src/main.py",
+      "symbol": "app"
+    }
   ],
-  "optional_link_prefixes": ["../AliECS", "../infra"]
+  "optional_link_prefixes": [
+    "../AliECS",
+    "../../AliECS",
+    "../infra"
+  ],
+  "document_globs": [
+    "docs/runbooks/*.md"
+  ]
 }

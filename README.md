@@ -24,6 +24,7 @@ Couple Memory photos are stored under `HOST_PHOTO_STORAGE_DIR` on the laptop and
 ## Navigation
 
 - Repository rules and login red line: [`AGENTS.md`](AGENTS.md)
+- Local verification and documentation maintenance: [`docs/development.md`](docs/development.md) (works in an independent clone)
 - Browser/login/Cloudflare troubleshooting: [`docs/runbooks/browser.md`](docs/runbooks/browser.md)
 - Device installation and runtime configuration are owned by the `infra` repository.
 

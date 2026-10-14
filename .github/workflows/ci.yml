@@ -25,6 +25,7 @@ jobs:
       - name: Navigation and red-green checks
         run: |
           python scripts/check_navigation.py
+          python -m unittest discover -s tests -p test_guidance_contract.py
           python -m unittest discover -s tests -p "test_*navigation*.py"
           python -m unittest discover -s tests -p test_nav_impact.py
 
